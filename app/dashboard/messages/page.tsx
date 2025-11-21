@@ -6,6 +6,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { MessageSquare, Users } from "lucide-react"
 import Link from "next/link"
+import { cn } from "@/lib/utils"
 
 export default async function MessagesPage({
   searchParams,
@@ -47,7 +48,12 @@ export default async function MessagesPage({
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6 flex-1 min-h-0">
         {/* Sidebar - Group List */}
-        <Card className="md:col-span-1 flex flex-col overflow-hidden border-border/50 bg-card/30 backdrop-blur-sm">
+        <Card
+          className={cn(
+            "md:col-span-1 flex flex-col overflow-hidden border-border/50 bg-card/30 backdrop-blur-sm",
+            selectedGroupId ? "hidden md:flex" : "flex",
+          )}
+        >
           <CardHeader className="pb-4">
             <CardTitle className="text-lg flex items-center gap-2">
               <Users className="h-5 w-5" />
@@ -83,7 +89,7 @@ export default async function MessagesPage({
         </Card>
 
         {/* Main Chat Area */}
-        <div className="md:col-span-3 flex flex-col min-h-0">
+        <div className={cn("md:col-span-3 flex flex-col min-h-0", selectedGroupId ? "flex" : "hidden md:flex")}>
           {selectedGroupId ? (
             <ChatInterface
               key={selectedGroupId} // Force remount on group change

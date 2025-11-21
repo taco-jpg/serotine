@@ -6,6 +6,7 @@ import { ArrowLeft, Shield } from "lucide-react"
 import Link from "next/link"
 import { ProposalList } from "@/components/governance/proposal-list"
 import { CreateGroupProposal } from "@/components/governance/create-group-proposal"
+import { AddMemberForm } from "@/components/chat/add-member-form"
 
 export default async function GroupSettingsPage({
   params,
@@ -24,6 +25,8 @@ export default async function GroupSettingsPage({
   const { data: group } = await supabase.from("chat_groups").select("*").eq("id", groupId).single()
 
   if (!group) redirect("/dashboard/messages")
+
+  const isCreator = group.created_by === user.id
 
   // Fetch group proposals
   const { data: proposals } = await supabase
@@ -84,6 +87,15 @@ export default async function GroupSettingsPage({
           </CardContent>
         </Card>
       </div>
+
+      {isCreator && (
+        <div className="grid gap-6">
+          <h2 className="text-xl font-semibold">Management</h2>
+          <div className="grid gap-6 md:grid-cols-2">
+            <AddMemberForm groupId={groupId} />
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-semibold">Proposals</h2>

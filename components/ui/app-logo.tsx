@@ -8,13 +8,15 @@ export function AppLogo({ className }: { className?: string }) {
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
-        strokeWidth="2"
+        strokeWidth="2.5"
         strokeLinecap="round"
         strokeLinejoin="round"
         className="w-8 h-8 text-primary"
       >
-        <path d="M2 12s3-1 5-3 2-4 5-4 3 2 5 4 5 3 5 3-3 2-5 2-2 3-5 3-3-3-5-3-2 0-5-2z" />
-        <path d="M12 12v.01" />
+        {/* Updated logo to a designed "S" shape */}
+        <path d="M4 11a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v1a4 4 0 0 1-4 4H8a4 4 0 0 0-4 4v1a4 4 0 0 0 4 4h8a4 4 0 0 0 4-4" />
+        <path d="M12 2v2" />
+        <path d="M12 20v2" />
       </svg>
       <span className="font-serif text-xl font-bold tracking-widest text-foreground">SEROTINE</span>
     </div>

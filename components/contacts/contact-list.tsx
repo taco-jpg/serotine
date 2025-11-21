@@ -4,12 +4,15 @@ import { useEffect, useState } from "react"
 import { createClient } from "@/utils/supabase/client"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
-import { Trash2 } from "lucide-react"
+import { Trash2, MessageSquare } from "lucide-react"
 import { toast } from "sonner"
+import { createDirectMessage } from "@/app/actions"
+import { useRouter } from "next/navigation"
 
 interface Contact {
   id: string
   friend: {
+    id: string
     username: string
     full_name: string | null
     avatar_url: string | null
@@ -19,6 +22,7 @@ interface Contact {
 export function ContactList({ userId }: { userId: string }) {
   const [contacts, setContacts] = useState<Contact[]>([])
   const [loading, setLoading] = useState(true)
+  const router = useRouter()
   const supabase = createClient()
 
   useEffect(() => {
@@ -31,7 +35,7 @@ export function ContactList({ userId }: { userId: string }) {
         .from("friends")
         .select(`
           id,
-          friend:profiles!friend_id(username, full_name, avatar_url)
+          friend:profiles!friend_id(id, username, full_name, avatar_url)
         `)
         .eq("user_id", userId)
         .eq("status", "accepted")
@@ -53,6 +57,19 @@ export function ContactList({ userId }: { userId: string }) {
       toast.success("Contact removed")
     } catch (error) {
       toast.error("Failed to remove contact")
+    }
+  }
+
+  const handleMessage = async (friendId: string) => {
+    try {
+      const result = await createDirectMessage(friendId)
+      if (result.error) {
+        toast.error(result.error)
+      } else if (result.success && result.groupId) {
+        router.push(`/dashboard/messages?groupId=${result.groupId}`)
+      }
+    } catch (error) {
+      toast.error("Failed to start chat")
     }
   }
 
@@ -79,9 +96,14 @@ export function ContactList({ userId }: { userId: string }) {
               <p className="text-xs text-muted-foreground">@{contact.friend.username}</p>
             </div>
           </div>
-          <Button variant="ghost" size="icon" onClick={() => removeContact(contact.id)}>
-            <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="icon" onClick={() => handleMessage(contact.friend.id)}>
+              <MessageSquare className="h-4 w-4 text-muted-foreground hover:text-primary" />
+            </Button>
+            <Button variant="ghost" size="icon" onClick={() => removeContact(contact.id)}>
+              <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
+            </Button>
+          </div>
         </div>
       ))}
     </div>

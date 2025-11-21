@@ -208,3 +208,103 @@ export async function voteOnProposal(proposalId: string, voteType: "for" | "agai
   revalidatePath("/dashboard/groups")
   return { success: true }
 }
+
+export async function addMemberToGroup(groupId: string, username: string) {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    return { error: "Not authenticated" }
+  }
+
+  // 1. Find the user by username
+  const { data: profile, error: profileError } = await supabase
+    .from("profiles")
+    .select("id")
+    .eq("username", username)
+    .single()
+
+  if (profileError || !profile) {
+    return { error: "User not found" }
+  }
+
+  // 2. Check if user is already a member
+  const { data: existingMember } = await supabase
+    .from("chat_group_members")
+    .select("user_id")
+    .eq("group_id", groupId)
+    .eq("user_id", profile.id)
+    .single()
+
+  if (existingMember) {
+    return { error: "User is already a member of this group" }
+  }
+
+  // 3. Add the member
+  // Note: RLS policy ensures only group creator can add others
+  const { error: insertError } = await supabase.from("chat_group_members").insert({
+    group_id: groupId,
+    user_id: profile.id,
+  })
+
+  if (insertError) {
+    console.error("Error adding member:", insertError)
+    return { error: "Failed to add member. Only the group creator can add members." }
+  }
+
+  revalidatePath(`/dashboard/messages/${groupId}`)
+  revalidatePath(`/dashboard/messages/${groupId}/settings`)
+  return { success: true }
+}
+
+export async function createDirectMessage(targetUserId: string) {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    return { error: "Not authenticated" }
+  }
+
+  // 1. Check if a DM group already exists (optional optimization, skipping for now to ensure reliability)
+  // For a robust implementation, we would query for a group with exactly these two members.
+  // For now, we'll just create a new group named after the participants.
+
+  const { data: targetProfile } = await supabase.from("profiles").select("username").eq("id", targetUserId).single()
+
+  const { data: myProfile } = await supabase.from("profiles").select("username").eq("id", user.id).single()
+
+  const groupName = `${myProfile?.username} & ${targetProfile?.username}`
+
+  // 2. Create the group
+  const { data: group, error: groupError } = await supabase
+    .from("chat_groups")
+    .insert({
+      name: groupName,
+      created_by: user.id,
+    })
+    .select()
+    .single()
+
+  if (groupError) {
+    return { error: "Failed to create chat" }
+  }
+
+  // 3. Add both members
+  const { error: membersError } = await supabase.from("chat_group_members").insert([
+    { group_id: group.id, user_id: user.id },
+    { group_id: group.id, user_id: targetUserId },
+  ])
+
+  if (membersError) {
+    // Cleanup
+    await supabase.from("chat_groups").delete().eq("id", group.id)
+    return { error: "Failed to add members to chat" }
+  }
+
+  revalidatePath("/dashboard/messages")
+  return { success: true, groupId: group.id }
+}

@@ -1,17 +1,18 @@
 "use client"
 
 import type React from "react"
-
 import { useState, useEffect, useRef } from "react"
 import { useWebRTC } from "@/hooks/use-webrtc"
+import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Send, Users, Wifi, WifiOff, Lock } from "lucide-react"
+import { Send, Users, Wifi, WifiOff, Lock, ArrowLeft, Settings } from "lucide-react"
 import { cn } from "@/lib/utils"
+import Link from "next/link"
 
 interface ChatInterfaceProps {
   roomId: string
@@ -24,6 +25,7 @@ export function ChatInterface({ roomId, userId, userName = "Anonymous", groupNam
   const { messages, peers, isConnected, sendMessage } = useWebRTC(roomId, userId)
   const [inputValue, setInputValue] = useState("")
   const scrollRef = useRef<HTMLDivElement>(null)
+  const router = useRouter()
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -44,6 +46,14 @@ export function ChatInterface({ roomId, userId, userName = "Anonymous", groupNam
     <div className="flex h-full flex-col gap-4">
       <div className="flex items-center justify-between rounded-lg border border-border/50 bg-card/50 p-4 backdrop-blur-sm">
         <div className="flex items-center gap-3">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="md:hidden -ml-2"
+            onClick={() => router.push("/dashboard/messages")}
+          >
+            <ArrowLeft className="h-5 w-5" />
+          </Button>
           <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10">
             <Lock className="h-5 w-5 text-primary" />
           </div>
@@ -66,9 +76,17 @@ export function ChatInterface({ roomId, userId, userName = "Anonymous", groupNam
             </div>
           </div>
         </div>
-        <Badge variant="outline" className="border-primary/20 bg-primary/5 text-primary">
-          P2P Encrypted
-        </Badge>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="icon" asChild>
+            <Link href={`/dashboard/messages/${roomId}/settings`}>
+              <Settings className="h-5 w-5" />
+              <span className="sr-only">Group Settings</span>
+            </Link>
+          </Button>
+          <Badge variant="outline" className="hidden sm:flex border-primary/20 bg-primary/5 text-primary">
+            P2P Encrypted
+          </Badge>
+        </div>
       </div>
 
       <Card className="flex-1 overflow-hidden border-border/50 bg-card/30 backdrop-blur-sm">
@@ -118,7 +136,7 @@ export function ChatInterface({ roomId, userId, userName = "Anonymous", groupNam
               <Input
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
-                placeholder="Type an encrypted message..."
+                placeholder={isConnected ? "Type an encrypted message..." : "Connecting to secure channel..."}
                 className="bg-background/50 border-primary/20 focus-visible:ring-primary"
                 disabled={!isConnected}
               />

@@ -12,11 +12,9 @@ import {
   encryptMessage,
   decryptMessage,
 } from "@/lib/crypto"
-
-// Configuration for STUN servers
-const RTC_CONFIG: RTCConfiguration = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }, { urls: "stun:global.stun.twilio.com:3478" }],
-}
+import { saveMessageToStorage, getMessagesFromStorage } from "@/lib/storage"
+import { deleteMessage } from "@/app/actions"
+import { RTC_CONFIG } from "@/config/webrtc" // Declare RTC_CONFIG here
 
 export interface Message {
   id: string
@@ -79,6 +77,15 @@ export function useWebRTC(roomId: string, userId: string) {
 
       myKeyPair.current = keyPair
 
+      const localMessages = await getMessagesFromStorage(roomId)
+      if (localMessages.length > 0) {
+        setMessages((prev) => {
+          const existingIds = new Set(prev.map((m) => m.id))
+          const newMsgs = localMessages.filter((m) => !existingIds.has(m.id))
+          return [...prev, ...newMsgs].sort((a, b) => a.timestamp - b.timestamp)
+        })
+      }
+
       // We use a stable device ID for this browser
       let deviceId = localStorage.getItem(`device_id_${userId}`)
       if (!deviceId) {
@@ -115,95 +122,110 @@ export function useWebRTC(roomId: string, userId: string) {
               const myKeyData = msg.recipient_keys[userId]
               if (!myKeyData) continue // Cannot decrypt
 
-              // We need to decrypt the message key using our private key
-              // But wait, the current crypto implementation uses ECDH shared secrets.
-              // If the message was encrypted using a shared secret derived from SENDER's public key and MY private key...
-              // We need the SENDER's public key to derive the shared secret.
+              // Candidate keys for the sender (to derive shared secret)
+              const candidateKeys: CryptoKey[] = []
 
-              // For history, we might not have the sender's public key in memory if they are offline.
-              // We should fetch it from the 'devices' table or 'profiles' if we want to support this fully.
-              // HOWEVER, for simplicity in this iteration, we will try to use the shared secret if we have it (online peer),
-              // OR we need to store the sender's public key with the message? No, that's public info.
-
-              // Actually, the current implementation of `sendMessage` encrypts the `messageKey` with the `sharedSecret`.
-              // `sharedSecret` = ECDH(MyPriv, PeerPub).
-              // To decrypt, I need ECDH(MyPriv, PeerPub).
-              // So I need the Peer's Public Key.
-
-              // If the peer is not online, `peerPublicKeys` won't have it.
-              // We need to fetch the sender's public key from the `devices` table to derive the secret.
-
-              // Let's try to fetch the sender's device key if we don't have it.
-              // This is complex for a quick fix.
-              // ALTERNATIVE: When sending, encrypt the message key for MYSELF using a shared secret derived from MY public key?
-              // No, ECDH with myself? ECDH(MyPriv, MyPub) works!
-
-              // Let's assume for now we only decrypt if we have the shared secret (online) OR if it's my own message.
-              // If it's my own message, I need to derive secret with... myself?
-              // Yes, if I included myself in recipient_keys.
-
-              // Let's skip complex history decryption for offline peers for this exact step and focus on "memoirises" for the current session/user.
-              // We will implement a basic try-decrypt.
-
-              // For my own messages:
-              if (msg.sender_id === userId) {
-                // I am the sender. I encrypted it for myself too?
-                // If I did, I can decrypt it.
-                // See sendMessage implementation below.
+              // 1. If I am the sender, use my own current public key
+              if (msg.sender_id === userId && myKeyPair.current) {
+                candidateKeys.push(myKeyPair.current.publicKey)
               }
 
-              // We will attempt to decrypt.
-              // We need the sender's public key.
-              // Let's fetch it if missing.
-              let senderKey = peerPublicKeys.current[msg.sender_id]
-              if (!senderKey) {
-                // Try to fetch from devices (just one device for now)
+              // 2. Check cached peer key
+              if (peerPublicKeys.current[msg.sender_id]) {
+                candidateKeys.push(peerPublicKeys.current[msg.sender_id])
+              }
+
+              // 3. If we haven't found a working key yet (or just to be safe/robust),
+              // fetch device keys from DB if we don't have the peer key cached,
+              // or if we want to try all possible keys for that user (multi-device support).
+              // For performance, we only fetch if we don't have a cached key OR if decryption failed with cached key?
+              // For now, let's fetch if we don't have a cached key, or if it's not me.
+              if (msg.sender_id !== userId && !peerPublicKeys.current[msg.sender_id]) {
                 const { data: devices } = await supabase
                   .from("devices")
                   .select("public_key")
                   .eq("user_id", msg.sender_id)
-                  .limit(1)
+                  .order("last_seen", { ascending: false })
+                  .limit(5) // Try up to 5 recent devices
 
-                if (devices && devices.length > 0) {
-                  const jwk = JSON.parse(devices[0].public_key)
-                  senderKey = await importKey(jwk, "encryption", "public")
-                  peerPublicKeys.current[msg.sender_id] = senderKey
+                if (devices) {
+                  for (const device of devices) {
+                    try {
+                      const jwk = JSON.parse(device.public_key)
+                      const key = await importKey(jwk, "encryption", "public")
+                      candidateKeys.push(key)
+                    } catch (e) {
+                      console.warn("[v0] Failed to parse device key", e)
+                    }
+                  }
                 }
               }
 
-              if (senderKey && myKeyPair.current) {
-                const sharedSecret = await deriveSharedSecret(myKeyPair.current.privateKey, senderKey)
-                // Cache it
-                sharedSecrets.current[msg.sender_id] = sharedSecret
+              let decrypted = false
 
-                // Now decrypt
-                const messageKeyBase64 = await decryptMessage(myKeyData.ciphertext, myKeyData.iv, sharedSecret)
+              // Try to decrypt with each candidate key
+              for (const senderKey of candidateKeys) {
+                try {
+                  if (!myKeyPair.current) continue
 
-                const binaryString = window.atob(messageKeyBase64)
-                const len = binaryString.length
-                const bytes = new Uint8Array(len)
-                for (let i = 0; i < len; i++) {
-                  bytes[i] = binaryString.charCodeAt(i)
+                  const sharedSecret = await deriveSharedSecret(myKeyPair.current.privateKey, senderKey)
+
+                  // Try to decrypt the message key
+                  const messageKeyBase64 = await decryptMessage(myKeyData.ciphertext, myKeyData.iv, sharedSecret)
+
+                  // If we get here, the shared secret was correct!
+                  // Cache this key for this user if it's not me
+                  if (msg.sender_id !== userId) {
+                    peerPublicKeys.current[msg.sender_id] = senderKey
+                    sharedSecrets.current[msg.sender_id] = sharedSecret
+                  }
+
+                  const binaryString = window.atob(messageKeyBase64)
+                  const len = binaryString.length
+                  const bytes = new Uint8Array(len)
+                  for (let i = 0; i < len; i++) {
+                    bytes[i] = binaryString.charCodeAt(i)
+                  }
+
+                  const messageKey = await window.crypto.subtle.importKey(
+                    "raw",
+                    bytes.buffer,
+                    { name: "AES-GCM" },
+                    true,
+                    ["decrypt"],
+                  )
+                  const content = await decryptMessage(msg.content, msg.content_iv, messageKey)
+
+                  const decryptedMsg = {
+                    id: msg.id,
+                    senderId: msg.sender_id,
+                    content,
+                    timestamp: new Date(msg.created_at).getTime(),
+                  }
+
+                  decryptedMessages.push(decryptedMsg)
+
+                  await saveMessageToStorage({ ...decryptedMsg, groupId: roomId })
+
+                  // Only delete if I am the recipient (to avoid race conditions where sender deletes before recipient gets it)
+                  // OR if I am the sender and I want to clean up my own sent message from server
+                  // For now, we delete if we successfully decrypted and saved it.
+                  // Note: This effectively makes the server storage ephemeral.
+                  await deleteMessage(msg.id)
+
+                  decrypted = true
+                  break // Success!
+                } catch (err) {
+                  // Wrong key, try next
+                  continue
                 }
+              }
 
-                const messageKey = await window.crypto.subtle.importKey(
-                  "raw",
-                  bytes.buffer,
-                  { name: "AES-GCM" },
-                  true,
-                  ["decrypt"],
-                )
-                const content = await decryptMessage(msg.content, msg.content_iv, messageKey)
-
-                decryptedMessages.push({
-                  id: msg.id,
-                  senderId: msg.sender_id,
-                  content,
-                  timestamp: new Date(msg.created_at).getTime(),
-                })
+              if (!decrypted) {
+                console.warn(`[v0] Could not decrypt message ${msg.id} from ${msg.sender_id}`)
               }
             } catch (err) {
-              console.warn("Failed to decrypt historical message", err)
+              console.warn("Failed to process historical message", err)
             }
           }
 
@@ -426,18 +448,19 @@ export function useWebRTC(roomId: string, userId: string) {
               // 3. Decrypt the content
               const content = await decryptMessage(payload.encryptedContent, payload.contentIv, messageKey)
 
+              const newMessage = {
+                id: payload.id,
+                senderId: payload.senderId,
+                content,
+                timestamp: payload.timestamp,
+              }
+
+              await saveMessageToStorage({ ...newMessage, groupId: roomId })
+
               setMessages((prev) => {
                 // Dedupe
                 if (prev.some((m) => m.id === payload.id)) return prev
-                return [
-                  ...prev,
-                  {
-                    id: payload.id,
-                    senderId: payload.senderId,
-                    content,
-                    timestamp: payload.timestamp,
-                  },
-                ]
+                return [...prev, newMessage]
               })
             } catch (err) {
               console.error("Decryption failed:", err)
@@ -531,7 +554,10 @@ export function useWebRTC(roomId: string, userId: string) {
       }
 
       // Add to local state (unencrypted)
-      setMessages((prev) => [...prev, { id: messageId, senderId: userId, content, timestamp }])
+      const newMessage = { id: messageId, senderId: userId, content, timestamp }
+      setMessages((prev) => [...prev, newMessage])
+
+      await saveMessageToStorage({ ...newMessage, groupId: roomId })
 
       try {
         await supabase.from("chat_messages").insert({

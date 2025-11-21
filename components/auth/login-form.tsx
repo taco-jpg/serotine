@@ -1,23 +1,26 @@
-'use client'
+"use client"
 
-import { useState, useEffect } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
-import Link from 'next/link'
-import { createClient } from '@/utils/supabase/client'
+import type React from "react"
+
+import { useState, useEffect } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
+import Link from "next/link"
+import { createClient } from "@/utils/supabase/client"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { Loader2, RefreshCw } from 'lucide-react'
-import { LinearCaptcha } from './linear-captcha'
+import { Loader2 } from "lucide-react"
+import { LinearCaptcha } from "./linear-captcha"
+import { signUpWithUsername } from "@/app/actions"
 
 export function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const view = searchParams.get('view')
-  const [isSignUp, setIsSignUp] = useState(view === 'signup')
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
+  const view = searchParams.get("view")
+  const [isSignUp, setIsSignUp] = useState(view === "signup")
+  const [username, setUsername] = useState("")
+  const [password, setPassword] = useState("")
   const [isCaptchaValid, setIsCaptchaValid] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -25,7 +28,7 @@ export function LoginForm() {
   const supabase = createClient()
 
   useEffect(() => {
-    setIsSignUp(view === 'signup')
+    setIsSignUp(view === "signup")
     setIsCaptchaValid(false)
   }, [view])
 
@@ -35,40 +38,89 @@ export function LoginForm() {
     setError(null)
     setMessage(null)
 
-    if (isSignUp && !isCaptchaValid) {
-      setError('Please solve the graph captcha correctly')
+    const cleanUsername = username.trim()
+
+    if (!/^[a-zA-Z0-9_]+$/.test(cleanUsername)) {
+      setError("Username can only contain letters, numbers, and underscores")
       setLoading(false)
       return
     }
 
-    const email = `${username.toLowerCase().replace(/\s+/g, '')}@serotine.network`
+    if (isSignUp && !isCaptchaValid) {
+      setError("Please solve the graph captcha correctly")
+      setLoading(false)
+      return
+    }
+
+    const generateEmail = () => {
+      const uuid = crypto.randomUUID().replace(/-/g, "").substring(0, 16)
+      return `user.${uuid}@gmail.com`
+    }
+
+    const emailToUse = isSignUp ? generateEmail() : localStorage.getItem(`serotine_user_${cleanUsername}`)
 
     try {
       if (isSignUp) {
-        const { error } = await supabase.auth.signUp({
-          email,
+        const result = await signUpWithUsername(cleanUsername, password, emailToUse!)
+
+        if (result.error) {
+          throw new Error(result.error)
+        }
+
+        localStorage.setItem(`serotine_user_${cleanUsername}`, emailToUse!)
+
+        const { data, error: signInError } = await supabase.auth.signInWithPassword({
+          email: emailToUse!,
           password,
-          options: {
-            emailRedirectTo: `${window.location.origin}/auth/callback`,
-            data: {
-              username: username
-            }
-          },
         })
-        if (error) throw error
-        setMessage('Account created! If email confirmation is enabled, you would check your email now. For this demo, try logging in.')
+
+        if (signInError) throw signInError
+
+        // Ensure session is available before redirecting
+        if (!data.session) {
+          throw new Error("Session not established")
+        }
+
+        // Use window.location for a full page reload to ensure middleware picks up the session
+        window.location.href = "/dashboard/messages"
       } else {
-        const { error } = await supabase.auth.signInWithPassword({
-          email,
+        const storedEmail = localStorage.getItem(`serotine_user_${cleanUsername}`)
+
+        if (!storedEmail) {
+          setError("Username not found. Please sign up first.")
+          setLoading(false)
+          return
+        }
+
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email: storedEmail,
           password,
         })
+
         if (error) throw error
-        router.push('/dashboard')
-        router.refresh()
+
+        // Ensure session is available before redirecting
+        if (!data.session) {
+          throw new Error("Session not established")
+        }
+
+        // Use window.location for a full page reload to ensure middleware picks up the session
+        window.location.href = "/dashboard/messages"
       }
     } catch (err: any) {
-      setError(err.message)
-    } finally {
+      console.error("[v0] Auth error:", err.message)
+
+      if (err.message.includes("already registered")) {
+        setError("Username is already taken")
+      } else if (err.message.includes("Invalid login credentials")) {
+        setError("Invalid username or password")
+      } else if (err.message.includes("Email not confirmed")) {
+        setError(
+          "Login failed: Email confirmation is enabled in your Supabase project. Please disable 'Confirm Email' in your Supabase Dashboard to use username login.",
+        )
+      } else {
+        setError(err.message)
+      }
       setLoading(false)
     }
   }
@@ -124,15 +176,9 @@ export function LoginForm() {
       )}
 
       <Button type="submit" className="w-full bg-primary hover:bg-primary/90" disabled={loading}>
-        {loading ? (
-          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-        ) : isSignUp ? (
-          'Sign Up'
-        ) : (
-          'Sign In'
-        )}
+        {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : isSignUp ? "Sign Up" : "Sign In"}
       </Button>
-      
+
       <div className="text-center text-sm">
         <button
           type="button"
@@ -143,7 +189,7 @@ export function LoginForm() {
           }}
           className="text-muted-foreground hover:text-primary underline"
         >
-          {isSignUp ? 'Already have an account? Sign In' : 'Need an account? Sign Up'}
+          {isSignUp ? "Already have an account? Sign In" : "Need an account? Sign Up"}
         </button>
       </div>
     </form>

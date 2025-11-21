@@ -115,15 +115,15 @@ export function LinearCaptcha({ onVerify, className }: LinearCaptchaProps) {
 
     setSelectedId(id)
     const correct = id === target?.id
-    setIsCorrect(correct)
-    onVerify(correct)
 
-    if (!correct) {
-      // Optional: Auto-reset after a delay or let user try again?
-      // Let's let them try again but maybe show error
+    if (correct) {
+      setIsCorrect(true)
+      onVerify(true)
+    } else {
+      setIsCorrect(false)
+      onVerify(false)
       setTimeout(() => {
-        setSelectedId(null)
-        setIsCorrect(null)
+        generateCaptcha()
       }, 1000)
     }
   }
@@ -219,14 +219,16 @@ export function LinearCaptcha({ onVerify, className }: LinearCaptchaProps) {
           <text
             x={toSvgX(yIntercept.x) + 10}
             y={toSvgY(yIntercept.y) - 10}
-            className="text-[10px] fill-foreground font-bold"
+            className="text-[14px] fill-purple-500 font-extrabold"
+            style={{ textShadow: "0px 0px 4px rgba(0,0,0,1)" }}
           >
             (0, {yIntercept.y})
           </text>
           <text
             x={toSvgX(xIntercept.x) + 10}
             y={toSvgY(xIntercept.y) + 15}
-            className="text-[10px] fill-foreground font-bold"
+            className="text-[14px] fill-purple-500 font-extrabold"
+            style={{ textShadow: "0px 0px 4px rgba(0,0,0,1)" }}
           >
             ({Number(xIntercept.x.toFixed(1))}, 0)
           </text>

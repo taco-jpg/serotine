@@ -1,4 +1,4 @@
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/utils"
 
 export function AppLogo({ className }: { className?: string }) {
   return (
@@ -13,18 +13,10 @@ export function AppLogo({ className }: { className?: string }) {
         strokeLinejoin="round"
         className="w-8 h-8 text-primary"
       >
-        {/* Syringe barrel */}
-        <path d="m18 2 4 4" />
-        <path d="m17 7 3-3" />
-        <path d="M19 9 8.7 19.3c-1 1-2.5 1-3.4 0l-.6-.6c-1-1-1-2.5 0-3.4L15 5" />
-        {/* Plunger */}
-        <path d="m9 11 4 4" />
-        <path d="m5 19-3 3" />
-        <path d="m14 4 6 6" />
+        <path d="M2 12s3-1 5-3 2-4 5-4 3 2 5 4 5 3 5 3-3 2-5 2-2 3-5 3-3-3-5-3-2 0-5-2z" />
+        <path d="M12 12v.01" />
       </svg>
-      <span className="font-serif text-xl font-bold tracking-widest text-foreground">
-        SEROTINE
-      </span>
+      <span className="font-serif text-xl font-bold tracking-widest text-foreground">SEROTINE</span>
     </div>
-  );
+  )
 }

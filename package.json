@@ -50,7 +50,7 @@
     "idb": "latest",
     "input-otp": "1.4.1",
     "lucide-react": "^0.454.0",
-    "next": "16.0.3",
+    "next": "16.0.10",
     "next-themes": "latest",
     "prisma": "latest",
     "react": "19.2.0",

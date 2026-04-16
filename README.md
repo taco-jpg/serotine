@@ -1,30 +1,55 @@
-# Serotine social media app
+# Serotine | Zero-Trust P2P Protocol
 
-*Automatically synced with your [v0.app](https://v0.app) deployments*
+![Serotine Aesthetic](https://img.shields.io/badge/Architecture-Zero--Trust-black?style=for-the-badge&logo=shield)
+![Deployed on Cloudflare](https://img.shields.io/badge/Deployed%20on-Cloudflare-orange?style=for-the-badge&logo=cloudflare)
 
-[![Deployed on Vercel](https://img.shields.io/badge/Deployed%20on-Vercel-black?style=for-the-badge&logo=vercel)](https://vercel.com/dorbort123-9096s-projects/v0-serotine)
-[![Built with v0](https://img.shields.io/badge/Built%20with-v0.app-black?style=for-the-badge)](https://v0.app/chat/bOKHcVuMbmt)
+Serotine is a hyper-minimalist, high-privacy social protocol built on the principle of **Zero-Trust Identity**. It rejects centralized authentication, platform-controlled state, and metadata harvesting.
 
-## Overview
+## 🛡️ Core Principles
 
-This repository will stay in sync with your deployed chats on [v0.app](https://v0.app).
-Any changes you make to your deployed app will be automatically pushed to this repository from [v0.app](https://v0.app).
+- **Identity is a Key Pair**: There is no "registration". Your account is an Ed25519 signing key and an ECDH encryption key generated locally in your browser sandbox.
+- **D1 as a Signal Neutral Relay**: Cloudflare D1 is utilized solely as a message relay and WebRTC signaling buffer. It never sees your private keys or unencrypted message content.
+- **Ephemeral & Peer-to-Peer**: We prioritize WebRTC DataChannels for direct, low-latency device-to-device communication. D1 acts only as a fallback for offline message delivery.
+- **Self-Destructing State**: Messages are retrieved and immediately purged from the server, living only in your local browser storage (IndexedDB).
 
-## Deployment
+## ⚡ Tech Stack
 
-Your project is live at:
+- **Framework**: Next.js 15+ (Forced Edge Runtime)
+- **Infrastructure**: Cloudflare Pages + Cloudflare D1 (SQLite)
+- **Database**: Prisma with D1 Driver Adapter
+- **Cryptography**: Web Crypto API (AES-GCM, ECDH, Ed25519)
+- **Styling**: Zinc-950 / Vercel Aesthetic (Tailwind CSS)
 
-**[https://vercel.com/dorbort123-9096s-projects/v0-serotine](https://vercel.com/dorbort123-9096s-projects/v0-serotine)**
+## 🛠️ Local Development & Deployment
 
-## Build your app
+### 1. Prerequisites
+Ensure you have the [Cloudflare Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) installed.
 
-Continue building your app on:
+### 2. Database Setup
+```bash
+# Push schema to local D1 (dev)
+npx wrangler d1 migrations apply serotine-db --local
 
-**[https://v0.app/chat/bOKHcVuMbmt](https://v0.app/chat/bOKHcVuMbmt)**
+# Push schema to production D1
+npx wrangler d1 migrations apply serotine-db --remote
+```
 
-## How It Works
+### 3. Build & Deploy
+This project must be compiled for the Cloudflare Pages environment using `next-on-pages`.
 
-1. Create and modify your project using [v0.app](https://v0.app)
-2. Deploy your chats from the v0 interface
-3. Changes are automatically pushed to this repository
-4. Vercel deploys the latest version from this repository
+```bash
+# Compile for Edge
+npx @cloudflare/next-on-pages
+
+# Deploy to Cloudflare
+npx wrangler pages deploy .vercel/output/static --project-name v0-serotine
+```
+
+## 🔐 Security Audit
+The codebase is designed to be "Secure by Absence".
+- **No Cookies**: We don't use sessions. Every request is signed.
+- **No Passwords**: We use cryptographic challenges.
+- **Local Secret Storage**: Your private keys remain in `localStorage` / `IndexedDB` and never touch a network socket.
+
+---
+*Built with precision. Zero Trust. Pure Privacy.*

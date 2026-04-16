@@ -1,22 +1,34 @@
 import { PrismaClient } from '@prisma/client'
 import { PrismaD1 } from '@prisma/adapter-d1'
 
-const prismaClientSingleton = () => {
-  // Check if we are in a Cloudflare environment with D1 binding
-  if (typeof process !== 'undefined' && (process.env as any).serotine_db) {
-    const adapter = new PrismaD1((process.env as any).serotine_db)
-    return new PrismaClient({ adapter })
+// Use a proxy or a getter to handle lazy initialization
+let _prisma: PrismaClient | null = null
+
+export function getPrisma() {
+  if (_prisma) return _prisma
+
+  // Check if we have the D1 binding
+  const d1 = (process.env as any).serotine_db
+
+  if (d1) {
+    const adapter = new PrismaD1(d1)
+    _prisma = new PrismaClient({ adapter })
+    return _prisma
   }
-  // Fallback to standard client for local development/migrations
-  return new PrismaClient()
+
+  // Local development fallback
+  if (process.env.NODE_ENV === 'development') {
+    _prisma = new PrismaClient()
+    return _prisma
+  }
+
+  // Final fallback to prevent worker crash
+  console.warn("D1 binding 'serotine_db' not found. Database operations will fail.")
+  // We still need to return a client to avoid breaking typings, 
+  // but this shouldn't happen if bindings are set correctly.
+  _prisma = new PrismaClient() 
+  return _prisma
 }
 
-declare global {
-  var prisma: undefined | ReturnType<typeof prismaClientSingleton>
-}
-
-const prisma = globalThis.prisma ?? prismaClientSingleton()
-
+const prisma = getPrisma()
 export default prisma
-
-if (process.env.NODE_ENV !== 'production') globalThis.prisma = prisma

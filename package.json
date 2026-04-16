@@ -1,10 +1,12 @@
 {
-  "name": "my-v0-project",
-  "version": "0.1.0",
+  "name": "serotine",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "next build",
     "dev": "next dev",
+    "build": "next build",
+    "build:edge": "npx @cloudflare/next-on-pages",
+    "deploy": "npm run build:edge && npx wrangler pages deploy .vercel/output/static",
     "lint": "eslint .",
     "start": "next start"
   },

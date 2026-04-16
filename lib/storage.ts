@@ -5,31 +5,33 @@ interface ChatDB extends DBSchema {
     key: string
     value: {
       id: string
-      groupId: string
-      senderId: string
+      peerPubKey: string
+      senderPubKey: string
       content: string
       timestamp: number
     }
-    indexes: { "by-group": "groupId" }
+    indexes: { "by-peer": "peerPubKey" }
   }
 }
 
 const DB_NAME = "chat-storage"
-const DB_VERSION = 1
+const DB_VERSION = 2
 
 export async function initDB() {
   return openDB<ChatDB>(DB_NAME, DB_VERSION, {
     upgrade(db) {
-      const store = db.createObjectStore("messages", { keyPath: "id" })
-      store.createIndex("by-group", "groupId")
+      if (!db.objectStoreNames.contains("messages")) {
+        const store = db.createObjectStore("messages", { keyPath: "id" })
+        store.createIndex("by-peer", "peerPubKey")
+      }
     },
   })
 }
 
 export async function saveMessageToStorage(message: {
   id: string
-  groupId: string
-  senderId: string
+  peerPubKey: string
+  senderPubKey: string
   content: string
   timestamp: number
 }) {
@@ -37,9 +39,9 @@ export async function saveMessageToStorage(message: {
   await db.put("messages", message)
 }
 
-export async function getMessagesFromStorage(groupId: string) {
+export async function getMessagesFromStorage(peerPubKey: string) {
   const db = await initDB()
-  return db.getAllFromIndex("messages", "by-group", groupId)
+  return db.getAllFromIndex("messages", "by-peer", peerPubKey)
 }
 
 export async function deleteMessageFromStorage(id: string) {

@@ -46,6 +46,68 @@ export async function importKey(jwk: JsonWebKey, type: "encryption" | "signing",
   return await window.crypto.subtle.importKey("jwk", jwk, algorithm, true, usages)
 }
 
+// Convert ArrayBuffer to Hex string (for UIDs)
+export function arrayBufferToHex(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer)
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// Convert Hex string to ArrayBuffer
+export function hexToArrayBuffer(hex: string): ArrayBuffer {
+  if (hex.length % 2 !== 0) throw new Error("Invalid hex string")
+  const bytes = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
+  }
+  return bytes.buffer
+}
+
+// Export public key to raw hex format (used as UID)
+export async function exportPublicKeyToHex(key: CryptoKey) {
+  const raw = await window.crypto.subtle.exportKey("raw", key)
+  return arrayBufferToHex(raw)
+}
+
+// Import public key from raw hex format
+export async function importPublicKeyFromHex(hex: string, type: "encryption" | "signing") {
+  const format = "raw"
+  const algorithm = type === "encryption" ? { name: "ECDH", namedCurve: "P-256" } : { name: "ECDSA", namedCurve: "P-256" }
+  const buffer = hexToArrayBuffer(hex)
+  const usages: KeyUsage[] = type === "encryption" ? [] : ["verify"]
+  return await window.crypto.subtle.importKey(format, buffer, algorithm, true, usages)
+}
+
+// Sign a challenge string
+export async function signChallenge(challenge: string, privateKey: CryptoKey): Promise<string> {
+  const encoded = new TextEncoder().encode(challenge)
+  const signature = await window.crypto.subtle.sign(
+    {
+      name: "ECDSA",
+      hash: { name: "SHA-256" },
+    },
+    privateKey,
+    encoded
+  )
+  return arrayBufferToHex(signature)
+}
+
+// Verify a challenge signature
+export async function verifySignature(challenge: string, signatureHex: string, publicKey: CryptoKey | string): Promise<boolean> {
+  const key = typeof publicKey === "string" ? await importPublicKeyFromHex(publicKey, "signing") : publicKey
+  const encoded = new TextEncoder().encode(challenge)
+  const signature = hexToArrayBuffer(signatureHex)
+  
+  return await window.crypto.subtle.verify(
+    {
+      name: "ECDSA",
+      hash: { name: "SHA-256" },
+    },
+    key,
+    signature,
+    encoded
+  )
+}
+
 // Convert ArrayBuffer to Base64 string
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   let binary = ""
@@ -120,4 +182,21 @@ export async function decryptMessage(ciphertext: string, iv: string, key: Crypto
   )
 
   return new TextDecoder().decode(decrypted)
+}
+
+// High level point-to-point encryption for Relays
+export async function encryptForPeer(message: string, privateKey: CryptoKey, targetPubKeyHex: string): Promise<string> {
+  const targetPubKey = await importPublicKeyFromHex(targetPubKeyHex, "encryption")
+  const sharedSecret = await deriveSharedSecret(privateKey, targetPubKey)
+  const { ciphertext, iv } = await encryptMessage(message, sharedSecret)
+  // Pack IV and ciphertext together
+  return JSON.stringify({ ciphertext, iv })
+}
+
+// High level point-to-point decryption for Relays
+export async function decryptFromPeer(packed: string, privateKey: CryptoKey, senderPubKeyHex: string): Promise<string> {
+  const { ciphertext, iv } = JSON.parse(packed)
+  const senderPubKey = await importPublicKeyFromHex(senderPubKeyHex, "encryption")
+  const sharedSecret = await deriveSharedSecret(privateKey, senderPubKey)
+  return await decryptMessage(ciphertext, iv, sharedSecret)
 }

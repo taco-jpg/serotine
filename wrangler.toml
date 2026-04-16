@@ -1,0 +1,10 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "v0-serotine"
+compatibility_date = "2024-04-03"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = ".vercel/output/static"
+
+[[d1_databases]]
+binding = "serotine_db"
+database_name = "serotine-db"
+database_id = "16f6cdd1-ce00-4562-833a-ec5c533a33b1"

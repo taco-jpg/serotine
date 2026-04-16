@@ -1,57 +1,55 @@
 import { Suspense } from "react"
 import Link from "next/link"
-import { AppLogo } from "@/components/ui/app-logo"
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { Shield } from "lucide-react"
 import { LoginForm } from "@/components/auth/login-form"
-import { ModeToggle } from "@/components/mode-toggle"
-import { AuthFacts } from "@/components/auth/auth-facts"
 
 export default function LoginPage() {
   return (
-    <div className="grid min-h-screen w-full lg:grid-cols-2">
-      <div className="flex flex-col items-center justify-center bg-background p-4 relative order-1 lg:order-2">
-        <div className="absolute top-4 right-4">
-          <ModeToggle />
-        </div>
-        <Link href="/" className="mb-8 lg:hidden">
-          <AppLogo className="scale-150" />
-        </Link>
+    <div className="min-h-screen w-full bg-zinc-950 text-zinc-100 selection:bg-zinc-800 font-sans tracking-tight flex flex-col pt-12 items-center">
+      {/* Top Logo */}
+      <Link href="/" className="flex items-center space-x-2 text-zinc-100 hover:text-zinc-300 transition-colors mb-12">
+        <Shield className="h-6 w-6" />
+        <span className="font-bold font-serif text-2xl tracking-wider">Serotine</span>
+      </Link>
 
-        <Card className="w-full max-w-md border-border/50 bg-card/50 backdrop-blur-xl">
-          <CardHeader className="space-y-1 text-center">
-            <CardTitle className="text-2xl font-serif">Welcome Back</CardTitle>
-            <CardDescription>Enter your credentials to access the network</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <Suspense fallback={<div>Loading form...</div>}>
-              <LoginForm />
-            </Suspense>
-          </CardContent>
-          <CardFooter className="flex flex-col space-y-2 text-center text-sm text-muted-foreground">
-            <div>
-              Don't have an account?{" "}
-              <Link href="/login?view=signup" className="text-primary hover:underline">
-                Sign up
-              </Link>
-            </div>
-          </CardFooter>
-        </Card>
-
-        {/* Mobile Facts */}
-        <div className="mt-8 w-full max-w-md lg:hidden">
-          <AuthFacts />
+      <div className="w-full max-w-[440px] px-6">
+        <div className="border border-zinc-800 bg-zinc-900/50 backdrop-blur-md rounded-xl p-8 shadow-2xl relative overflow-hidden">
+          {/* Subtle noise or gradient bg could go here, but keeping Linear/Vercel pure black style */}
+          <div className="space-y-2 mb-8 text-center">
+            <h1 className="text-2xl font-medium tracking-tight text-zinc-100">Welcome to Serotine</h1>
+            <p className="text-sm text-zinc-400">Generate your local identity to enter the network</p>
+          </div>
+          
+          <Suspense fallback={<div className="h-20 animate-pulse bg-zinc-800/50 rounded-md" />}>
+             {/* The dark LoginForm button will appear here */}
+            <LoginForm />
+          </Suspense>
         </div>
       </div>
 
-      {/* Desktop Facts Side */}
-      <div className="hidden lg:flex flex-col items-center justify-center bg-muted/30 p-8 order-2 lg:order-1 border-r border-border/50 relative overflow-hidden">
-        <div className="absolute top-8 left-8">
-          <Link href="/">
-            <AppLogo className="scale-150" />
-          </Link>
+      {/* Cryptography Lab / Education Features */}
+      <section className="mt-24 w-full max-w-5xl px-6 grid grid-cols-1 md:grid-cols-3 gap-6 text-sm text-zinc-400 pb-20">
+        <div className="p-6 border border-zinc-800 bg-zinc-900/30 rounded-xl shadow-sm hover:bg-zinc-900/50 transition-colors">
+          <h3 className="text-zinc-200 font-semibold mb-2 tracking-tight text-base">Key Exchange (ECDH)</h3>
+          <p className="leading-relaxed">
+            We don't store passwords. Your identity is a cryptographic key pair generated locally via Web Crypto API. A shared secret secures data point-to-point.
+          </p>
         </div>
-        <AuthFacts />
-      </div>
+        
+        <div className="p-6 border border-zinc-800 bg-zinc-900/30 rounded-xl shadow-sm hover:bg-zinc-900/50 transition-colors">
+          <h3 className="text-zinc-200 font-semibold mb-2 tracking-tight text-base">P2P Routing (WebRTC)</h3>
+          <p className="leading-relaxed">
+            Messages travel directly from your device to the recipient's via secure DataChannels. Bypassing central servers limits mass metadata collection.
+          </p>
+        </div>
+        
+        <div className="p-6 border border-zinc-800 bg-zinc-900/30 rounded-xl shadow-sm hover:bg-zinc-900/50 transition-colors">
+          <h3 className="text-zinc-200 font-semibold mb-2 tracking-tight text-base">Offline Relay (D1)</h3>
+          <p className="leading-relaxed">
+            If a peer is unreachable, the offline message is encrypted and relayed via Cloudflare D1. Upon collection, it is immediately subjected to physical deletion.
+          </p>
+        </div>
+      </section>
     </div>
   )
 }

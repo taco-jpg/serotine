@@ -2,130 +2,33 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider = "sqlite"
+  url      = "file:./dev.db"
 }
 
-model User {
-  id                String   @id @default(cuid())
-  nickname          String
-  avatarUrl         String?
-  publicKey         String   // X25519 public key
-  deviceFingerprint String
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+// "加密中继池" for offline messages
+model Message {
+  id                 String   @id @default(cuid())
+  receiverPubKeyHash String
+  encryptedData      String
+  expiresAt          DateTime
+  createdAt          DateTime @default(now())
 
-  memberships       GroupMember[]
-  votesProposed     Vote[]
-  votesCast         VoteRecord[]
-  trustedDevices    TrustedDevice[] @relation("UserDevices")
-  vouchedFor        TrustedDevice[] @relation("VouchedBy")
-}
-
-model TrustedDevice {
-  id                String   @id @default(cuid())
-  userId            String
-  deviceFingerprint String
-  vouchedByUserId   String?
-  status            DeviceStatus @default(PENDING)
-  verificationCode  String?  // 8-char code
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-
-  user              User     @relation("UserDevices", fields: [userId], references: [id], onDelete: Cascade)
-  vouchedBy         User?    @relation("VouchedBy", fields: [vouchedByUserId], references: [id])
-
-  @@unique([userId, deviceFingerprint])
-}
-
-enum DeviceStatus {
-  PENDING
-  TRUSTED
-}
-
-model Group {
-  id                String   @id @default(cuid())
-  name              String
-  quorumPercentage  Int      @default(50)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-
-  members           GroupMember[]
-  votes             Vote[]
-}
-
-model GroupMember {
-  id        String   @id @default(cuid())
-  groupId   String
-  userId    String
-  joinedAt  DateTime @default(now())
-
-  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([groupId, userId])
-}
-
-model Vote {
-  id            String   @id @default(cuid())
-  groupId       String
-  proposerId    String
-  type          VoteType
-  targetUserId  String?
-  expiresAt     DateTime
-  status        VoteStatus @default(ACTIVE)
-  createdAt     DateTime @default(now())
-
-  group         Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  proposer      User     @relation(fields: [proposerId], references: [id])
-  records       VoteRecord[]
-}
-
-enum VoteType {
-  ADD_MEMBER
-  REMOVE_MEMBER
-  CHANGE_QUORUM
-}
-
-enum VoteStatus {
-  ACTIVE
-  PASSED
-  FAILED
-}
-
-model VoteRecord {
-  id        String   @id @default(cuid())
-  voteId    String
-  voterId   String
-  decision  VoteDecision
-  signature String   // Cryptographic signature of the vote
-  createdAt DateTime @default(now())
-
-  vote      Vote     @relation(fields: [voteId], references: [id], onDelete: Cascade)
-  voter     User     @relation(fields: [voterId], references: [id])
-
-  @@unique([voteId, voterId])
-}
-
-enum VoteDecision {
-  YES
-  NO
+  @@index([receiverPubKeyHash])
 }
 
 model P2PSignal {
-  id                      String   @id @default(cuid())
-  messageId               String   @unique
-  recipientUIDs           String[] // Array of User IDs
+  id                       String   @id @default(cuid())
+  messageId                String   @unique
+  recipientUIDs            String   // JSON string
   senderEphemeralPublicKey String
-  offerSDP                String?  @db.Text
-  answerSDP               String?  @db.Text
-  iceCandidates           Json?    // Array of candidates
-  createdAt               DateTime @default(now())
-  
-  // No direct relation to User to maintain metadata privacy/ephemeral nature
+  offerSDP                 String?
+  answerSDP                String?
+  iceCandidates            String?  // JSON string
+  createdAt                DateTime @default(now())
 }

@@ -1,11 +1,12 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import prisma from "@/lib/prisma"
+import { getPrisma } from "@/lib/prisma"
 
 // --- SIGNALING FOR P2P ---
 
 export async function storeSignal(data: {
+  const prisma = getPrisma() 
   messageId: string
   recipientUIDs: string
   senderEphemeralPublicKey: string
@@ -27,6 +28,7 @@ export async function storeSignal(data: {
 }
 
 export async function getSignal(messageId: string) {
+  const prisma = getPrisma() 
   try {
     const signal = await prisma.p2PSignal.findUnique({
       where: { messageId }
@@ -39,6 +41,7 @@ export async function getSignal(messageId: string) {
 }
 
 export async function deleteSignal(messageId: string) {
+  const prisma = getPrisma() 
   try {
     await prisma.p2PSignal.delete({
       where: { messageId }
@@ -53,6 +56,7 @@ export async function deleteSignal(messageId: string) {
 // --- OFFLINE MESSAGE RELAY ---
 
 export async function storeEncryptedMessage(data: {
+  const prisma = getPrisma() 
   receiverPubKeyHash: string
   encryptedData: string
 }) {
@@ -75,6 +79,7 @@ export async function storeEncryptedMessage(data: {
 }
 
 export async function getMyMessages(receiverPubKeyHash: string) {
+  const prisma = getPrisma() 
   try {
     const messages = await prisma.message.findMany({
       where: { receiverPubKeyHash }
@@ -87,6 +92,7 @@ export async function getMyMessages(receiverPubKeyHash: string) {
 }
 
 export async function deleteMessage(messageId: string) {
+  const prisma = getPrisma() 
   try {
     await prisma.message.delete({
       where: { id: messageId }

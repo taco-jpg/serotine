@@ -1,7 +1,6 @@
-// lib/db.ts
-import { getRequestContext } from '@cloudflare/next-on-pages'
+import { getCloudflareContext } from '@opennextjs/cloudflare'
 
-export function getDB() {
-  const { env } = getRequestContext()
+export async function getDB() {
+  const { env } = await getCloudflareContext()
   return (env as any).serotine_db as D1Database
 }

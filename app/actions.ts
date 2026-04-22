@@ -9,7 +9,7 @@ export async function storeSignal(data: {
   answerSDP?: string
   iceCandidates?: string
 }) {
-  const db = getDB()
+  const db = await getDB()
   try {
     await db.prepare(`
       INSERT INTO P2PSignal (id, messageId, recipientUIDs, senderEphemeralPublicKey, offerSDP, answerSDP, iceCandidates, createdAt)
@@ -35,7 +35,7 @@ export async function storeSignal(data: {
 }
 
 export async function getSignal(messageId: string) {
-  const db = getDB()
+  const db = await getDB()
   try {
     const signal = await db.prepare(
       `SELECT * FROM P2PSignal WHERE messageId = ?`
@@ -47,7 +47,7 @@ export async function getSignal(messageId: string) {
 }
 
 export async function deleteSignal(messageId: string) {
-  const db = getDB()
+  const db = await getDB()
   try {
     await db.prepare(`DELETE FROM P2PSignal WHERE messageId = ?`).bind(messageId).run()
     return { success: true }
@@ -60,7 +60,7 @@ export async function storeEncryptedMessage(data: {
   receiverPubKeyHash: string
   encryptedData: string
 }) {
-  const db = getDB()
+  const db = await getDB()
   try {
     await db.prepare(`
       INSERT INTO Message (id, receiverPubKeyHash, encryptedData, expiresAt, createdAt)
@@ -73,7 +73,7 @@ export async function storeEncryptedMessage(data: {
 }
 
 export async function getMyMessages(receiverPubKeyHash: string) {
-  const db = getDB()
+  const db = await getDB()
   try {
     const { results } = await db.prepare(
       `SELECT * FROM Message WHERE receiverPubKeyHash = ?`
@@ -85,7 +85,7 @@ export async function getMyMessages(receiverPubKeyHash: string) {
 }
 
 export async function deleteMessage(messageId: string) {
-  const db = getDB()
+  const db = await getDB()
   try {
     await db.prepare(`DELETE FROM Message WHERE id = ?`).bind(messageId).run()
     return { success: true }

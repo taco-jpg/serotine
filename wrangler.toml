@@ -1,5 +1,5 @@
 #:schema node_modules/wrangler/config-schema.json
-name = "v0-serotine"
+name = "serotine"
 compatibility_date = "2024-04-03"
 compatibility_flags = ["nodejs_compat"]
 pages_build_output_dir = ".vercel/output/static"

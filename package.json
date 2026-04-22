@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "npx prisma generate && next build",
-    "build:edge": "npx @cloudflare/next-on-pages",
+  "build": "npx prisma generate && next build",
+  "build:edge": "npx @cloudflare/next-on-pages",
     "deploy": "npm run build:edge && npx wrangler pages deploy .vercel/output/static",
     "lint": "eslint .",
     "start": "next start"

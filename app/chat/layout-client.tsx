@@ -5,7 +5,7 @@ import { useState, useEffect } from "react"
 import { Shield, Plus } from "lucide-react"
 import { IdentityIcon } from "@/components/ui/identity-icon"
 
-export default function ChatLayout({ children }: { children: React.ReactNode }) {
+export default function ChatLayoutClient({ children }: { children: React.ReactNode }) {
   const [myPub, setMyPub] = useState<string>("")
   const [contacts, setContacts] = useState<{pub: string, alias: string}[]>([])
   const [newContactPub, setNewContactPub] = useState("")
@@ -19,7 +19,6 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
     if (saved) {
       setContacts(JSON.parse(saved))
     } else {
-      // Migrate old string contacts if exist
       const old = localStorage.getItem("serotine_contacts")
       if (old) {
         const parsed = JSON.parse(old)
@@ -42,7 +41,6 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
     if (!newContactPub.trim()) return
     const exists = contacts.find(c => c.pub === newContactPub.trim())
     if (exists) return
-    
     const updated = [...contacts, { pub: newContactPub.trim(), alias: newContactAlias.trim() }]
     setContacts(updated)
     localStorage.setItem("serotine_contacts_v2", JSON.stringify(updated))
@@ -58,7 +56,6 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
 
   return (
     <div className="flex h-screen bg-zinc-950 font-sans tracking-tight text-zinc-300">
-      {/* Sidebar */}
       <div className="w-80 border-r border-zinc-900 flex flex-col bg-zinc-950/50 backdrop-blur-md">
         <div className="p-5 border-b border-zinc-900 flex items-center">
           <div className="flex items-center space-x-3 text-zinc-100 cursor-pointer hover:text-zinc-400 transition-colors" onClick={copyMyPubKey} title="Click to copy your Hex ID">
@@ -79,15 +76,11 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
                 }
               }}
               className="text-[10px] text-zinc-500 hover:text-zinc-300 font-medium transition-colors"
-              title="Backup Private Key"
             >
               Export Key
             </button>
           </div>
-          <div 
-            onClick={copyMyPubKey}
-            className="flex items-center space-x-3 cursor-pointer p-2 rounded-lg hover:bg-zinc-900 transition-colors border border-transparent hover:border-zinc-800"
-          >
+          <div onClick={copyMyPubKey} className="flex items-center space-x-3 cursor-pointer p-2 rounded-lg hover:bg-zinc-900 transition-colors border border-transparent hover:border-zinc-800">
             <IdentityIcon pubKey={myPub || 'default'} size={32} />
             <div className="flex flex-col">
               <span className="text-sm font-medium text-zinc-200">Me (Local)</span>
@@ -97,7 +90,6 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-
           <div className="text-[10px] text-zinc-500 mb-2 px-1 uppercase tracking-widest font-semibold">Connections</div>
           
           <form onSubmit={addContact} className="flex flex-col space-y-2 mb-6">
@@ -139,7 +131,6 @@ export default function ChatLayout({ children }: { children: React.ReactNode }) 
         </div>
       </div>
 
-      {/* Main Chat Area */}
       <div className="flex-1 flex flex-col bg-zinc-950 relative">
         {children}
       </div>

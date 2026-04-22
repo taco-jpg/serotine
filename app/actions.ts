@@ -6,7 +6,6 @@ import { getPrisma } from "@/lib/prisma"
 // --- SIGNALING FOR P2P ---
 
 export async function storeSignal(data: {
-  const prisma = getPrisma() 
   messageId: string
   recipientUIDs: string
   senderEphemeralPublicKey: string
@@ -14,6 +13,7 @@ export async function storeSignal(data: {
   answerSDP?: string
   iceCandidates?: string
 }) {
+  const prisma = getPrisma()   // ← 移到这里，函数体第一行
   try {
     const signal = await prisma.p2PSignal.upsert({
       where: { messageId: data.messageId },
@@ -56,12 +56,11 @@ export async function deleteSignal(messageId: string) {
 // --- OFFLINE MESSAGE RELAY ---
 
 export async function storeEncryptedMessage(data: {
-  const prisma = getPrisma() 
   receiverPubKeyHash: string
   encryptedData: string
 }) {
+  const prisma = getPrisma()   // ← 移到这里，函数体第一行
   try {
-    // Expires in 7 days
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
 
     const msg = await prisma.message.create({

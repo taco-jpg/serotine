@@ -7,7 +7,9 @@ CREATE TABLE "Message" (
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- CreateTable
+-- Recreate P2PSignal with correct TEXT types (replaces broken JSONB version from 0001)
+DROP TABLE IF EXISTS "P2PSignal";
+
 CREATE TABLE "P2PSignal" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "messageId" TEXT NOT NULL,

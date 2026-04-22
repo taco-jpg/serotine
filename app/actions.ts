@@ -1,9 +1,5 @@
 "use server"
-
-import { revalidatePath } from "next/cache"
-import { getPrisma } from "@/lib/prisma"
-
-// --- SIGNALING FOR P2P ---
+import { getDB } from "@/lib/db"
 
 export async function storeSignal(data: {
   messageId: string
@@ -13,89 +9,85 @@ export async function storeSignal(data: {
   answerSDP?: string
   iceCandidates?: string
 }) {
-  const prisma = getPrisma()   // ← 移到这里，函数体第一行
+  const db = getDB()
   try {
-    const signal = await prisma.p2PSignal.upsert({
-      where: { messageId: data.messageId },
-      update: data,
-      create: data,
-    })
-    return { success: true, signal }
+    await db.prepare(`
+      INSERT INTO P2PSignal (id, messageId, recipientUIDs, senderEphemeralPublicKey, offerSDP, answerSDP, iceCandidates, createdAt)
+      VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, ?, ?, datetime('now'))
+      ON CONFLICT(messageId) DO UPDATE SET
+        recipientUIDs = excluded.recipientUIDs,
+        senderEphemeralPublicKey = excluded.senderEphemeralPublicKey,
+        offerSDP = excluded.offerSDP,
+        answerSDP = excluded.answerSDP,
+        iceCandidates = excluded.iceCandidates
+    `).bind(
+      data.messageId,
+      data.recipientUIDs,
+      data.senderEphemeralPublicKey,
+      data.offerSDP ?? null,
+      data.answerSDP ?? null,
+      data.iceCandidates ?? null,
+    ).run()
+    return { success: true }
   } catch (error: any) {
-    console.error("Signal store error:", error)
-    return { error: error.message || "Failed to store signal" }
+    return { error: error.message }
   }
 }
 
 export async function getSignal(messageId: string) {
-  const prisma = getPrisma() 
+  const db = getDB()
   try {
-    const signal = await prisma.p2PSignal.findUnique({
-      where: { messageId }
-    })
+    const signal = await db.prepare(
+      `SELECT * FROM P2PSignal WHERE messageId = ?`
+    ).bind(messageId).first()
     return { success: true, signal }
   } catch (error: any) {
-    console.error("Get signal error:", error)
-    return { error: error.message || "Failed to get signal" }
+    return { error: error.message }
   }
 }
 
 export async function deleteSignal(messageId: string) {
-  const prisma = getPrisma() 
+  const db = getDB()
   try {
-    await prisma.p2PSignal.delete({
-      where: { messageId }
-    })
+    await db.prepare(`DELETE FROM P2PSignal WHERE messageId = ?`).bind(messageId).run()
     return { success: true }
   } catch (error: any) {
-    console.error("Delete signal error:", error)
-    return { error: error.message || "Failed to delete signal" }
+    return { error: error.message }
   }
 }
-
-// --- OFFLINE MESSAGE RELAY ---
 
 export async function storeEncryptedMessage(data: {
   receiverPubKeyHash: string
   encryptedData: string
 }) {
-  const prisma = getPrisma()   // ← 移到这里，函数体第一行
+  const db = getDB()
   try {
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-
-    const msg = await prisma.message.create({
-      data: {
-        receiverPubKeyHash: data.receiverPubKeyHash,
-        encryptedData: data.encryptedData,
-        expiresAt,
-      }
-    })
-    return { success: true, messageId: msg.id }
+    await db.prepare(`
+      INSERT INTO Message (id, receiverPubKeyHash, encryptedData, expiresAt, createdAt)
+      VALUES (lower(hex(randomblob(16))), ?, ?, datetime('now', '+7 days'), datetime('now'))
+    `).bind(data.receiverPubKeyHash, data.encryptedData).run()
+    return { success: true }
   } catch (error: any) {
-    console.error("Store message error:", error)
-    return { error: error.message || "Failed to store message" }
+    return { error: error.message }
   }
 }
 
 export async function getMyMessages(receiverPubKeyHash: string) {
-  const prisma = getPrisma() 
+  const db = getDB()
   try {
-    const messages = await prisma.message.findMany({
-      where: { receiverPubKeyHash }
-    })
-    return { success: true, messages }
+    const { results } = await db.prepare(
+      `SELECT * FROM Message WHERE receiverPubKeyHash = ?`
+    ).bind(receiverPubKeyHash).all()
+    return { success: true, messages: results }
   } catch (error: any) {
-    console.error("Get messages error:", error)
-    return { error: error.message || "Failed to get messages" }
+    return { error: error.message }
   }
 }
 
 export async function deleteMessage(messageId: string) {
-  const prisma = getPrisma() 
+  const db = getDB()
   try {
-    await prisma.message.delete({
-      where: { id: messageId }
-    })
+    await db.prepare(`DELETE FROM Message WHERE id = ?`).bind(messageId).run()
     return { success: true }
   } catch (error: any) {
     return { error: "Message delete failed or not found" }

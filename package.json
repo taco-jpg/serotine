@@ -4,16 +4,14 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-  "build": "npx prisma generate && next build",
-  "build:edge": "npx @cloudflare/next-on-pages",
-    "deploy": "npm run build:edge && npx wrangler pages deploy .vercel/output/static",
+    "build": "next build",
+    "build:edge": "opennextjs-cloudflare build",
+    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "lint": "eslint .",
     "start": "next start"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
-    "@prisma/adapter-d1": "^7.7.0",
-    "@prisma/client": "^6.0.0",
     "@radix-ui/react-accordion": "1.2.2",
     "@radix-ui/react-alert-dialog": "1.1.4",
     "@radix-ui/react-aspect-ratio": "1.1.1",
@@ -54,7 +52,6 @@
     "lucide-react": "^0.454.0",
     "next": "16.0.10",
     "next-themes": "latest",
-    "prisma": "^6.0.0",
     "react": "19.2.0",
     "react-day-picker": "9.8.0",
     "react-dom": "19.2.0",
@@ -69,7 +66,7 @@
     "zod": "3.25.76"
   },
   "devDependencies": {
-    "@cloudflare/next-on-pages": "^1.13.16",
+    "@opennextjs/cloudflare": "^1.19.3",
     "@tailwindcss/postcss": "^4.1.9",
     "@types/node": "^22",
     "@types/react": "^19",

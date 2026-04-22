@@ -39,10 +39,7 @@ export function AppLogo({ className }: { className?: string }) {
   return (
     <div className={cn("flex items-center gap-2.5", className)}>
       <SerotineIcon />
-      <span
-        className="text-[18px] font-extrabold tracking-[0.18em] text-foreground"
-        style={{ fontFamily: "'Syne', sans-serif" }}
-      >
+      <span className="font-syne text-[18px] font-extrabold tracking-[0.18em] text-foreground">
         Serotine
       </span>
     </div>

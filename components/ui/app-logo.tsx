@@ -1,24 +1,50 @@
 import { cn } from "@/lib/utils"
 
+function SerotineIcon({ className }: { className?: string }) {
+  const nodes = [
+    { cx: 18, cy: 5 },
+    { cx: 4, cy: 29 },
+    { cx: 32, cy: 29 },
+  ]
+  const edges: [number, number][] = [[0, 1], [0, 2], [1, 2]]
+
+  return (
+    <svg
+      width="36" height="36" viewBox="0 0 36 36"
+      fill="none" xmlns="http://www.w3.org/2000/svg"
+      className={className}
+    >
+      {edges.map(([a, b], i) => (
+        <line
+          key={i}
+          x1={nodes[a].cx} y1={nodes[a].cy}
+          x2={nodes[b].cx} y2={nodes[b].cy}
+          stroke="currentColor" strokeOpacity="0.25"
+          strokeWidth="1.5" strokeLinecap="round"
+        />
+      ))}
+      {nodes.map((n, i) => (
+        <g key={i}>
+          <circle cx={n.cx} cy={n.cy} r="5.5"
+            fill="rgb(110 231 183)" fillOpacity="0.15" />
+          <circle cx={n.cx} cy={n.cy} r="3"
+            fill="rgb(110 231 183)" fillOpacity="0.9" />
+        </g>
+      ))}
+    </svg>
+  )
+}
+
 export function AppLogo({ className }: { className?: string }) {
   return (
-    <div className={cn("flex items-center gap-2", className)}>
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        className="w-8 h-8 text-primary"
+    <div className={cn("flex items-center gap-2.5", className)}>
+      <SerotineIcon />
+      <span
+        className="text-[18px] font-extrabold tracking-[0.18em] text-foreground"
+        style={{ fontFamily: "'Syne', sans-serif" }}
       >
-        {/* Updated logo to a designed "S" shape */}
-        <path d="M4 11a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v1a4 4 0 0 1-4 4H8a4 4 0 0 0-4 4v1a4 4 0 0 0 4 4h8a4 4 0 0 0 4-4" />
-        <path d="M12 2v2" />
-        <path d="M12 20v2" />
-      </svg>
-      <span className="font-serif text-xl font-bold tracking-widest text-foreground">SEROTINE</span>
+        Serotine
+      </span>
     </div>
   )
 }

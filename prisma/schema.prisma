@@ -11,7 +11,7 @@ datasource db {
   url      = "file:./dev.db"
 }
 
-// "加密中继池" for offline messages
+// "Encrypted ZK message relay pool" for offline messages
 model Message {
   id                 String   @id @default(cuid())
   receiverPubKeyHash String

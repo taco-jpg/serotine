@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { storeSignal, getSignal, storeEncryptedMessage, getMyMessages, deleteMessage } from '@/app/actions';
 import { encryptForPeer, decryptFromPeer, importKey } from '@/lib/crypto';
 import { saveMessageToStorage, getMessagesFromStorage } from '@/lib/storage';
+import { RTC_CONFIG } from '@/config/webrtc';
 
 export type Status = 'connecting' | 'online' | 'relay';
 
@@ -10,47 +11,58 @@ export function useP2PChat(targetPubKey: string) {
   const [messages, setMessages] = useState<any[]>([]);
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
-  
+
   const myPrivEncRef = useRef<CryptoKey | null>(null);
   const myPubHexRef = useRef<string>('');
 
   useEffect(() => {
     let mounted = true;
+    let answerPoll: ReturnType<typeof setInterval> | null = null;
+
     const init = async () => {
       // 1. Load keys
-      const encPrivJWKStr = localStorage.getItem("serotine_identity_private_enc");
-      const pubEncHex = localStorage.getItem("serotine_identity_public_enc");
-      
+      const encPrivJWKStr = localStorage.getItem('serotine_identity_private_enc');
+      const pubEncHex = localStorage.getItem('serotine_identity_public_enc');
+
       if (!encPrivJWKStr || !pubEncHex) return;
       myPubHexRef.current = pubEncHex;
-      
+
       const privEncJWK = JSON.parse(encPrivJWKStr);
-      myPrivEncRef.current = await importKey(privEncJWK, "encryption", "private");
-      
+      myPrivEncRef.current = await importKey(privEncJWK, 'encryption', 'private');
+
       // Load local history
       const history = await getMessagesFromStorage(targetPubKey);
-      if (mounted) setMessages(history.sort((a,b) => a.timestamp - b.timestamp));
-      
+      if (mounted) setMessages(history.sort((a, b) => a.timestamp - b.timestamp));
+
       // WebRTC Setup
       try {
-        const pc = new RTCPeerConnection({
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
+        const pc = new RTCPeerConnection(RTC_CONFIG);
         peerRef.current = pc;
-        
+
+        const signalId = `${myPubHexRef.current}_to_${targetPubKey}`;
+        const answerSignalId = `${targetPubKey}_to_${myPubHexRef.current}`;
+        const pendingCandidates: RTCIceCandidate[] = [];
+
+        // Store ICE candidates into our signal record as they arrive
         pc.onicecandidate = async (e) => {
           if (e.candidate) {
-            // ICE Candidates handling could be added to D1 signal, keeping simple for now
+            pendingCandidates.push(e.candidate);
+            await storeSignal({
+              messageId: signalId,
+              recipientUIDs: JSON.stringify([targetPubKey]),
+              senderEphemeralPublicKey: myPubHexRef.current,
+              iceCandidates: JSON.stringify(pendingCandidates),
+            });
           }
         };
 
         // Create Data Channel
         const dc = pc.createDataChannel('chat');
         dataChannelRef.current = dc;
-        
+
         dc.onopen = () => { if (mounted) setStatus('online'); };
         dc.onclose = () => { if (mounted) setStatus('relay'); };
-        
+
         dc.onmessage = async (e) => {
           const msg = JSON.parse(e.data);
           if (mounted) {
@@ -66,34 +78,61 @@ export function useP2PChat(targetPubKey: string) {
           receiveDc.onclose = dc.onclose;
         };
 
-        // Initiate signaling (Store offer in D1)
+        // Store our offer in D1
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        const signalId = `${myPubHexRef.current}_to_${targetPubKey}`;
-        
         await storeSignal({
           messageId: signalId,
           recipientUIDs: JSON.stringify([targetPubKey]),
           senderEphemeralPublicKey: myPubHexRef.current,
-          offerSDP: JSON.stringify(offer)
+          offerSDP: JSON.stringify(offer),
         });
 
-        // Timeout to relay
+        // Poll for the answer from the remote peer
+        let answerApplied = false;
+        answerPoll = setInterval(async () => {
+          if (answerApplied || !mounted) {
+            if (answerPoll) clearInterval(answerPoll);
+            return;
+          }
+
+          const res = await getSignal(answerSignalId);
+          if (res.success && res.signal?.answerSDP) {
+            answerApplied = true;
+            if (answerPoll) clearInterval(answerPoll);
+
+            const answer = JSON.parse(res.signal.answerSDP) as RTCSessionDescriptionInit;
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+            // Apply any ICE candidates the peer already stored
+            if (res.signal.iceCandidates) {
+              const candidates: RTCIceCandidateInit[] = JSON.parse(res.signal.iceCandidates);
+              for (const c of candidates) {
+                await pc.addIceCandidate(new RTCIceCandidate(c));
+              }
+            }
+          }
+        }, 2000);
+
+        // Fall back to relay after 10 s if P2P never completes
         setTimeout(() => {
+          if (answerPoll) clearInterval(answerPoll);
           if (mounted && dc.readyState !== 'open') {
             setStatus('relay');
           }
-        }, 5000);
+        }, 10000);
+
       } catch (err) {
         if (mounted) setStatus('relay');
       }
     };
+
     init();
-    
+
     // Polling Relay Messages
     const pollRelay = setInterval(async () => {
       if (!myPubHexRef.current || !myPrivEncRef.current) return;
-      
+
       const res = await getMyMessages(myPubHexRef.current);
       if (res.success && res.messages) {
         for (const msg of res.messages) {
@@ -104,16 +143,16 @@ export function useP2PChat(targetPubKey: string) {
               peerPubKey: targetPubKey,
               senderPubKey: targetPubKey,
               content: decryptedContent,
-              timestamp: new Date(msg.createdAt).getTime()
+              timestamp: new Date(msg.createdAt).getTime(),
             };
             setMessages(prev => {
               if (prev.find(m => m.id === msg.id)) return prev;
-              return [...prev, chatMsg].sort((a,b) => a.timestamp - b.timestamp);
+              return [...prev, chatMsg].sort((a, b) => a.timestamp - b.timestamp);
             });
             await saveMessageToStorage(chatMsg);
             await deleteMessage(msg.id); // Physical deletion
-          } catch(e) {
-            // Ignore decryption error, might not be from this peer
+          } catch (e) {
+            // Ignore decryption errors — message may be from a different peer
           }
         }
       }
@@ -122,6 +161,7 @@ export function useP2PChat(targetPubKey: string) {
     return () => {
       mounted = false;
       clearInterval(pollRelay);
+      if (answerPoll) clearInterval(answerPoll);
       if (peerRef.current) peerRef.current.close();
     };
   }, [targetPubKey]);
@@ -134,10 +174,10 @@ export function useP2PChat(targetPubKey: string) {
       peerPubKey: targetPubKey,
       senderPubKey: myPubHexRef.current,
       content,
-      timestamp
+      timestamp,
     };
-    
-    // optimistic update
+
+    // Optimistic update
     setMessages(prev => [...prev, msg]);
     await saveMessageToStorage(msg);
 
@@ -150,7 +190,7 @@ export function useP2PChat(targetPubKey: string) {
         const encrypted = await encryptForPeer(content, myPrivEncRef.current, targetPubKey);
         await storeEncryptedMessage({
           receiverPubKeyHash: targetPubKey,
-          encryptedData: encrypted
+          encryptedData: encrypted,
         });
       }
     }

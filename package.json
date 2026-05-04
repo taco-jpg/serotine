@@ -66,11 +66,13 @@
     "zod": "3.25.76"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@opennextjs/cloudflare": "^1.19.3",
     "@tailwindcss/postcss": "^4.1.9",
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@typescript-eslint/parser": "^8.59.1",
     "postcss": "^8.5",
     "tailwindcss": "^4.1.9",
     "tw-animate-css": "1.3.3",

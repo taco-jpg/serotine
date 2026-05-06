@@ -41,18 +41,26 @@ export function useP2PChat(targetPubKey: string) {
 
         const signalId = `${myPubHexRef.current}_to_${targetPubKey}`;
         const answerSignalId = `${targetPubKey}_to_${myPubHexRef.current}`;
-        const pendingCandidates: RTCIceCandidate[] = [];
+        const allCandidates: RTCIceCandidate[] = [];
+        let storeTimeout: ReturnType<typeof setTimeout> | null = null;
 
-        // Store ICE candidates into our signal record as they arrive
+        // Debounce candidate storage to batch updates (prevents memory bloat and excess DB writes)
+        const storeCandidates = async () => {
+          if (allCandidates.length === 0) return;
+          await storeSignal({
+            messageId: signalId,
+            recipientUIDs: JSON.stringify([targetPubKey]),
+            senderEphemeralPublicKey: myPubHexRef.current,
+            iceCandidates: JSON.stringify(allCandidates),
+          });
+        };
+
         pc.onicecandidate = async (e) => {
           if (e.candidate) {
-            pendingCandidates.push(e.candidate);
-            await storeSignal({
-              messageId: signalId,
-              recipientUIDs: JSON.stringify([targetPubKey]),
-              senderEphemeralPublicKey: myPubHexRef.current,
-              iceCandidates: JSON.stringify(pendingCandidates),
-            });
+            allCandidates.push(e.candidate);
+            // Debounce: batch candidate updates every 250ms
+            if (storeTimeout) clearTimeout(storeTimeout);
+            storeTimeout = setTimeout(storeCandidates, 250);
           }
         };
 

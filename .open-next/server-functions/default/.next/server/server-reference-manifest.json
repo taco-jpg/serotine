@@ -1,0 +1,66 @@
+{
+  "node": {},
+  "edge": {
+    "40193b5521c0fcd14abbaca3e950d8504dce3b8764": {
+      "workers": {
+        "app/chat/[pubkey]/page": {
+          "moduleId": 96515,
+          "async": false,
+          "exportedName": "storeSignal",
+          "filename": "app/actions.ts"
+        }
+      },
+      "filename": "app/actions.ts",
+      "exportedName": "storeSignal"
+    },
+    "405e13aa3d3277d55126fa73481ffe3b74eaa4c12a": {
+      "workers": {
+        "app/chat/[pubkey]/page": {
+          "moduleId": 96515,
+          "async": false,
+          "exportedName": "getSignal",
+          "filename": "app/actions.ts"
+        }
+      },
+      "filename": "app/actions.ts",
+      "exportedName": "getSignal"
+    },
+    "40b62bd3f66c9982c39376590f4aef9b0af0624631": {
+      "workers": {
+        "app/chat/[pubkey]/page": {
+          "moduleId": 96515,
+          "async": false,
+          "exportedName": "storeEncryptedMessage",
+          "filename": "app/actions.ts"
+        }
+      },
+      "filename": "app/actions.ts",
+      "exportedName": "storeEncryptedMessage"
+    },
+    "402d6de6dddcca529d31c593a538bdf855ff31d695": {
+      "workers": {
+        "app/chat/[pubkey]/page": {
+          "moduleId": 96515,
+          "async": false,
+          "exportedName": "getMyMessages",
+          "filename": "app/actions.ts"
+        }
+      },
+      "filename": "app/actions.ts",
+      "exportedName": "getMyMessages"
+    },
+    "40acd37bb104b97edd40298b442f1f230fb961008f": {
+      "workers": {
+        "app/chat/[pubkey]/page": {
+          "moduleId": 96515,
+          "async": false,
+          "exportedName": "deleteMessage",
+          "filename": "app/actions.ts"
+        }
+      },
+      "filename": "app/actions.ts",
+      "exportedName": "deleteMessage"
+    }
+  },
+  "encryptionKey": "ChQLw9DGRwL2cDxrw5xI8Hi46ZJQrIGjrqF95wI4AG0="
+}

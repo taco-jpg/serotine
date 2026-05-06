@@ -1,0 +1,104 @@
+{
+  "version": 3,
+  "middleware": {},
+  "sortedMiddleware": [],
+  "functions": {
+    "/chat/[pubkey]/page": {
+      "files": [
+        "server/middleware-build-manifest.js",
+        "server/interception-route-rewrite-manifest.js",
+        "required-server-files.js",
+        "server/next-font-manifest.js",
+        "server/server-reference-manifest.js",
+        "server/edge/chunks/ssr/_011zqj~._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_02yst3m._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_0ofbtjt._.js",
+        "server/edge/chunks/ssr/node_modules__pnpm_0t3mwvv._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_esm_0lybjn1._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_0t7pu2i._.js",
+        "server/edge/chunks/ssr/_0b.ljt1._.js",
+        "server/edge/chunks/ssr/app_chat_[pubkey]_chat-client_tsx_08id7ci._.js",
+        "server/app/chat/[pubkey]/page_client-reference-manifest.js",
+        "server/edge/chunks/ssr/_0dnub.o._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_compiled_0n..ss3._.js",
+        "server/edge/chunks/ssr/node_modules__pnpm_0tcpkgy._.js",
+        "server/edge/chunks/ssr/[root-of-the-server]__0kj_01g._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_esm_build_templates_edge-ssr-app_00v5qcw.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_0t8m_nq._.js",
+        "server/edge/chunks/ssr/[root-of-the-server]__04oh5ad._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_0u.nr5x._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_0uqzd~_._.js",
+        "server/edge/chunks/ssr/[root-of-the-server]__0v2_kb2._.js",
+        "server/edge/chunks/ssr/node_modules__pnpm_0ex2be3._.js",
+        "server/edge/chunks/ssr/0tlm_next_dist_esm_build_templates_edge-wrapper_0lxydle.js",
+        "server/app/chat/[pubkey]/page/react-loadable-manifest.js"
+      ],
+      "name": "app/chat/[pubkey]/page",
+      "page": "/chat/[pubkey]/page",
+      "entrypoint": "server/edge/chunks/ssr/0tlm_next_dist_esm_build_templates_edge-wrapper_0lxydle.js",
+      "matchers": [
+        {
+          "regexp": "^/chat/(?P<nxtPpubkey>[^/]+?)(?:/)?$",
+          "originalSource": "/chat/[pubkey]"
+        }
+      ],
+      "wasm": [],
+      "assets": [],
+      "env": {
+        "__NEXT_BUILD_ID": "EO6pYdTCBDNvLVaOcZqz4",
+        "NEXT_SERVER_ACTIONS_ENCRYPTION_KEY": "ChQLw9DGRwL2cDxrw5xI8Hi46ZJQrIGjrqF95wI4AG0=",
+        "__NEXT_PREVIEW_MODE_ID": "daca2fb1399455c409d3ea118148a968",
+        "__NEXT_PREVIEW_MODE_ENCRYPTION_KEY": "f1f07931797ca87dd13e8ce423c3d5ef3afde4db687fee1cdc4525dd510e93f1",
+        "__NEXT_PREVIEW_MODE_SIGNING_KEY": "d4dd9cf47269f4fc38390209a517b0863bc9e2e919101e8dcd222130f2d44ea2"
+      }
+    },
+    "/chat/page": {
+      "files": [
+        "server/middleware-build-manifest.js",
+        "server/interception-route-rewrite-manifest.js",
+        "required-server-files.js",
+        "server/next-font-manifest.js",
+        "server/server-reference-manifest.js",
+        "server/edge/chunks/ssr/_011zqj~._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_02yst3m._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_0ofbtjt._.js",
+        "server/edge/chunks/ssr/node_modules__pnpm_0t3mwvv._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_esm_0lybjn1._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_0t7pu2i._.js",
+        "server/edge/chunks/ssr/_0b.ljt1._.js",
+        "server/app/chat/page_client-reference-manifest.js",
+        "server/edge/chunks/ssr/_next-internal_server_app_chat_page_actions_0.msz6f.js",
+        "server/edge/chunks/ssr/node_modules__pnpm_0tcpkgy._.js",
+        "server/edge/chunks/ssr/[root-of-the-server]__0y69n42._.js",
+        "server/edge/chunks/ssr/node_modules__pnpm_0ex2be3._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_esm_build_templates_edge-ssr-app_0k4slsh.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_0t8m_nq._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_0uqzd~_._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_0u.nr5x._.js",
+        "server/edge/chunks/ssr/[root-of-the-server]__04oh5ad._.js",
+        "server/edge/chunks/ssr/0y-8_next_dist_compiled_0n..ss3._.js",
+        "server/edge/chunks/ssr/[root-of-the-server]__0v2_kb2._.js",
+        "server/edge/chunks/ssr/0tlm_next_dist_esm_build_templates_edge-wrapper_0v7v025.js",
+        "server/app/chat/page/react-loadable-manifest.js"
+      ],
+      "name": "app/chat/page",
+      "page": "/chat/page",
+      "entrypoint": "server/edge/chunks/ssr/0tlm_next_dist_esm_build_templates_edge-wrapper_0v7v025.js",
+      "matchers": [
+        {
+          "regexp": "^/chat(?:/)?$",
+          "originalSource": "/chat"
+        }
+      ],
+      "wasm": [],
+      "assets": [],
+      "env": {
+        "__NEXT_BUILD_ID": "EO6pYdTCBDNvLVaOcZqz4",
+        "NEXT_SERVER_ACTIONS_ENCRYPTION_KEY": "ChQLw9DGRwL2cDxrw5xI8Hi46ZJQrIGjrqF95wI4AG0=",
+        "__NEXT_PREVIEW_MODE_ID": "daca2fb1399455c409d3ea118148a968",
+        "__NEXT_PREVIEW_MODE_ENCRYPTION_KEY": "f1f07931797ca87dd13e8ce423c3d5ef3afde4db687fee1cdc4525dd510e93f1",
+        "__NEXT_PREVIEW_MODE_SIGNING_KEY": "d4dd9cf47269f4fc38390209a517b0863bc9e2e919101e8dcd222130f2d44ea2"
+      }
+    }
+  }
+}

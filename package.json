@@ -1,7 +1,6 @@
 {
   "name": "serotine",
   "version": "1.0.0",
-  "type": "module",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -67,14 +66,14 @@
     "zod": "3.25.76"
   },
   "devDependencies": {
-    "@eslint/js": "^9.0.0",
+    "@eslint/js": "^10.0.1",
     "@opennextjs/cloudflare": "^1.19.3",
     "@tailwindcss/postcss": "^4.1.9",
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
-    "@typescript-eslint/parser": "^8.0.0",
+    "@typescript-eslint/parser": "^8.59.1",
     "eslint": "^10.1.0",
     "globals": "^17.6.0",
     "postcss": "^8.5",

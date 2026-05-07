@@ -1,4 +1,3 @@
-export const runtime = 'edge';
 
 import { Shield } from "lucide-react"
 

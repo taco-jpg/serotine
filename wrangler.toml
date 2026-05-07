@@ -1,8 +1,16 @@
 #:schema node_modules/wrangler/config-schema.json
 name = "serotine"
-compatibility_date = "2026-05-01"
-compatibility_flags = ["nodejs_compat"]
+compatibility_date = "2026-05-06"
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 main = ".open-next/worker.js"
+
+# Workers + Static Assets — serve _next/static/* from .open-next/assets
+assets = { directory = ".open-next/assets", binding = "ASSETS" }
+
+# Self-reference service binding (required by OpenNext for incremental cache)
+[[services]]
+binding = "WORKER_SELF_REFERENCE"
+service = "serotine"
 
 [[d1_databases]]
 binding = "serotine_db"

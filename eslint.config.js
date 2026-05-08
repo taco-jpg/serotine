@@ -5,7 +5,7 @@ const globals = require('globals')
 
 module.exports = [
   {
-    ignores: ['node_modules', '.next', '.vercel', 'dist', 'build', '.git', 'out', 'eslint.config.js']
+    ignores: ['node_modules', '.next', '.open-next', '.vercel', 'dist', 'build', '.git', 'out', 'eslint.config.js']
   },
   {
     files: ['**/*.js', '**/*.cjs', '**/*.mjs', '**/*.jsx'],

@@ -41,7 +41,7 @@ export async function saveMessageToStorage(message: {
 
 export async function getMessagesFromStorage(peerPubKey: string) {
   const db = await initDB()
-  return db.getAllFromIndex("messages", "by-peer", peerPubKey as any)
+  return db.getAllFromIndex("messages", "by-peer", peerPubKey)
 }
 
 export async function deleteMessageFromStorage(id: string) {

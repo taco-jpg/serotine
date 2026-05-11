@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Loader2, Key } from "lucide-react"
 
-import { generateEncryptionKeyPair, generateSigningKeyPair, exportPublicKeyToHex, exportKey, importKey } from "@/lib/crypto"
+import { generateEncryptionKeyPair, generateSigningKeyPair, exportPublicKeyToHex, exportKey } from "@/lib/crypto"
 
 export function LoginForm() {
   const router = useRouter()
@@ -44,9 +44,10 @@ export function LoginForm() {
       
       setHasIdentity(true)
       router.push("/chat") // Redirect to chat
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err)
-      setError(err.message || "Failed to generate identity")
+      const message = err instanceof Error ? err.message : "Failed to generate identity"
+      setError(message)
     } finally {
       setLoading(false)
     }

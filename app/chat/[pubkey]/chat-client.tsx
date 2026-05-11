@@ -27,8 +27,12 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   useEffect(() => {
     const saved = localStorage.getItem("serotine_contacts_v2")
     if (saved) {
-      const parsed = JSON.parse(saved)
-      const contact = parsed.find((c: any) => c.pub === targetPubKey)
+      interface Contact {
+        pub: string
+        alias?: string
+      }
+      const parsed = JSON.parse(saved) as Contact[]
+      const contact = parsed.find((c) => c.pub === targetPubKey)
       if (contact && contact.alias) setAlias(contact.alias)
     }
   }, [targetPubKey])
@@ -91,7 +95,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
           <span>No central server stores your keys.</span>
         </div>
         
-        {messages.map((msg: any) => {
+        {messages.map((msg) => {
           const isMine = msg.senderPubKey === myPub
           return (
             <div key={msg.id} className={`flex flex-col ${isMine ? "items-end" : "items-start"}`}>

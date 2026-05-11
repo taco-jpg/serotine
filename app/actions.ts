@@ -29,8 +29,9 @@ export async function storeSignal(data: {
       data.iceCandidates ?? null,
     ).run()
     return { success: true }
-  } catch (error: any) {
-    return { error: error.message }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error"
+    return { error: message }
   }
 }
 
@@ -41,8 +42,9 @@ export async function getSignal(messageId: string) {
       `SELECT * FROM P2PSignal WHERE messageId = ?`
     ).bind(messageId).first()
     return { success: true, signal }
-  } catch (error: any) {
-    return { error: error.message }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error"
+    return { error: message }
   }
 }
 
@@ -51,8 +53,9 @@ export async function deleteSignal(messageId: string) {
   try {
     await db.prepare(`DELETE FROM P2PSignal WHERE messageId = ?`).bind(messageId).run()
     return { success: true }
-  } catch (error: any) {
-    return { error: error.message }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error"
+    return { error: message }
   }
 }
 
@@ -67,8 +70,9 @@ export async function storeEncryptedMessage(data: {
       VALUES (lower(hex(randomblob(16))), ?, ?, datetime('now', '+7 days'), datetime('now'))
     `).bind(data.receiverPubKeyHash, data.encryptedData).run()
     return { success: true }
-  } catch (error: any) {
-    return { error: error.message }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error"
+    return { error: message }
   }
 }
 
@@ -79,8 +83,9 @@ export async function getMyMessages(receiverPubKeyHash: string) {
       `SELECT * FROM Message WHERE receiverPubKeyHash = ?`
     ).bind(receiverPubKeyHash).all()
     return { success: true, messages: results }
-  } catch (error: any) {
-    return { error: error.message }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error"
+    return { error: message }
   }
 }
 
@@ -89,7 +94,7 @@ export async function deleteMessage(messageId: string) {
   try {
     await db.prepare(`DELETE FROM Message WHERE id = ?`).bind(messageId).run()
     return { success: true }
-  } catch (error: any) {
+  } catch {
     return { error: "Message delete failed or not found" }
   }
 }

@@ -6,9 +6,17 @@ import { RTC_CONFIG } from '@/config/webrtc';
 
 export type Status = 'connecting' | 'online' | 'relay';
 
+export interface ChatMessage {
+  id: string
+  peerPubKey: string
+  senderPubKey: string
+  content: string
+  timestamp: number
+}
+
 export function useP2PChat(targetPubKey: string) {
   const [status, setStatus] = useState<Status>('connecting');
-  const [messages, setMessages] = useState<any[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
 
@@ -72,7 +80,7 @@ export function useP2PChat(targetPubKey: string) {
         dc.onclose = () => { if (mounted) setStatus('relay'); };
 
         dc.onmessage = async (e) => {
-          const msg = JSON.parse(e.data);
+          const msg = JSON.parse(e.data) as ChatMessage;
           if (mounted) {
             setMessages(prev => [...prev, msg]);
             await saveMessageToStorage(msg);
@@ -130,7 +138,7 @@ export function useP2PChat(targetPubKey: string) {
           }
         }, 10000);
 
-      } catch (err) {
+      } catch {
         if (mounted) setStatus('relay');
       }
     };
@@ -159,7 +167,7 @@ export function useP2PChat(targetPubKey: string) {
             });
             await saveMessageToStorage(chatMsg);
             await deleteMessage(msg.id); // Physical deletion
-          } catch (e) {
+          } catch {
             // Ignore decryption errors — message may be from a different peer
           }
         }

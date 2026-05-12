@@ -19,6 +19,8 @@ export function useP2PChat(targetPubKey: string) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
+  const storeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const storeCandidatesRef = useRef<(() => Promise<void>) | null>(null);
 
   const myPrivEncRef = useRef<CryptoKey | null>(null);
   const myPubHexRef = useRef<string>('');
@@ -50,7 +52,6 @@ export function useP2PChat(targetPubKey: string) {
         const signalId = `${myPubHexRef.current}_to_${targetPubKey}`;
         const answerSignalId = `${targetPubKey}_to_${myPubHexRef.current}`;
         const allCandidates: RTCIceCandidate[] = [];
-        let storeTimeout: ReturnType<typeof setTimeout> | null = null;
 
         // Debounce candidate storage to batch updates (prevents memory bloat and excess DB writes)
         const storeCandidates = async () => {
@@ -62,13 +63,14 @@ export function useP2PChat(targetPubKey: string) {
             iceCandidates: JSON.stringify(allCandidates),
           });
         };
+        storeCandidatesRef.current = storeCandidates;
 
         pc.onicecandidate = async (e) => {
           if (e.candidate) {
             allCandidates.push(e.candidate);
             // Debounce: batch candidate updates every 250ms
-            if (storeTimeout) clearTimeout(storeTimeout);
-            storeTimeout = setTimeout(storeCandidates, 250);
+            if (storeTimeoutRef.current) clearTimeout(storeTimeoutRef.current);
+            storeTimeoutRef.current = setTimeout(storeCandidates, 250);
           }
         };
 
@@ -178,6 +180,13 @@ export function useP2PChat(targetPubKey: string) {
       mounted = false;
       clearInterval(pollRelay);
       if (answerPoll) clearInterval(answerPoll);
+      if (storeTimeoutRef.current) clearTimeout(storeTimeoutRef.current);
+      // Flush any pending ICE candidates before cleanup
+      if (storeCandidatesRef.current) {
+        storeCandidatesRef.current().catch(() => {
+          // Silently ignore errors during cleanup
+        });
+      }
       if (peerRef.current) peerRef.current.close();
     };
   }, [targetPubKey]);

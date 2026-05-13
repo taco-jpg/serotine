@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { useState, useEffect } from "react"
-import { Shield, Plus } from "lucide-react"
+import { Shield, Plus, X } from "lucide-react"
 import { IdentityIcon } from "@/components/ui/identity-icon"
 
 export default function ChatLayoutClient({ children }: { children: React.ReactNode }) {
@@ -46,6 +46,12 @@ export default function ChatLayoutClient({ children }: { children: React.ReactNo
     localStorage.setItem("serotine_contacts_v2", JSON.stringify(updated))
     setNewContactPub("")
     setNewContactAlias("")
+  }
+
+  const deleteContact = (pub: string) => {
+    const updated = contacts.filter(c => c.pub !== pub)
+    setContacts(updated)
+    localStorage.setItem("serotine_contacts_v2", JSON.stringify(updated))
   }
 
   const formatPubKey = (key: string) => {
@@ -117,15 +123,27 @@ export default function ChatLayoutClient({ children }: { children: React.ReactNo
 
           <div className="space-y-1">
             {contacts.map(c => (
-              <Link key={c.pub} href={`/chat/${c.pub}`} className="block">
-                <div className="flex items-center space-x-3 p-2 rounded-lg hover:bg-zinc-900 transition-colors border border-transparent hover:border-zinc-800 cursor-pointer">
-                  <IdentityIcon pubKey={c.pub} size={32} />
-                  <div className="flex flex-col overflow-hidden">
-                    <span className="text-sm font-medium text-zinc-200 truncate">{c.alias || formatPubKey(c.pub)}</span>
-                    {c.alias && <span className="text-xs font-mono text-zinc-500 truncate">{formatPubKey(c.pub)}</span>}
+              <div key={c.pub} className="flex items-center group">
+                <Link href={`/chat/${c.pub}`} className="block flex-1">
+                  <div className="flex items-center space-x-3 p-2 rounded-lg hover:bg-zinc-900 transition-colors border border-transparent hover:border-zinc-800 cursor-pointer">
+                    <IdentityIcon pubKey={c.pub} size={32} />
+                    <div className="flex flex-col overflow-hidden">
+                      <span className="text-sm font-medium text-zinc-200 truncate">{c.alias || formatPubKey(c.pub)}</span>
+                      {c.alias && <span className="text-xs font-mono text-zinc-500 truncate">{formatPubKey(c.pub)}</span>}
+                    </div>
                   </div>
-                </div>
-              </Link>
+                </Link>
+                <button
+                  onClick={(e) => {
+                    e.preventDefault()
+                    deleteContact(c.pub)
+                  }}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-red-500/20 rounded-md ml-1 shrink-0"
+                  title="Delete contact"
+                >
+                  <X className="h-4 w-4 text-red-500" />
+                </button>
+              </div>
             ))}
           </div>
         </div>

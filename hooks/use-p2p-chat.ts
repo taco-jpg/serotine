@@ -79,7 +79,11 @@ export function useP2PChat(targetPubKey: string) {
         dataChannelRef.current = dc;
 
         dc.onopen = () => { if (mounted) setStatus('online'); };
-        dc.onclose = () => { if (mounted) setStatus('relay'); };
+        dc.onclose = async () => {
+          if (mounted) setStatus('relay');
+          // Immediately poll for relay messages when P2P connection fails
+          await pollRelayMessages();
+        };
 
         dc.onmessage = async (e) => {
           const msg = JSON.parse(e.data) as ChatMessage;
@@ -133,10 +137,12 @@ export function useP2PChat(targetPubKey: string) {
         }, 2000);
 
         // Fall back to relay after 10 s if P2P never completes
-        setTimeout(() => {
+        setTimeout(async () => {
           if (answerPoll) clearInterval(answerPoll);
           if (mounted && dc.readyState !== 'open') {
             setStatus('relay');
+            // Immediately poll for relay messages when timeout-based fallback occurs
+            await pollRelayMessages();
           }
         }, 10000);
 
@@ -145,10 +151,7 @@ export function useP2PChat(targetPubKey: string) {
       }
     };
 
-    init();
-
-    // Polling Relay Messages
-    const pollRelay = setInterval(async () => {
+    const pollRelayMessages = async () => {
       if (!myPubHexRef.current || !myPrivEncRef.current) return;
 
       const res = await getMyMessages(myPubHexRef.current);
@@ -163,18 +166,25 @@ export function useP2PChat(targetPubKey: string) {
               content: decryptedContent,
               timestamp: new Date(msg.createdAt).getTime(),
             };
-            setMessages(prev => {
-              if (prev.find(m => m.id === msg.id)) return prev;
-              return [...prev, chatMsg].sort((a, b) => a.timestamp - b.timestamp);
-            });
+            if (mounted) {
+              setMessages(prev => {
+                if (prev.find(m => m.id === msg.id)) return prev;
+                return [...prev, chatMsg].sort((a, b) => a.timestamp - b.timestamp);
+              });
+            }
             await saveMessageToStorage(chatMsg);
-            await deleteMessage(msg.id); // Physical deletion
+            await deleteMessage(msg.id);
           } catch {
             // Ignore decryption errors — message may be from a different peer
           }
         }
       }
-    }, 3000);
+    };
+
+    init();
+
+    // Polling Relay Messages
+    const pollRelay = setInterval(pollRelayMessages, 3000);
 
     return () => {
       mounted = false;

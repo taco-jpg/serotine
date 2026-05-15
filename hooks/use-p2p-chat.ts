@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { v4 as uuidv4 } from 'uuid';
 import { storeSignal, getSignal, storeEncryptedMessage, getMyMessages, deleteMessage } from '@/app/actions';
 import { encryptForPeer, decryptFromPeer, importKey } from '@/lib/crypto';
 import { saveMessageToStorage, getMessagesFromStorage } from '@/lib/storage';
@@ -203,7 +204,7 @@ export function useP2PChat(targetPubKey: string) {
 
   const sendMessage = async (content: string) => {
     const timestamp = Date.now();
-    const id = myPubHexRef.current + '_' + timestamp;
+    const id = uuidv4();
     const msg = {
       id,
       peerPubKey: targetPubKey,

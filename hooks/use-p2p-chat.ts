@@ -22,6 +22,8 @@ export function useP2PChat(targetPubKey: string) {
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
   const storeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const storeCandidatesRef = useRef<(() => Promise<void>) | null>(null);
+  const pollRelayRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollBackoffRef = useRef<number>(3000); // Start at 3s, increases on no-message polls
 
   const myPrivEncRef = useRef<CryptoKey | null>(null);
   const myPubHexRef = useRef<string>('');
@@ -79,9 +81,18 @@ export function useP2PChat(targetPubKey: string) {
         const dc = pc.createDataChannel('chat');
         dataChannelRef.current = dc;
 
-        dc.onopen = () => { if (mounted) setStatus('online'); };
+        dc.onopen = () => {
+          if (mounted) {
+            setStatus('online');
+            clearRelayPolling();
+          }
+        };
         dc.onclose = async () => {
-          if (mounted) setStatus('relay');
+          if (mounted) {
+            setStatus('relay');
+            pollBackoffRef.current = 3000; // Reset backoff when P2P fails
+            setupRelayPolling();
+          }
           // Immediately poll for relay messages when P2P connection fails
           await pollRelayMessages();
         };
@@ -142,13 +153,18 @@ export function useP2PChat(targetPubKey: string) {
           if (answerPoll) clearInterval(answerPoll);
           if (mounted && dc.readyState !== 'open') {
             setStatus('relay');
+            pollBackoffRef.current = 3000; // Reset backoff when timeout fallback occurs
+            setupRelayPolling();
             // Immediately poll for relay messages when timeout-based fallback occurs
             await pollRelayMessages();
           }
         }, 10000);
 
       } catch {
-        if (mounted) setStatus('relay');
+        if (mounted) {
+          setStatus('relay');
+          setupRelayPolling();
+        }
       }
     };
 
@@ -156,7 +172,9 @@ export function useP2PChat(targetPubKey: string) {
       if (!myPubHexRef.current || !myPrivEncRef.current) return;
 
       const res = await getMyMessages(myPubHexRef.current);
-      if (res.success && res.messages) {
+      if (res.success && res.messages && res.messages.length > 0) {
+        // Reset backoff when messages are found
+        pollBackoffRef.current = 3000;
         for (const msg of res.messages) {
           try {
             const decryptedContent = await decryptFromPeer(msg.encryptedData, myPrivEncRef.current, targetPubKey);
@@ -179,17 +197,29 @@ export function useP2PChat(targetPubKey: string) {
             // Ignore decryption errors — message may be from a different peer
           }
         }
+      } else {
+        // Increase backoff exponentially (max 30s) when no messages are found
+        pollBackoffRef.current = Math.min(pollBackoffRef.current * 1.5, 30000);
+      }
+    };
+
+    const setupRelayPolling = () => {
+      if (pollRelayRef.current) clearInterval(pollRelayRef.current);
+      pollRelayRef.current = setInterval(pollRelayMessages, pollBackoffRef.current);
+    };
+
+    const clearRelayPolling = () => {
+      if (pollRelayRef.current) {
+        clearInterval(pollRelayRef.current);
+        pollRelayRef.current = null;
       }
     };
 
     init();
 
-    // Polling Relay Messages
-    const pollRelay = setInterval(pollRelayMessages, 3000);
-
     return () => {
       mounted = false;
-      clearInterval(pollRelay);
+      clearRelayPolling();
       if (answerPoll) clearInterval(answerPoll);
       if (storeTimeoutRef.current) clearTimeout(storeTimeoutRef.current);
       // Flush any pending ICE candidates before cleanup

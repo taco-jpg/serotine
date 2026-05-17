@@ -1,7 +1,8 @@
 import { getCloudflareContext } from '@opennextjs/cloudflare'
+import type { D1Database } from '@cloudflare/workers-types/experimental'
 
 interface CloudflareEnv {
-  serotine_db: unknown
+  serotine_db: D1Database
 }
 
 export async function getDB() {

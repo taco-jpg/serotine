@@ -204,13 +204,21 @@ export function useP2PChat(targetPubKey: string) {
     };
 
     const setupRelayPolling = () => {
-      if (pollRelayRef.current) clearInterval(pollRelayRef.current);
-      pollRelayRef.current = setInterval(pollRelayMessages, pollBackoffRef.current);
+      if (pollRelayRef.current) clearTimeout(pollRelayRef.current);
+
+      const scheduleNextPoll = async () => {
+        await pollRelayMessages();
+        if (mounted) {
+          pollRelayRef.current = setTimeout(scheduleNextPoll, pollBackoffRef.current);
+        }
+      };
+
+      pollRelayRef.current = setTimeout(scheduleNextPoll, pollBackoffRef.current);
     };
 
     const clearRelayPolling = () => {
       if (pollRelayRef.current) {
-        clearInterval(pollRelayRef.current);
+        clearTimeout(pollRelayRef.current);
         pollRelayRef.current = null;
       }
     };

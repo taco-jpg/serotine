@@ -172,34 +172,36 @@ export function useP2PChat(targetPubKey: string) {
       if (!myPubHexRef.current || !myPrivEncRef.current) return;
 
       const res = await getMyMessages(myPubHexRef.current);
-      if (res.success && res.messages && res.messages.length > 0) {
-        // Reset backoff when messages are found
-        pollBackoffRef.current = 3000;
-        for (const msg of res.messages) {
-          try {
-            const decryptedContent = await decryptFromPeer(msg.encryptedData, myPrivEncRef.current, targetPubKey);
-            const chatMsg = {
-              id: msg.id,
-              peerPubKey: targetPubKey,
-              senderPubKey: targetPubKey,
-              content: decryptedContent,
-              timestamp: new Date(msg.createdAt).getTime(),
-            };
-            if (mounted) {
-              setMessages(prev => {
-                if (prev.find(m => m.id === msg.id)) return prev;
-                return [...prev, chatMsg].sort((a, b) => a.timestamp - b.timestamp);
-              });
+      if (res.success) {
+        if (res.messages && res.messages.length > 0) {
+          // Reset backoff when messages are found
+          pollBackoffRef.current = 3000;
+          for (const msg of res.messages) {
+            try {
+              const decryptedContent = await decryptFromPeer(msg.encryptedData, myPrivEncRef.current, targetPubKey);
+              const chatMsg = {
+                id: msg.id,
+                peerPubKey: targetPubKey,
+                senderPubKey: targetPubKey,
+                content: decryptedContent,
+                timestamp: new Date(msg.createdAt).getTime(),
+              };
+              if (mounted) {
+                setMessages(prev => {
+                  if (prev.find(m => m.id === msg.id)) return prev;
+                  return [...prev, chatMsg].sort((a, b) => a.timestamp - b.timestamp);
+                });
+              }
+              await saveMessageToStorage(chatMsg);
+              await deleteMessage(msg.id);
+            } catch {
+              // Ignore decryption errors — message may be from a different peer
             }
-            await saveMessageToStorage(chatMsg);
-            await deleteMessage(msg.id);
-          } catch {
-            // Ignore decryption errors — message may be from a different peer
           }
+        } else {
+          // Increase backoff exponentially (max 30s) when no messages found
+          pollBackoffRef.current = Math.min(pollBackoffRef.current * 1.5, 30000);
         }
-      } else {
-        // Increase backoff exponentially (max 30s) when no messages are found
-        pollBackoffRef.current = Math.min(pollBackoffRef.current * 1.5, 30000);
       }
     };
 

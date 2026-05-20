@@ -24,6 +24,8 @@ export function useP2PChat(targetPubKey: string) {
   const storeCandidatesRef = useRef<(() => Promise<void>) | null>(null);
   const pollRelayRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollBackoffRef = useRef<number>(3000); // Start at 3s, increases on no-message polls
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectBackoffRef = useRef<number>(3000); // Start at 3s, increases on failed reconnection attempts
 
   const myPrivEncRef = useRef<CryptoKey | null>(null);
   const myPubHexRef = useRef<string>('');
@@ -153,10 +155,10 @@ export function useP2PChat(targetPubKey: string) {
           if (answerPoll) clearInterval(answerPoll);
           if (mounted && dc.readyState !== 'open') {
             setStatus('relay');
-            pollBackoffRef.current = 3000; // Reset backoff when timeout fallback occurs
+            pollBackoffRef.current = 3000;
             setupRelayPolling();
-            // Immediately poll for relay messages when timeout-based fallback occurs
             await pollRelayMessages();
+            scheduleReconnection();
           }
         }, 10000);
 
@@ -164,6 +166,7 @@ export function useP2PChat(targetPubKey: string) {
         if (mounted) {
           setStatus('relay');
           setupRelayPolling();
+          scheduleReconnection();
         }
       }
     };
@@ -225,18 +228,152 @@ export function useP2PChat(targetPubKey: string) {
       }
     };
 
+    const clearReconnectTimeout = () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+    };
+
+    const attemptP2PReconnection = async () => {
+      if (!mounted || !myPrivEncRef.current || !myPubHexRef.current) return;
+
+      try {
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+        peerRef.current = pc;
+
+        const signalId = `${myPubHexRef.current}_to_${targetPubKey}`;
+        const answerSignalId = `${targetPubKey}_to_${myPubHexRef.current}`;
+        const allCandidates: RTCIceCandidate[] = [];
+
+        const storeCandidates = async () => {
+          if (allCandidates.length === 0) return;
+          await storeSignal({
+            messageId: signalId,
+            recipientUIDs: JSON.stringify([targetPubKey]),
+            senderEphemeralPublicKey: myPubHexRef.current,
+            iceCandidates: JSON.stringify(allCandidates),
+          });
+        };
+        storeCandidatesRef.current = storeCandidates;
+
+        pc.onicecandidate = async (e) => {
+          if (e.candidate) {
+            allCandidates.push(e.candidate);
+            if (storeTimeoutRef.current) clearTimeout(storeTimeoutRef.current);
+            storeTimeoutRef.current = setTimeout(storeCandidates, 250);
+          }
+        };
+
+        const dc = pc.createDataChannel('chat');
+        dataChannelRef.current = dc;
+
+        dc.onopen = () => {
+          if (mounted) {
+            setStatus('online');
+            reconnectBackoffRef.current = 3000;
+            clearRelayPolling();
+            clearReconnectTimeout();
+          }
+        };
+        dc.onclose = async () => {
+          if (mounted) {
+            setStatus('relay');
+            pollBackoffRef.current = 3000;
+            reconnectBackoffRef.current = 3000;
+            setupRelayPolling();
+            scheduleReconnection();
+          }
+          await pollRelayMessages();
+        };
+
+        dc.onmessage = async (e) => {
+          const msg = JSON.parse(e.data) as ChatMessage;
+          if (mounted) {
+            setMessages(prev => [...prev, msg]);
+            await saveMessageToStorage(msg);
+          }
+        };
+
+        pc.ondatachannel = (e) => {
+          const receiveDc = e.channel;
+          receiveDc.onmessage = dc.onmessage;
+          receiveDc.onopen = dc.onopen;
+          receiveDc.onclose = dc.onclose;
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await storeSignal({
+          messageId: signalId,
+          recipientUIDs: JSON.stringify([targetPubKey]),
+          senderEphemeralPublicKey: myPubHexRef.current,
+          offerSDP: JSON.stringify(offer),
+        });
+
+        let answerApplied = false;
+        const answerPoll = setInterval(async () => {
+          if (answerApplied || !mounted) {
+            clearInterval(answerPoll);
+            return;
+          }
+
+          const res = await getSignal(answerSignalId);
+          if (res.success && res.signal?.answerSDP) {
+            answerApplied = true;
+            clearInterval(answerPoll);
+
+            const answer = JSON.parse(res.signal.answerSDP) as RTCSessionDescriptionInit;
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+            if (res.signal.iceCandidates) {
+              const candidates: RTCIceCandidateInit[] = JSON.parse(res.signal.iceCandidates);
+              for (const c of candidates) {
+                await pc.addIceCandidate(new RTCIceCandidate(c));
+              }
+            }
+          }
+        }, 2000);
+
+        setTimeout(async () => {
+          clearInterval(answerPoll);
+          if (mounted && dc.readyState !== 'open') {
+            pc.close();
+            if (status === 'connecting') {
+              setStatus('relay');
+              pollBackoffRef.current = 3000;
+              setupRelayPolling();
+              await pollRelayMessages();
+              scheduleReconnection();
+            }
+          }
+        }, 10000);
+      } catch {
+        if (mounted && status === 'connecting') {
+          setStatus('relay');
+          setupRelayPolling();
+          scheduleReconnection();
+        }
+      }
+    };
+
+    const scheduleReconnection = () => {
+      if (!mounted) return;
+      clearReconnectTimeout();
+      reconnectBackoffRef.current = Math.min(reconnectBackoffRef.current * 1.5, 30000);
+      reconnectTimeoutRef.current = setTimeout(attemptP2PReconnection, reconnectBackoffRef.current);
+    };
+
     init();
 
     return () => {
       mounted = false;
       clearRelayPolling();
+      clearReconnectTimeout();
       if (answerPoll) clearInterval(answerPoll);
       if (storeTimeoutRef.current) clearTimeout(storeTimeoutRef.current);
-      // Flush any pending ICE candidates before cleanup
       if (storeCandidatesRef.current) {
-        storeCandidatesRef.current().catch(() => {
-          // Silently ignore errors during cleanup
-        });
+        storeCandidatesRef.current().catch(() => {});
       }
       if (peerRef.current) peerRef.current.close();
     };

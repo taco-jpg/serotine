@@ -239,6 +239,11 @@ export function useP2PChat(targetPubKey: string) {
       if (!mounted || !myPrivEncRef.current || !myPubHexRef.current) return;
 
       try {
+        // Clean up previous peer connection if it exists
+        if (peerRef.current) {
+          peerRef.current.close();
+        }
+
         const pc = new RTCPeerConnection(RTC_CONFIG);
         peerRef.current = pc;
 
@@ -339,17 +344,15 @@ export function useP2PChat(targetPubKey: string) {
           clearInterval(answerPoll);
           if (mounted && dc.readyState !== 'open') {
             pc.close();
-            if (status === 'connecting') {
-              setStatus('relay');
-              pollBackoffRef.current = 3000;
-              setupRelayPolling();
-              await pollRelayMessages();
-              scheduleReconnection();
-            }
+            setStatus('relay');
+            pollBackoffRef.current = 3000;
+            setupRelayPolling();
+            await pollRelayMessages();
+            scheduleReconnection();
           }
         }, 10000);
       } catch {
-        if (mounted && status === 'connecting') {
+        if (mounted) {
           setStatus('relay');
           setupRelayPolling();
           scheduleReconnection();

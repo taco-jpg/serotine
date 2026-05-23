@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { storeSignal, getSignal, storeEncryptedMessage, getMyMessages, deleteMessage } from '@/app/actions';
+import { storeSignal, getSignal, storeEncryptedMessage, getMyMessages, deleteMessage, deleteOldSignals } from '@/app/actions';
 import { encryptForPeer, decryptFromPeer, importKey } from '@/lib/crypto';
 import { saveMessageToStorage, getMessagesFromStorage } from '@/lib/storage';
 import { RTC_CONFIG } from '@/config/webrtc';
@@ -83,10 +83,12 @@ export function useP2PChat(targetPubKey: string) {
         const dc = pc.createDataChannel('chat');
         dataChannelRef.current = dc;
 
-        dc.onopen = () => {
+        dc.onopen = async () => {
           if (mounted) {
             setStatus('online');
             clearRelayPolling();
+            // Clean up old signals to prevent D1 bloat
+            await deleteOldSignals(7).catch(() => {});
           }
         };
         dc.onclose = async () => {
@@ -268,12 +270,14 @@ export function useP2PChat(targetPubKey: string) {
         const dc = pc.createDataChannel('chat');
         dataChannelRef.current = dc;
 
-        dc.onopen = () => {
+        dc.onopen = async () => {
           if (mounted) {
             setStatus('online');
             reconnectBackoffRef.current = 3000;
             clearRelayPolling();
             clearReconnectTimeout();
+            // Clean up old signals to prevent D1 bloat
+            await deleteOldSignals(7).catch(() => {});
           }
         };
         dc.onclose = async () => {

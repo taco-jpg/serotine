@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { storeSignal, getSignal, storeEncryptedMessage, getMyMessages, deleteMessage } from '@/app/actions';
+import { storeSignal, getSignal, storeEncryptedMessage, getMyMessages, deleteMessage, deleteOldSignals } from '@/app/actions';
 import { encryptForPeer, decryptFromPeer, importKey } from '@/lib/crypto';
 import { saveMessageToStorage, getMessagesFromStorage } from '@/lib/storage';
 import { RTC_CONFIG } from '@/config/webrtc';
@@ -157,6 +157,7 @@ export function useP2PChat(targetPubKey: string) {
             if (mounted) {
               setStatus('online');
               clearRelayPolling();
+              void deleteOldSignals(7).catch(() => {});
             }
           },
           onDataChannelClose: async () => {
@@ -269,6 +270,7 @@ export function useP2PChat(targetPubKey: string) {
               reconnectBackoffRef.current = 3000;
               clearRelayPolling();
               clearReconnectTimeout();
+              void deleteOldSignals(7).catch(() => {});
             }
           },
           onDataChannelClose: async () => {
@@ -289,7 +291,7 @@ export function useP2PChat(targetPubKey: string) {
           },
           onAnswerTimeout: async (pc) => {
             pc.close();
-            if (mounted && status === 'connecting') {
+            if (mounted) {
               setStatus('relay');
               pollBackoffRef.current = 3000;
               setupRelayPolling();
@@ -299,7 +301,7 @@ export function useP2PChat(targetPubKey: string) {
           },
         });
       } catch {
-        if (mounted && status === 'connecting') {
+        if (mounted) {
           setStatus('relay');
           setupRelayPolling();
           scheduleReconnection();

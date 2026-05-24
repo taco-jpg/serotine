@@ -157,7 +157,9 @@ export function useP2PChat(targetPubKey: string) {
             if (mounted) {
               setStatus('online');
               clearRelayPolling();
-              void deleteOldSignals(7).catch(() => {});
+              void deleteOldSignals(7).catch((error) => {
+                console.error('Failed to delete old signals', error);
+              });
             }
           },
           onDataChannelClose: async () => {
@@ -270,7 +272,9 @@ export function useP2PChat(targetPubKey: string) {
               reconnectBackoffRef.current = 3000;
               clearRelayPolling();
               clearReconnectTimeout();
-              void deleteOldSignals(7).catch(() => {});
+              void deleteOldSignals(7).catch((error) => {
+                console.error('Failed to delete old signals', error);
+              });
             }
           },
           onDataChannelClose: async () => {

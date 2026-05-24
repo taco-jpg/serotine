@@ -122,9 +122,10 @@ export async function deleteOldSignals(olderThanDays: number = 7): Promise<{ suc
   const db = await getDB()
   try {
     const safeOlderThanDays = Number.isFinite(olderThanDays) ? Math.max(0, Math.floor(olderThanDays)) : 7
+    const cutoffUnixSeconds = Math.floor(Date.now() / 1000) - (safeOlderThanDays * 24 * 60 * 60)
     const result = await db.prepare(
-      `DELETE FROM P2PSignal WHERE createdAt < datetime('now', '-' || ? || ' days')`
-    ).bind(safeOlderThanDays).run()
+      `DELETE FROM P2PSignal WHERE createdAt < datetime(?, 'unixepoch')`
+    ).bind(cutoffUnixSeconds).run()
     return { success: true, deletedCount: result.meta.changes }
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"

@@ -121,9 +121,11 @@ export async function deleteMessage(messageId: string): Promise<{ success: true 
 export async function deleteOldSignals(olderThanDays: number = 7): Promise<{ success: true; deletedCount: number } | { success: false; error: string }> {
   const db = await getDB()
   try {
+    const safeOlderThanDays = Number.isFinite(olderThanDays) ? Math.max(0, Math.floor(olderThanDays)) : 7
+    const cutoffModifier = `-${safeOlderThanDays} days`
     const result = await db.prepare(
-      `DELETE FROM P2PSignal WHERE createdAt < datetime('now', ? || ' days')`
-    ).bind(-olderThanDays).run()
+      `DELETE FROM P2PSignal WHERE createdAt < datetime('now', ?)`
+    ).bind(cutoffModifier).run()
     return { success: true, deletedCount: result.meta.changes }
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"

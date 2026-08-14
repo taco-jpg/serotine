@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { storeSignal, getSignal, storeEncryptedMessage, getMyMessages, deleteMessage, deleteOldSignals } from '@/app/actions';
+import { storeSignal, getSignal, deleteSignal, storeEncryptedMessage, getMyMessages, deleteMessage, deleteOldSignals } from '@/app/actions';
 import { encryptForPeer, decryptFromPeer, importKey } from '@/lib/crypto';
 import { saveMessageToStorage, getMessagesFromStorage } from '@/lib/storage';
 import { RTC_CONFIG } from '@/config/webrtc';
@@ -39,96 +39,95 @@ export function useP2PChat(targetPubKey: string) {
   const myPrivEncRef = useRef<CryptoKey | null>(null);
   const myPubHexRef = useRef<string>('');
 
-  // Helper to set up P2P connection and signaling
+  // Elect exactly one offerer. Previously both peers created offers and then waited
+  // for answers that neither side ever produced.
   const setupP2PConnection = async (context: P2PSetupContext) => {
+    const pc = new RTCPeerConnection(RTC_CONFIG)
+    peerRef.current?.close()
+    peerRef.current = pc
+
+    const offerSignalId = `${context.myPubHex < context.targetPubKey ? context.myPubHex : context.targetPubKey}_to_${context.myPubHex < context.targetPubKey ? context.targetPubKey : context.myPubHex}`
+    const answerSignalId = `${context.myPubHex < context.targetPubKey ? context.targetPubKey : context.myPubHex}_to_${context.myPubHex < context.targetPubKey ? context.myPubHex : context.targetPubKey}`
+    const isOfferer = context.myPubHex < context.targetPubKey
+
+    const attachChannel = (channel: RTCDataChannel) => {
+      dataChannelRef.current = channel
+      channel.onopen = context.onDataChannelOpen
+      channel.onclose = context.onDataChannelClose
+      channel.onmessage = async (event) => {
+        try {
+          const message = JSON.parse(event.data) as ChatMessage
+          if (message.peerPubKey !== context.myPubHex || message.senderPubKey !== context.targetPubKey) return
+          await context.onMessage(message)
+        } catch {
+          // Ignore malformed or unrelated channel payloads.
+        }
+      }
+    }
+
+    const waitForIce = () => new Promise<void>((resolve) => {
+      if (pc.iceGatheringState === 'complete') return resolve()
+      const timeout = setTimeout(resolve, 4000)
+      pc.addEventListener('icegatheringstatechange', () => {
+        if (pc.iceGatheringState === 'complete') {
+          clearTimeout(timeout)
+          resolve()
+        }
+      })
+    })
+
     try {
-      const pc = new RTCPeerConnection(RTC_CONFIG);
-      peerRef.current = pc;
-
-      const signalId = `${context.myPubHex}_to_${context.targetPubKey}`;
-      const answerSignalId = `${context.targetPubKey}_to_${context.myPubHex}`;
-      const allCandidates: RTCIceCandidate[] = [];
-
-      const storeCandidates = async () => {
-        if (allCandidates.length === 0) return;
+      if (isOfferer) {
+        // Clear the previous negotiation so the answerer cannot consume stale SDP.
+        await Promise.all([deleteSignal(offerSignalId), deleteSignal(answerSignalId)])
+        attachChannel(pc.createDataChannel('chat'))
+        const offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        await waitForIce()
         await storeSignal({
-          messageId: signalId,
+          messageId: offerSignalId,
           recipientUIDs: JSON.stringify([context.targetPubKey]),
           senderEphemeralPublicKey: context.myPubHex,
-          iceCandidates: JSON.stringify(allCandidates),
-        });
-      };
-      storeCandidatesRef.current = storeCandidates;
+          offerSDP: JSON.stringify(pc.localDescription),
+        })
 
-      pc.onicecandidate = async (e) => {
-        if (e.candidate) {
-          allCandidates.push(e.candidate);
-          if (storeTimeoutRef.current) clearTimeout(storeTimeoutRef.current);
-          storeTimeoutRef.current = setTimeout(storeCandidates, 250);
-        }
-      };
-
-      const dc = pc.createDataChannel('chat');
-      dataChannelRef.current = dc;
-
-      dc.onopen = context.onDataChannelOpen;
-      dc.onclose = context.onDataChannelClose;
-      dc.onmessage = async (e) => {
-        const msg = JSON.parse(e.data) as ChatMessage;
-        await context.onMessage(msg);
-      };
-
-      pc.ondatachannel = (e) => {
-        const receiveDc = e.channel;
-        receiveDc.onmessage = dc.onmessage;
-        receiveDc.onopen = dc.onopen;
-        receiveDc.onclose = dc.onclose;
-      };
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await storeSignal({
-        messageId: signalId,
-        recipientUIDs: JSON.stringify([context.targetPubKey]),
-        senderEphemeralPublicKey: context.myPubHex,
-        offerSDP: JSON.stringify(offer),
-      });
-
-      let answerApplied = false;
-      const answerPoll: ReturnType<typeof setInterval> = setInterval(async () => {
-        if (answerApplied) {
-          clearInterval(answerPoll);
-          return;
-        }
-
-        const res = await getSignal(answerSignalId);
-        if (res.success && res.signal?.answerSDP) {
-          answerApplied = true;
-          clearInterval(answerPoll);
-
-          const answer = JSON.parse(res.signal.answerSDP) as RTCSessionDescriptionInit;
-          await pc.setRemoteDescription(new RTCSessionDescription(answer));
-
-          if (res.signal.iceCandidates) {
-            const candidates: RTCIceCandidateInit[] = JSON.parse(res.signal.iceCandidates);
-            for (const c of candidates) {
-              await pc.addIceCandidate(new RTCIceCandidate(c));
-            }
+        const deadline = Date.now() + 12_000
+        while (Date.now() < deadline && pc.signalingState !== 'closed') {
+          const response = await getSignal(answerSignalId)
+          if (response.success && response.signal?.answerSDP) {
+            await pc.setRemoteDescription(JSON.parse(response.signal.answerSDP) as RTCSessionDescriptionInit)
+            return
           }
+          await new Promise(resolve => setTimeout(resolve, 1000))
         }
-      }, 2000);
+      } else {
+        pc.ondatachannel = event => attachChannel(event.channel)
+        const deadline = Date.now() + 12_000
+        while (Date.now() < deadline && pc.signalingState !== 'closed') {
+          const response = await getSignal(offerSignalId)
+          if (response.success && response.signal?.offerSDP) {
+            await pc.setRemoteDescription(JSON.parse(response.signal.offerSDP) as RTCSessionDescriptionInit)
+            const answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            await waitForIce()
+            await storeSignal({
+              messageId: answerSignalId,
+              recipientUIDs: JSON.stringify([context.targetPubKey]),
+              senderEphemeralPublicKey: context.myPubHex,
+              answerSDP: JSON.stringify(pc.localDescription),
+            })
+            return
+          }
+          await new Promise(resolve => setTimeout(resolve, 1000))
+        }
+      }
 
-      setTimeout(async () => {
-        clearInterval(answerPoll);
-        if (dc.readyState !== 'open') {
-          await context.onAnswerTimeout(pc);
-        }
-      }, 10000);
-    } catch (err) {
-      if (peerRef.current) peerRef.current.close();
-      throw err;
+      await context.onAnswerTimeout(pc)
+    } catch (error) {
+      pc.close()
+      throw error
     }
-  };
+  }
 
   useEffect(() => {
     let mounted = true;

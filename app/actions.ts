@@ -36,9 +36,9 @@ export async function storeSignal(data: {
       ON CONFLICT(messageId) DO UPDATE SET
         recipientUIDs = excluded.recipientUIDs,
         senderEphemeralPublicKey = excluded.senderEphemeralPublicKey,
-        offerSDP = excluded.offerSDP,
-        answerSDP = excluded.answerSDP,
-        iceCandidates = excluded.iceCandidates
+        offerSDP = COALESCE(excluded.offerSDP, P2PSignal.offerSDP),
+        answerSDP = COALESCE(excluded.answerSDP, P2PSignal.answerSDP),
+        iceCandidates = COALESCE(excluded.iceCandidates, P2PSignal.iceCandidates)
     `).bind(
       data.messageId,
       data.recipientUIDs,
@@ -99,7 +99,7 @@ export async function getMyMessages(receiverPubKeyHash: string): Promise<{ succe
   const db = await getDB()
   try {
     const { results } = await db.prepare(
-      `SELECT * FROM Message WHERE receiverPubKeyHash = ?`
+      `SELECT * FROM Message WHERE receiverPubKeyHash = ? AND expiresAt > datetime('now') ORDER BY createdAt ASC LIMIT 100`
     ).bind(receiverPubKeyHash).all() as { results: Message[] }
     return { success: true, messages: results }
   } catch (error: unknown) {

@@ -1,11 +1,32 @@
-import { getCloudflareContext } from '@opennextjs/cloudflare'
-import type { D1Database } from '@cloudflare/workers-types/experimental'
+import { getCloudflareContext } from "@opennextjs/cloudflare"
 
-interface CloudflareEnv {
-  serotine_db: D1Database
+/** The subset of Cloudflare D1 used by the server actions. */
+export interface D1Result {
+  meta: { changes: number }
 }
 
-export async function getDB() {
+export interface D1Statement {
+  bind(...values: unknown[]): D1Statement
+  run(): Promise<D1Result>
+  first<T = unknown>(): Promise<T | null>
+  all<T = unknown>(): Promise<{ results: T[] }>
+}
+
+export interface D1DatabaseBinding {
+  prepare(query: string): D1Statement
+}
+
+interface CloudflareEnv {
+  serotine_db: D1DatabaseBinding
+}
+
+export async function getDB(): Promise<D1DatabaseBinding> {
   const { env } = await getCloudflareContext()
-  return (env as CloudflareEnv).serotine_db
+  const db = (env as unknown as CloudflareEnv).serotine_db
+
+  if (!db) {
+    throw new Error("The serotine_db D1 binding is not configured")
+  }
+
+  return db
 }

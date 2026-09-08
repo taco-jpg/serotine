@@ -8,7 +8,10 @@
     "build:edge": "opennextjs-cloudflare build",
     "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
     "lint": "eslint .",
-    "start": "next start"
+    "start": "next start",
+    "test": "node --test tests/*.test.cjs",
+    "typecheck": "tsc --noEmit",
+    "db:migrate:local": "wrangler d1 migrations apply serotine-db --local"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -50,7 +53,7 @@
     "input-otp": "1.4.1",
     "jdenticon": "^3.2.0",
     "lucide-react": "^0.454.0",
-    "next": "16.2.3",
+    "next": "16.3.4",
     "next-themes": "latest",
     "react": "19.2.0",
     "react-day-picker": "9.8.0",
@@ -61,7 +64,7 @@
     "sonner": "latest",
     "tailwind-merge": "^2.5.5",
     "tailwindcss-animate": "^1.0.7",
-    "uuid": "latest",
+    "uuid": "13.0.1",
     "vaul": "^1.1.0",
     "zod": "3.25.76"
   },
@@ -74,6 +77,7 @@
     "@types/react-dom": "^19",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.59.1",
+    "esbuild": "0.25.4",
     "eslint": "^10.1.0",
     "globals": "^17.6.0",
     "postcss": "^8.5",
@@ -81,5 +85,8 @@
     "tw-animate-css": "1.3.3",
     "typescript": "^5",
     "wrangler": "^4.83.0"
+  },
+  "engines": {
+    "node": ">=22.13.0"
   }
 }

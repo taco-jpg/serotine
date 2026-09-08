@@ -1,91 +1,19 @@
-import type React from "react"
 import Link from "next/link"
-import { SiteHeader } from "@/components/site-header"
+import { ArrowUpRight, Shield, KeyRound, Lock, MessageSquare } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Shield, Lock, EyeOff, Zap } from "lucide-react"
 
 export default function LandingPage() {
-  return (
-    <div className="flex min-h-screen flex-col">
-      <SiteHeader />
-      <main className="flex-1">
-        <section className="relative overflow-hidden py-24 md:py-32 lg:py-40">
-          <div className="container px-4 md:px-6">
-            <div className="flex flex-col items-center space-y-8 text-center">
-              <div className="space-y-4">
-                <h1 className="text-4xl font-bold tracking-tighter sm:text-5xl md:text-6xl lg:text-7xl font-serif bg-clip-text text-transparent bg-gradient-to-b from-foreground to-foreground/70">
-                  Contact without a <span className="text-primary">central server</span>
-                </h1>
-                <p className="mx-auto max-w-[700px] text-muted-foreground md:text-xl leading-relaxed">
-                  Experience true privacy with Serotine. End-to-end encrypted messaging that disappears when you want it
-                  to. No logs. No traces.
-                </p>
-              </div>
-              <div className="flex flex-col gap-4 min-[400px]:flex-row">
-                <Link href="/login?view=signup">
-                  <Button size="lg" className="h-12 px-8 text-lg bg-primary hover:bg-primary/90">
-                    Establish Connection
-                  </Button>
-                </Link>
-                <Link href="/about">
-                  <Button
-                    variant="outline"
-                    size="lg"
-                    className="h-12 px-8 text-lg border-primary/20 hover:bg-primary/10 hover:text-primary bg-transparent"
-                  >
-                    Learn More
-                  </Button>
-                </Link>
-              </div>
-            </div>
-          </div>
-
-          {/* Decorative background elements */}
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-primary/5 rounded-full blur-3xl -z-10" />
-        </section>
-
-        <section className="container px-4 py-12 md:py-24 lg:py-32">
-          <div className="grid gap-8 md:grid-cols-2 lg:grid-cols-4">
-            <FeatureCard
-              icon={<Shield className="h-10 w-10 text-primary" />}
-              title="End-to-End Encrypted"
-              description="Your messages are encrypted on your device and can only be read by the recipient."
-            />
-            <FeatureCard
-              icon={<EyeOff className="h-10 w-10 text-primary" />}
-              title="Zero Knowledge"
-              description="We don't know who you are, who you talk to, or what you say. We can't see your data."
-            />
-            <FeatureCard
-              icon={<Zap className="h-10 w-10 text-primary" />}
-              title="Self-Destructing"
-              description="Set messages to vanish automatically after they are read. Leave no trace behind."
-            />
-            <FeatureCard
-              icon={<Lock className="h-10 w-10 text-primary" />}
-              title="Anonymous Identity"
-              description="Sign up without a phone number or email. Your identity is yours to protect."
-            />
-          </div>
-        </section>
-      </main>
-      <footer className="border-t border-border/40 py-6 md:py-0">
-        <div className="container flex flex-col items-center justify-between gap-4 md:h-24 md:flex-row">
-          <p className="text-center text-sm leading-loose text-muted-foreground md:text-left">
-            © 2025 Serotine. Built for the shadows. 💬
-          </p>
-        </div>
-      </footer>
-    </div>
-  )
-}
-
-function FeatureCard({ icon, title, description }: { icon: React.ReactNode; title: string; description: string }) {
-  return (
-    <div className="flex flex-col items-center space-y-4 text-center p-6 rounded-lg border border-border/50 bg-card/50 backdrop-blur-sm hover:border-primary/50 transition-colors">
-      <div className="p-3 rounded-full bg-primary/10 ring-1 ring-primary/20">{icon}</div>
-      <h3 className="text-xl font-bold font-serif">{title}</h3>
-      <p className="text-muted-foreground">{description}</p>
-    </div>
-  )
+  return <div className="min-h-dvh">
+    <header className="mx-auto flex h-24 max-w-6xl items-center justify-between border-b border-zinc-800/80 px-6"><Link href="/" className="flex items-center gap-3"><Shield className="size-6 text-indigo-300" /><span className="font-serif text-2xl">Serotine</span></Link><Link href="/login"><Button variant="outline">Open messages <ArrowUpRight className="ml-2 size-4" /></Button></Link></header>
+    <main className="mx-auto max-w-6xl px-6">
+      <section className="grid items-center gap-14 py-16 md:grid-cols-[1.3fr_1fr] md:gap-20 md:py-28">
+        <div><p className="mb-6 text-xs font-medium uppercase tracking-[0.2em] text-indigo-300">A private place to talk</p><h1 className="max-w-2xl text-5xl leading-[1.08] tracking-tight sm:text-6xl lg:text-7xl">For conversations<br /><span className="text-zinc-500">that are yours.</span></h1><p className="mt-7 max-w-lg text-lg leading-relaxed text-zinc-400">Encrypted messaging with an identity you create on your own device. No phone number. No email address.</p><div className="mt-9 flex flex-wrap items-center gap-5"><Link href="/login"><Button size="lg" className="h-12 px-6">Start a conversation <ArrowUpRight className="ml-2 size-4" /></Button></Link><a href="#how-it-works" className="text-sm text-zinc-400 underline-offset-4 hover:text-white hover:underline">How it works</a></div></div>
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-7 sm:p-8"><div className="mb-8 flex items-center gap-3 border-b border-zinc-800 pb-6"><Lock className="size-5 text-indigo-300" /><h2 className="font-sans text-base font-medium">Private by design. Clear about limits.</h2></div><ol className="space-y-7">{[["01", "Create your identity", "Your browser generates a private key and a public contact address."], ["02", "Exchange addresses", "Share your public address with someone you trust and add theirs."], ["03", "Make room for a conversation", "Messages are encrypted before sending and saved in your browser."]].map(([number, title, text]) => <li key={number} className="flex gap-4"><span className="pt-1 font-mono text-xs text-zinc-600">{number}</span><div><h3 className="font-sans text-base text-zinc-200">{title}</h3><p className="mt-2 text-sm leading-relaxed text-zinc-500">{text}</p></div></li>)}</ol></div>
+      </section>
+      <section id="how-it-works" className="grid gap-8 border-t border-zinc-800/80 py-12 md:grid-cols-3 md:py-16">
+        {[{ icon: KeyRound, title: "An identity you keep", text: "Private keys stay in your browser. Download an encrypted backup so you can recover your identity on another device." }, { icon: Lock, title: "Encrypted from the start", text: "Messages and connection signals are encrypted. Verify contact addresses separately; protecting your device and browser still matters." }, { icon: MessageSquare, title: "Delivery that can wait", text: "The relay queues encrypted messages for up to seven days and removes them after local saving is acknowledged. Direct connections also use encrypted messages." }].map(item => <div key={item.title}><item.icon className="mb-5 size-5 text-indigo-300/80" /><h2 className="mb-3 text-xl">{item.title}</h2><p className="text-base leading-relaxed text-zinc-500">{item.text}</p></div>)}
+      </section>
+    </main>
+    <footer className="mx-auto flex max-w-6xl flex-col gap-3 border-t border-zinc-800/80 px-6 py-7 text-xs leading-relaxed text-zinc-500 sm:flex-row sm:justify-between"><span>Serotine · Private conversations</span><p className="max-w-xl">The relay can see routing addresses and timing. Browser history does not automatically disappear. This software has not undergone an independent security audit.</p></footer>
+  </div>
 }

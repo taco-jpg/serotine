@@ -1,8 +1,0 @@
-{
-  "/_global-error/page": "/_global-error",
-  "/_not-found/page": "/_not-found",
-  "/chat/[pubkey]/page": "/chat/[pubkey]",
-  "/chat/page": "/chat",
-  "/login/page": "/login",
-  "/page": "/"
-}

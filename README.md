@@ -21,12 +21,12 @@ Keep the conversation open to receive messages from that contact. History lives 
 ```sh
 npm test
 npm run typecheck
-npm run build:edge
+npm run build
 ```
 
 Tests exercise the actual Web Crypto implementation and server actions against SQLite, with only the D1 binding substituted. They cover signed ownership, replay rejection, expired and tampered packets, recipient-scoped acknowledgments, sender-filtered inboxes, retry deduplication, rate limits, and relay failures. They are not an independent security audit or a browser/network compatibility test.
 
-This project deploys to **Cloudflare Workers with OpenNext**, not Pages or `next-on-pages`. Keep `wrangler.toml` pointed at your intended D1 database and Worker. After authenticating Wrangler for that account:
+This project deploys to **Cloudflare Workers with OpenNext**, not Pages or `next-on-pages`. `npm run build` must produce `.open-next/worker.js`; generated `.open-next` output is intentionally not committed. For Cloudflare Workers Builds, set the **Build command** to `npm run build` so a fresh OpenNext bundle exists before the configured deploy or preview-deploy command runs. Keep `wrangler.toml` pointed at your intended D1 database and Worker. After authenticating Wrangler for that account:
 
 ```sh
 npx wrangler d1 migrations apply serotine-db --remote

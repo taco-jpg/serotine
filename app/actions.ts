@@ -1,134 +1,108 @@
 "use server"
-import { getDB } from "@/lib/db"
 
-interface P2PSignal {
+import { getDB, type D1DatabaseBinding } from "@/lib/db"
+import { verifyRequestProof } from "@/lib/request-auth"
+import { AUTH_WINDOW_MS, ID_PATTERN, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "@/lib/protocol"
+
+class RequestError extends Error {}
+type Failure = { success: false; error: string }
+export interface RelayMessage {
   id: string
-  messageId: string
-  recipientUIDs: string
-  senderEphemeralPublicKey: string
-  offerSDP: string | null
-  answerSDP: string | null
-  iceCandidates: string | null
-  createdAt: string
-}
-
-interface Message {
-  id: string
-  receiverPubKeyHash: string
+  senderPubKey: string
+  recipientPubKey: string
   encryptedData: string
-  expiresAt: string
-  createdAt: string
+  createdAt: number
 }
 
-export async function storeSignal(data: {
-  messageId: string
-  recipientUIDs: string
-  senderEphemeralPublicKey: string
-  offerSDP?: string
-  answerSDP?: string
-  iceCandidates?: string
-}): Promise<{ success: true } | { success: false; error: string }> {
+function failure(error: unknown): Failure {
+  if (error instanceof RequestError) return { success: false, error: error.message }
+  console.error("Relay operation failed", error instanceof Error ? error.name : "UnknownError")
+  return { success: false, error: "The relay is unavailable. Your message has not been sent. Please try again." }
+}
+function checkPeer(peer: string) {
+  if (typeof peer !== "string" || !PUBLIC_KEY_PATTERN.test(peer)) throw new RequestError("Invalid contact address.")
+}
+function checkPacket(packet: string) {
+  if (typeof packet !== "string" || packet.length < 32 || packet.length > MAX_PACKET_LENGTH) throw new RequestError("Invalid encrypted packet.")
+}
+async function authorize(action: string, payload: unknown, proof: RequestProof): Promise<D1DatabaseBinding> {
+  if (!await verifyRequestProof(action, payload, proof)) throw new RequestError("Identity verification failed. Check your device clock and reopen the app.")
   const db = await getDB()
+  const now = Date.now()
+  await db.prepare("DELETE FROM RequestNonce WHERE expiresAt < ?").bind(now).run()
+  // Retain future-dated proofs until their entire acceptance window has elapsed.
+  const result = await db.prepare("INSERT OR IGNORE INTO RequestNonce (publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)")
+    .bind(proof.publicKey, proof.nonce, action, Math.max(now, proof.timestamp) + AUTH_WINDOW_MS).run()
+  if (result.meta.changes !== 1) throw new RequestError("This request was already used. Please retry.")
+  return db
+}
+async function limitWrites(db: D1DatabaseBinding, proof: RequestProof, action: string, limit: number) {
+  const row = await db.prepare("SELECT COUNT(*) AS count FROM RequestNonce WHERE publicKey = ? AND action = ? AND expiresAt > ?")
+    .bind(proof.publicKey, action, Date.now()).first<{ count: number }>()
+  if ((row?.count ?? 0) > limit) throw new RequestError("Too many requests. Wait a minute and try again.")
+}
+
+export async function storeEncryptedMessage(data: { id: string; recipientPubKey: string; encryptedData: string }, proof: RequestProof): Promise<{ success: true } | Failure> {
   try {
-    await db.prepare(`
-      INSERT INTO P2PSignal (id, messageId, recipientUIDs, senderEphemeralPublicKey, offerSDP, answerSDP, iceCandidates, createdAt)
-      VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?, ?, ?, datetime('now'))
-      ON CONFLICT(messageId) DO UPDATE SET
-        recipientUIDs = excluded.recipientUIDs,
-        senderEphemeralPublicKey = excluded.senderEphemeralPublicKey,
-        offerSDP = COALESCE(excluded.offerSDP, P2PSignal.offerSDP),
-        answerSDP = COALESCE(excluded.answerSDP, P2PSignal.answerSDP),
-        iceCandidates = COALESCE(excluded.iceCandidates, P2PSignal.iceCandidates)
-    `).bind(
-      data.messageId,
-      data.recipientUIDs,
-      data.senderEphemeralPublicKey,
-      data.offerSDP ?? null,
-      data.answerSDP ?? null,
-      data.iceCandidates ?? null,
-    ).run()
+    checkPeer(data.recipientPubKey); checkPacket(data.encryptedData)
+    if (!ID_PATTERN.test(data.id) || data.recipientPubKey === proof.publicKey) throw new RequestError("Invalid message.")
+    const db = await authorize("message:send", data, proof)
+    await limitWrites(db, proof, "message:send", 60)
+    const now = Date.now()
+    await db.prepare("DELETE FROM RelayMessage WHERE expiresAt <= ?").bind(now).run()
+    const existing = await db.prepare("SELECT id FROM RelayMessage WHERE recipientPubKey = ? AND senderPubKey = ? AND id = ?")
+      .bind(data.recipientPubKey, proof.publicKey, data.id).first()
+    if (existing) return { success: true }
+    const pending = await db.prepare("SELECT COUNT(*) AS count FROM RelayMessage WHERE senderPubKey = ?").bind(proof.publicKey).first<{ count: number }>()
+    if ((pending?.count ?? 0) >= 500) throw new RequestError("Your pending message limit is reached. Wait for your contacts to collect messages.")
+    await db.prepare(`INSERT INTO RelayMessage (id, senderPubKey, recipientPubKey, encryptedData, createdAt, expiresAt)
+      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING`)
+      .bind(data.id, proof.publicKey, data.recipientPubKey, data.encryptedData, now, now + 7 * 86400_000).run()
     return { success: true }
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown error"
-    return { success: false, error: message }
-  }
+  } catch (error) { return failure(error) }
 }
 
-export async function getSignal(messageId: string): Promise<{ success: true; signal: P2PSignal | undefined } | { success: false; error: string }> {
-  const db = await getDB()
+export async function getMyMessages(data: { senderPubKey: string }, proof: RequestProof): Promise<{ success: true; messages: RelayMessage[] } | Failure> {
   try {
-    const signal = await db.prepare(
-      `SELECT * FROM P2PSignal WHERE messageId = ?`
-    ).bind(messageId).first() as P2PSignal | undefined
-    return { success: true, signal }
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown error"
-    return { success: false, error: message }
-  }
-}
-
-export async function deleteSignal(messageId: string): Promise<{ success: true } | { success: false; error: string }> {
-  const db = await getDB()
-  try {
-    await db.prepare(`DELETE FROM P2PSignal WHERE messageId = ?`).bind(messageId).run()
-    return { success: true }
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown error"
-    return { success: false, error: message }
-  }
-}
-
-export async function storeEncryptedMessage(data: {
-  receiverPubKeyHash: string
-  encryptedData: string
-}): Promise<{ success: true } | { success: false; error: string }> {
-  const db = await getDB()
-  try {
-    await db.prepare(`
-      INSERT INTO Message (id, receiverPubKeyHash, encryptedData, expiresAt, createdAt)
-      VALUES (lower(hex(randomblob(16))), ?, ?, datetime('now', '+7 days'), datetime('now'))
-    `).bind(data.receiverPubKeyHash, data.encryptedData).run()
-    return { success: true }
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown error"
-    return { success: false, error: message }
-  }
-}
-
-export async function getMyMessages(receiverPubKeyHash: string): Promise<{ success: true; messages: Message[] } | { success: false; error: string }> {
-  const db = await getDB()
-  try {
-    const { results } = await db.prepare(
-      `SELECT * FROM Message WHERE receiverPubKeyHash = ? AND expiresAt > datetime('now') ORDER BY createdAt ASC LIMIT 100`
-    ).bind(receiverPubKeyHash).all() as { results: Message[] }
+    checkPeer(data.senderPubKey)
+    const db = await authorize("message:list", data, proof)
+    const { results } = await db.prepare(`SELECT id, senderPubKey, recipientPubKey, encryptedData, createdAt FROM RelayMessage
+      WHERE recipientPubKey = ? AND senderPubKey = ? AND expiresAt > ? ORDER BY createdAt ASC LIMIT 100`)
+      .bind(proof.publicKey, data.senderPubKey, Date.now()).all<RelayMessage>()
     return { success: true, messages: results }
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown error"
-    return { success: false, error: message }
-  }
+  } catch (error) { return failure(error) }
 }
 
-export async function deleteMessage(messageId: string): Promise<{ success: true } | { success: false; error: string }> {
-  const db = await getDB()
+export async function deleteMessage(data: { id: string; senderPubKey: string }, proof: RequestProof): Promise<{ success: true } | Failure> {
   try {
-    await db.prepare(`DELETE FROM Message WHERE id = ?`).bind(messageId).run()
+    checkPeer(data.senderPubKey)
+    if (!ID_PATTERN.test(data.id)) throw new RequestError("Invalid message.")
+    const db = await authorize("message:ack", data, proof)
+    await db.prepare("DELETE FROM RelayMessage WHERE id = ? AND senderPubKey = ? AND recipientPubKey = ?")
+      .bind(data.id, data.senderPubKey, proof.publicKey).run()
     return { success: true }
-  } catch {
-    return { success: false, error: "Message delete failed or not found" }
-  }
+  } catch (error) { return failure(error) }
 }
 
-export async function deleteOldSignals(olderThanDays: number = 7): Promise<{ success: true; deletedCount: number } | { success: false; error: string }> {
-  const db = await getDB()
+export async function storeSignal(data: { recipientPubKey: string; encryptedData: string }, proof: RequestProof): Promise<{ success: true } | Failure> {
   try {
-    const safeOlderThanDays = Number.isFinite(olderThanDays) ? Math.max(0, Math.floor(olderThanDays)) : 7
-    const cutoffModifier = `-${safeOlderThanDays} days`
-    const result = await db.prepare(
-      `DELETE FROM P2PSignal WHERE createdAt < datetime('now', ?)`
-    ).bind(cutoffModifier).run()
-    return { success: true, deletedCount: result.meta.changes }
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown error"
-    return { success: false, error: message }
-  }
+    checkPeer(data.recipientPubKey); checkPacket(data.encryptedData)
+    const db = await authorize("signal:send", data, proof)
+    await limitWrites(db, proof, "signal:send", 20)
+    await db.prepare("DELETE FROM RelaySignal WHERE expiresAt <= ?").bind(Date.now()).run()
+    await db.prepare(`INSERT INTO RelaySignal (senderPubKey, recipientPubKey, encryptedData, expiresAt) VALUES (?, ?, ?, ?)
+      ON CONFLICT(senderPubKey, recipientPubKey) DO UPDATE SET encryptedData = excluded.encryptedData, expiresAt = excluded.expiresAt`)
+      .bind(proof.publicKey, data.recipientPubKey, data.encryptedData, Date.now() + 60_000).run()
+    return { success: true }
+  } catch (error) { return failure(error) }
+}
+
+export async function getSignal(data: { senderPubKey: string }, proof: RequestProof): Promise<{ success: true; signal: { encryptedData: string } | null } | Failure> {
+  try {
+    checkPeer(data.senderPubKey)
+    const db = await authorize("signal:read", data, proof)
+    const signal = await db.prepare("SELECT encryptedData FROM RelaySignal WHERE senderPubKey = ? AND recipientPubKey = ? AND expiresAt > ?")
+      .bind(data.senderPubKey, proof.publicKey, Date.now()).first<{ encryptedData: string }>()
+    return { success: true, signal }
+  } catch (error) { return failure(error) }
 }

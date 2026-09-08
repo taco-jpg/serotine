@@ -2,7 +2,7 @@
 
 // Generate a new ECDH key pair for encryption
 export async function generateEncryptionKeyPair() {
-  return await window.crypto.subtle.generateKey(
+  return await globalThis.crypto.subtle.generateKey(
     {
       name: "ECDH",
       namedCurve: "P-256",
@@ -14,7 +14,7 @@ export async function generateEncryptionKeyPair() {
 
 // Generate a new ECDSA key pair for signing
 export async function generateSigningKeyPair() {
-  return await window.crypto.subtle.generateKey(
+  return await globalThis.crypto.subtle.generateKey(
     {
       name: "ECDSA",
       namedCurve: "P-256",
@@ -26,7 +26,7 @@ export async function generateSigningKeyPair() {
 
 // Export a key to JWK format (for storage)
 export async function exportKey(key: CryptoKey) {
-  return await window.crypto.subtle.exportKey("jwk", key)
+  return await globalThis.crypto.subtle.exportKey("jwk", key)
 }
 
 // Import a key from JWK format
@@ -43,7 +43,7 @@ export async function importKey(jwk: JsonWebKey, type: "encryption" | "signing",
         ? ["verify"]
         : ["sign"]
 
-  return await window.crypto.subtle.importKey("jwk", jwk, algorithm, true, usages)
+  return await globalThis.crypto.subtle.importKey("jwk", jwk, algorithm, true, usages)
 }
 
 // Convert ArrayBuffer to Hex string (for UIDs)
@@ -54,7 +54,7 @@ export function arrayBufferToHex(buffer: ArrayBuffer): string {
 
 // Convert Hex string to ArrayBuffer
 export function hexToArrayBuffer(hex: string): ArrayBuffer {
-  if (hex.length % 2 !== 0) throw new Error("Invalid hex string")
+  if (!hex || hex.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(hex)) throw new Error("Invalid hex string")
   const bytes = new Uint8Array(hex.length / 2)
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
@@ -64,7 +64,7 @@ export function hexToArrayBuffer(hex: string): ArrayBuffer {
 
 // Export public key to raw hex format (used as UID)
 export async function exportPublicKeyToHex(key: CryptoKey) {
-  const raw = await window.crypto.subtle.exportKey("raw", key)
+  const raw = await globalThis.crypto.subtle.exportKey("raw", key)
   return arrayBufferToHex(raw)
 }
 
@@ -74,13 +74,13 @@ export async function importPublicKeyFromHex(hex: string, type: "encryption" | "
   const algorithm = type === "encryption" ? { name: "ECDH", namedCurve: "P-256" } : { name: "ECDSA", namedCurve: "P-256" }
   const buffer = hexToArrayBuffer(hex)
   const usages: KeyUsage[] = type === "encryption" ? [] : ["verify"]
-  return await window.crypto.subtle.importKey(format, buffer, algorithm, true, usages)
+  return await globalThis.crypto.subtle.importKey(format, buffer, algorithm, true, usages)
 }
 
 // Sign a challenge string
 export async function signChallenge(challenge: string, privateKey: CryptoKey): Promise<string> {
   const encoded = new TextEncoder().encode(challenge)
-  const signature = await window.crypto.subtle.sign(
+  const signature = await globalThis.crypto.subtle.sign(
     {
       name: "ECDSA",
       hash: { name: "SHA-256" },
@@ -97,7 +97,7 @@ export async function verifySignature(challenge: string, signatureHex: string, p
   const encoded = new TextEncoder().encode(challenge)
   const signature = hexToArrayBuffer(signatureHex)
   
-  return await window.crypto.subtle.verify(
+  return await globalThis.crypto.subtle.verify(
     {
       name: "ECDSA",
       hash: { name: "SHA-256" },
@@ -116,12 +116,12 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   for (let i = 0; i < len; i++) {
     binary += String.fromCharCode(bytes[i])
   }
-  return window.btoa(binary)
+  return globalThis.btoa(binary)
 }
 
 // Convert Base64 string to ArrayBuffer
 export function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary_string = window.atob(base64)
+  const binary_string = globalThis.atob(base64)
   const len = binary_string.length
   const bytes = new Uint8Array(len)
   for (let i = 0; i < len; i++) {
@@ -132,7 +132,7 @@ export function base64ToArrayBuffer(base64: string): ArrayBuffer {
 
 // Derive a shared secret using ECDH (P-256)
 export async function deriveSharedSecret(privateKey: CryptoKey, publicKey: CryptoKey) {
-  return await window.crypto.subtle.deriveKey(
+  return await globalThis.crypto.subtle.deriveKey(
     {
       name: "ECDH",
       public: publicKey,
@@ -150,9 +150,9 @@ export async function deriveSharedSecret(privateKey: CryptoKey, publicKey: Crypt
 // Encrypt a message using AES-GCM
 export async function encryptMessage(message: string, key: CryptoKey) {
   const encoded = new TextEncoder().encode(message)
-  const iv = window.crypto.getRandomValues(new Uint8Array(12))
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(12))
 
-  const ciphertext = await window.crypto.subtle.encrypt(
+  const ciphertext = await globalThis.crypto.subtle.encrypt(
     {
       name: "AES-GCM",
       iv: iv,
@@ -172,7 +172,7 @@ export async function decryptMessage(ciphertext: string, iv: string, key: Crypto
   const decodedCiphertext = base64ToArrayBuffer(ciphertext)
   const decodedIv = base64ToArrayBuffer(iv)
 
-  const decrypted = await window.crypto.subtle.decrypt(
+  const decrypted = await globalThis.crypto.subtle.decrypt(
     {
       name: "AES-GCM",
       iv: decodedIv,

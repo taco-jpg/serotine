@@ -4,9 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "build:edge": "opennextjs-cloudflare build",
-    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "build": "opennextjs-cloudflare build",
+    "build:next": "next build",
+    "build:edge": "npm run build",
+    "deploy": "npm run build && opennextjs-cloudflare deploy",
     "lint": "eslint .",
     "start": "next start",
     "test": "node --test tests/*.test.cjs",

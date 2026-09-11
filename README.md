@@ -16,6 +16,14 @@ Open `http://localhost:3000`. Development uses OpenNext's local Cloudflare conte
 
 Keep the conversation open to receive messages from that contact. History lives in IndexedDB on that browser. The download button next to Serotine creates a password-protected identity backup; the login screen restores that file. Backups restore keys and the address, **not** message history or contacts. Simultaneously using one identity on multiple devices does not synchronize history: whichever device acknowledges a queued message first collects it.
 
+## Using conversations
+
+- Unsent drafts survive reloads and switching contacts. Each draft belongs to one identity and contact, stays in browser storage, and is excluded from identity backups. A storage warning means the draft is only in memory; keep the tab open. A delayed send cannot clear a newer draft revision.
+- Search a conversation with the magnifying-glass button. Previous/next controls (or Shift + Enter / Enter in the search field) move through matching messages saved on this browser; Escape closes search.
+- While reading older messages, the new-message count and **Jump to latest** button let you return without losing your place. This count concerns the open conversation, not a background inbox.
+- Filter contacts by name or address and use the pencil button to rename them. Contact changes refresh across tabs on the same browser.
+- Backup downloads require matching passwords. Use **Show passwords** to check your entry before downloading. The restore screen also supports revealing the password.
+
 ## Verify and deploy
 
 ```sh
@@ -24,7 +32,7 @@ npm run typecheck
 npm run build
 ```
 
-Tests exercise the actual Web Crypto implementation and server actions against SQLite, with only the D1 binding substituted. They cover signed ownership, replay rejection, expired and tampered packets, recipient-scoped acknowledgments, sender-filtered inboxes, retry deduplication, rate limits, and relay failures. They are not an independent security audit or a browser/network compatibility test.
+Tests exercise the actual Web Crypto implementation and server actions against SQLite, with only the D1 binding substituted. They cover signed ownership, replay rejection, expired and tampered packets, recipient-scoped acknowledgments, sender-filtered inboxes, retry deduplication, rate limits, and relay failures. Draft regression tests also cover recipient/identity isolation, reloads, failed storage writes, and delayed-send races. They are not an independent security audit or a browser/network compatibility test.
 
 This project deploys to **Cloudflare Workers with OpenNext**, not Pages or `next-on-pages`. `npm run build` must produce `.open-next/worker.js`; generated `.open-next` output is intentionally not committed. For Cloudflare Workers Builds, set the **Build command** to `npm run build` so a fresh OpenNext bundle exists before the configured deploy or preview-deploy command runs. Keep `wrangler.toml` pointed at your intended D1 database and Worker. After authenticating Wrangler for that account:
 

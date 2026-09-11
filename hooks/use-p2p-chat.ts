@@ -5,10 +5,12 @@ import { storeSignal, getSignal, storeEncryptedMessage, getMyMessages, deleteMes
 import { encryptForPeer, decryptFromPeer, importKey } from "@/lib/crypto"
 import { loadIdentity, validateAddress, type Identity } from "@/lib/identity"
 import { createRequestProof } from "@/lib/request-auth"
-import { isEnvelope, ID_PATTERN, MAX_MESSAGE_LENGTH, MAX_PACKET_LENGTH, type Envelope } from "@/lib/protocol"
+import { isEnvelope, ID_PATTERN, MAX_MESSAGE_LENGTH, MAX_PACKET_LENGTH, type Envelope, type InboxCursor, type InboxRequest } from "@/lib/protocol"
 import { saveMessageToStorage, getMessagesFromStorage, migrateLegacyHistory, type StoredMessage } from "@/lib/storage"
 import { RTC_CONFIG } from "@/config/webrtc"
 import { MessageSendError } from "@/lib/message-send-error"
+import { withRelayTimeout } from "@/lib/relay-timeout"
+import { subscribeToHistory } from "@/lib/history-events"
 
 export type Status = "connecting" | "online" | "relay" | "offline"
 export type ChatMessage = StoredMessage
@@ -34,6 +36,8 @@ export function useP2PChat(targetPubKey: string) {
   const [myPub, setMyPub] = useState("")
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [attempt, setAttempt] = useState(0)
+  const reconnectRef = useRef<(() => void) | null>(null)
   const sessionRef = useRef<Session | null>(null)
   const sending = useRef(new Set<string>())
 
@@ -47,6 +51,19 @@ export function useP2PChat(targetPubKey: string) {
     let polling = false
     let negotiating = false
     let relayAvailable = false
+    let cursor: InboxCursor | null = null
+    let receiveWarning: string | null = null
+    let unsubscribeHistory: (() => void) | undefined
+    let refreshing = false
+    let refreshAgain = false
+    let pendingTimer: ReturnType<typeof setTimeout> | undefined
+    const displayMessage = (item: ChatMessage): ChatMessage => item.delivery === "pending" && !sending.current.has(item.id)
+      && Date.now() - (item.updatedAt ?? item.timestamp) >= 30_000 ? { ...item, delivery: "failed" } : item
+    const schedulePendingRefresh = (history: ChatMessage[]) => {
+      clearTimeout(pendingTimer)
+      const pending = history.filter(item => item.delivery === "pending" && !sending.current.has(item.id) && displayMessage(item).delivery === "pending")
+      if (pending.length) pendingTimer = setTimeout(() => void refreshHistory(), Math.max(1, Math.min(...pending.map(item => (item.updatedAt ?? item.timestamp) + 30_000 - Date.now()))))
+    }
     const received = new Set<string>()
     const now = () => active && session?.active
     const proof = (action: string, payload: unknown) => createRequestProof(action, payload, session!.identity.privateKey, session!.identity.publicKey)
@@ -108,7 +125,7 @@ export function useP2PChat(targetPubKey: string) {
       const packet: SignalPacket = { version: 2, sender: session.identity.publicKey, recipient: targetPubKey, sessionId: id, timestamp: Date.now(), description: connection.localDescription.toJSON() }
       const data = { recipientPubKey: targetPubKey, encryptedData: await encryptForPeer(JSON.stringify(packet), session.privateKey, targetPubKey) }
       if (!now()) return
-      const result = await storeSignal(data, await proof("signal:send", data))
+      const result = await withRelayTimeout(storeSignal(data, await proof("signal:send", data)))
       if (!result.success) throw new Error(result.error)
     }
     const negotiate = async () => {
@@ -121,15 +138,19 @@ export function useP2PChat(targetPubKey: string) {
           currentSessionId = crypto.randomUUID()
           const connection = newPeer()
           attachChannel(connection.createDataChannel("serotine-v2"))
-          await connection.setLocalDescription(await connection.createOffer())
+          const offer = await connection.createOffer()
+          if (!now() || pc !== connection) return
+          await connection.setLocalDescription(offer)
+          if (!now() || pc !== connection) return
           await gatherIce(connection)
           await publishSignal(connection, currentSessionId)
         }
         if (!now()) return
         const data = { senderPubKey: targetPubKey }
-        const result = await getSignal(data, await proof("signal:read", data))
+        const result = await withRelayTimeout(getSignal(data, await proof("signal:read", data)))
         if (!result.success || !result.signal || !now()) return
         const packet = JSON.parse(await decryptFromPeer(result.signal.encryptedData, session.privateKey, targetPubKey)) as SignalPacket
+        if (!now()) return
         if (packet.version !== 2 || packet.sender !== targetPubKey || packet.recipient !== session.identity.publicKey
           || !ID_PATTERN.test(packet.sessionId) || !Number.isSafeInteger(packet.timestamp) || Math.abs(Date.now() - packet.timestamp) > 60_000) return
         if (isOfferer && packet.sessionId === currentSessionId && packet.description?.type === "answer" && pc?.signalingState === "have-local-offer") {
@@ -139,7 +160,11 @@ export function useP2PChat(targetPubKey: string) {
           lastAttempt = Date.now()
           const connection = newPeer()
           await connection.setRemoteDescription(packet.description)
-          await connection.setLocalDescription(await connection.createAnswer())
+          if (!now() || pc !== connection) return
+          const answer = await connection.createAnswer()
+          if (!now() || pc !== connection) return
+          await connection.setLocalDescription(answer)
+          if (!now() || pc !== connection) return
           await gatherIce(connection)
           await publishSignal(connection, currentSessionId)
         }
@@ -153,23 +178,35 @@ export function useP2PChat(targetPubKey: string) {
       polling = true
       try {
         if (!navigator.onLine) throw new Error("You are offline. Reconnect to send and receive messages.")
-        const data = { senderPubKey: targetPubKey }
-        const result = await getMyMessages(data, await proof("message:list", data))
+        const data: InboxRequest = { senderPubKey: targetPubKey, ...(cursor ? { after: cursor } : {}) }
+        const result = await withRelayTimeout(getMyMessages(data, await proof("message:list", data)))
         if (!result.success) throw new Error(result.error)
+        if (!now()) return
         relayAvailable = true
-        if (now()) { setError(null); setStatus(session.channel?.readyState === "open" ? "online" : "relay") }
+        if (!cursor) receiveWarning = null
+        setStatus(session.channel?.readyState === "open" ? "online" : "relay")
+        let canAcknowledge = true
         for (const message of result.messages) {
           if (!now()) break
           try {
             if (await receive(message.encryptedData, message.id)) {
+              if (!now() || !canAcknowledge) continue
               const ack = { id: message.id, senderPubKey: targetPubKey }
-              const acknowledged = await deleteMessage(ack, await proof("message:ack", ack))
-              if (!acknowledged.success && now()) setError("Message saved. Relay acknowledgment will be retried automatically.")
-            } else if (now()) setError("An invalid encrypted message was left in the relay. Verify this contact’s address.")
+              try {
+                const acknowledged = await withRelayTimeout(deleteMessage(ack, await proof("message:ack", ack)))
+                if (!acknowledged.success) throw new Error(acknowledged.error)
+              } catch {
+                canAcknowledge = false
+                receiveWarning = "Messages saved. Relay acknowledgment will be retried automatically."
+              }
+            } else receiveWarning = "An invalid encrypted message was left in the relay. Verify this contact’s address."
           } catch {
-            if (now()) setError("A message could not be decrypted or saved. It remains in the relay for another attempt.")
+            receiveWarning = "A message could not be decrypted or saved. It remains in the relay for another attempt."
           }
         }
+        // One bounded page per poll: unreadable rows cannot hide later messages.
+        cursor = result.nextCursor ?? null
+        if (now()) setError(receiveWarning)
       } catch (cause) {
         relayAvailable = false
         if (now()) {
@@ -180,13 +217,43 @@ export function useP2PChat(targetPubKey: string) {
         polling = false
         if (now()) {
           void negotiate()
-          pollTimer = setTimeout(() => void poll(), relayAvailable ? 3000 : 8000)
+          pollTimer = setTimeout(() => void poll(), relayAvailable ? cursor ? 100 : 3000 : 8000)
         }
       }
     }
-    const wake = () => { clearTimeout(pollTimer); void poll() }
+    const refreshHistory = async () => {
+      if (!now() || !session) return
+      if (refreshing) { refreshAgain = true; return }
+      refreshing = true
+      try {
+        do {
+          refreshAgain = false
+          const history = await getMessagesFromStorage(session.identity.publicKey, targetPubKey)
+          if (!now()) return
+          history.forEach(item => { if (item.senderPubKey === targetPubKey) received.add(item.id) })
+          setMessages(previous => {
+            const merged = new Map(previous.map(item => [`${item.senderPubKey}:${item.id}`, item]))
+            for (const item of history) {
+              const key = `${item.senderPubKey}:${item.id}`
+              const existing = merged.get(key)
+              // A stale read must not downgrade a confirmed send.
+              if (existing?.delivery === "sent" && item.delivery !== "sent") continue
+              merged.set(key, displayMessage(item))
+            }
+            return [...merged.values()].sort((a, b) => a.timestamp - b.timestamp)
+          })
+          schedulePendingRefresh(history)
+        } while (refreshAgain && now())
+      } catch { if (now()) setError("Could not refresh saved history. Check browser storage and try reconnecting.") }
+      finally { refreshing = false }
+    }
+    const wake = () => { clearTimeout(pollTimer); void refreshHistory(); void poll() }
+    const offline = () => {
+      relayAvailable = false
+      if (now()) { setStatus("offline"); setError("You are offline. Reconnect to send and receive messages.") }
+    }
     const initialize = async () => {
-      setReady(false); setMessages([]); setStatus("connecting"); setError(null)
+      setReady(false); setMessages([]); setMyPub(""); setStatus("connecting"); setError(null)
       try {
         const identity = await loadIdentity()
         if (!identity) throw new Error("Create or restore your identity before opening a conversation.")
@@ -201,8 +268,11 @@ export function useP2PChat(targetPubKey: string) {
         const history = await getMessagesFromStorage(identity.publicKey, targetPubKey)
         if (!now()) return
         history.forEach(item => { if (item.senderPubKey === targetPubKey) received.add(item.id) })
-        setMessages(history.map(item => item.delivery === "pending" ? { ...item, delivery: "failed" as const } : item).sort((a, b) => a.timestamp - b.timestamp))
+        setMessages(history.map(displayMessage).sort((a, b) => a.timestamp - b.timestamp))
+        schedulePendingRefresh(history)
         setReady(true)
+        unsubscribeHistory = subscribeToHistory(identity.publicKey, targetPubKey, () => { void refreshHistory() })
+        reconnectRef.current = wake
         await poll()
       } catch (cause) {
         if (active) { setError(cause instanceof Error ? cause.message : "Could not open this conversation."); setStatus("offline") }
@@ -210,15 +280,22 @@ export function useP2PChat(targetPubKey: string) {
     }
     void initialize()
     window.addEventListener("online", wake)
+    window.addEventListener("offline", offline)
+    window.addEventListener("focus", wake)
     return () => {
       active = false
       if (session) session.active = false
       if (sessionRef.current === session) sessionRef.current = null
       clearTimeout(pollTimer)
+      clearTimeout(pendingTimer)
+      unsubscribeHistory?.()
+      if (reconnectRef.current === wake) reconnectRef.current = null
       closePeer()
       window.removeEventListener("online", wake)
+      window.removeEventListener("offline", offline)
+      window.removeEventListener("focus", wake)
     }
-  }, [targetPubKey])
+  }, [targetPubKey, attempt])
 
   const sendMessage = async (content: string, retry?: ChatMessage) => {
     const session = sessionRef.current
@@ -228,7 +305,7 @@ export function useP2PChat(targetPubKey: string) {
     const id = retry?.id ?? crypto.randomUUID()
     if (sending.current.has(id)) return
     sending.current.add(id)
-    const message: ChatMessage = { id, peerPubKey: targetPubKey, senderPubKey: session.identity.publicKey, content: text, timestamp: retry?.timestamp ?? Date.now(), delivery: "pending" }
+    const message: ChatMessage = { id, peerPubKey: targetPubKey, senderPubKey: session.identity.publicKey, content: text, timestamp: retry?.timestamp ?? Date.now(), updatedAt: Date.now(), delivery: "pending" }
     const update = (item: ChatMessage) => {
       if (session.active) setMessages(previous => [...previous.filter(m => m.id !== item.id || m.senderPubKey !== item.senderPubKey), item].sort((a, b) => a.timestamp - b.timestamp))
     }
@@ -243,7 +320,7 @@ export function useP2PChat(targetPubKey: string) {
       const data = { id, recipientPubKey: targetPubKey, encryptedData }
       // Queue durably even when direct is available. Both paths use the same ID;
       // a peer that closes mid-send can still collect the queued copy later.
-      const result = await storeEncryptedMessage(data, await createRequestProof("message:send", data, session.identity.privateKey, session.identity.publicKey))
+      const result = await withRelayTimeout(storeEncryptedMessage(data, await createRequestProof("message:send", data, session.identity.privateKey, session.identity.publicKey)))
       if (!result.success) throw new Error(result.error)
       accepted = true
       message.delivery = "sent"
@@ -268,5 +345,6 @@ export function useP2PChat(targetPubKey: string) {
       throw failure
     } finally { sending.current.delete(id) }
   }
-  return { sendMessage, status, messages, myPub, ready, error }
+  const reconnect = () => { if (ready && reconnectRef.current) reconnectRef.current(); else setAttempt(value => value + 1) }
+  return { sendMessage, status, messages, myPub, ready, error, reconnect }
 }

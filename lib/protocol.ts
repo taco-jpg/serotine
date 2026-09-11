@@ -5,6 +5,9 @@ export const AUTH_WINDOW_MS = 60_000
 export const PUBLIC_KEY_PATTERN = /^04[0-9a-f]{128}$/
 export const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
+export interface InboxCursor { createdAt: number; id: string }
+export interface InboxRequest { senderPubKey: string; after?: InboxCursor }
+
 export interface RequestProof {
   publicKey: string
   timestamp: number

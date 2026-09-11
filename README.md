@@ -23,6 +23,12 @@ Keep the conversation open to receive messages from that contact. History lives 
 - While reading older messages, the new-message count and **Jump to latest** button let you return without losing your place. This count concerns the open conversation, not a background inbox.
 - Filter contacts by name or address and use the pencil button to rename them. Contact changes refresh across tabs on the same browser.
 - Backup downloads require matching passwords. Use **Show passwords** to check your entry before downloading. The restore screen also supports revealing the password.
+- The **Reconnect** button retries the relay and refreshes saved history without reloading. Failed conversation initialization has its own retry control. Focusing a tab also refreshes history and the connection.
+- Open tabs on the same browser refresh committed history using identity-scoped notifications. Notification payloads contain routing addresses, never plaintext messages or keys. If cross-tab messaging is unavailable, focus refresh still works. This does not synchronize different browser profiles or devices.
+- Relay requests time out after 15 seconds so a stalled request does not leave the composer locked. **Unconfirmed · Retry** reuses the original message ID: a timeout cannot establish whether a remote write succeeded. A recent send from another tab remains pending; an abandoned pending attempt becomes retryable after 30 seconds.
+- Drafts that cannot be written to browser storage remain in memory across conversation changes in the same tab. **Try saving draft again** retries persistence, and the browser may warn before closing a tab with unsaved text. Reloading or closing can still lose these memory-only drafts.
+- Search highlights matching text and respects input-method composition. Each message has a **Copy** action, and the composer grows with multiline text. Screen readers get sender labels and arrival announcements without replaying restored history.
+- Adding an address already in your contact list opens its conversation. The whole contact panel scrolls on short screens, including the add-contact form and expanded address.
 
 ## Verify and deploy
 
@@ -34,21 +40,31 @@ npm run build
 
 Tests exercise the actual Web Crypto implementation and server actions against SQLite, with only the D1 binding substituted. They cover signed ownership, replay rejection, expired and tampered packets, recipient-scoped acknowledgments, sender-filtered inboxes, retry deduplication, rate limits, and relay failures. Draft regression tests also cover recipient/identity isolation, reloads, failed storage writes, and delayed-send races. They are not an independent security audit or a browser/network compatibility test.
 
-This project deploys to **Cloudflare Workers with OpenNext**, not Pages or `next-on-pages`. `npm run build` must produce `.open-next/worker.js`; generated `.open-next` output is intentionally not committed. For Cloudflare Workers Builds, set the **Build command** to `npm run build` so a fresh OpenNext bundle exists before the configured deploy or preview-deploy command runs. Keep `wrangler.toml` pointed at your intended D1 database and Worker. After authenticating Wrangler for that account:
+This project deploys to **Cloudflare Workers with OpenNext**, not Pages or `next-on-pages`. `npm run build` must produce `.open-next/worker.js`; generated `.open-next` output is intentionally not committed. For Cloudflare Workers Builds, set the **Build command** to `npm run build` and the production **Deploy command** to `npm run deploy:built`. The deploy command applies pending D1 migrations before uploading the Worker and stops if migration fails. Keep `wrangler.toml` pointed at your intended D1 database and Worker. After authenticating Wrangler for that account:
 
 ```sh
-npx wrangler d1 migrations apply serotine-db --remote
 npm run deploy
 ```
 
 Apply migrations before deploying code. `0002_authenticated_transport.sql` creates the v2 relay, encrypted signal, and replay-prevention tables without deleting existing tables. Deploying v2 requires both peers to reload into v2. Old unsigned queued messages and signals are not accepted as authenticated v2 traffic. Already-saved browser history is imported once for its original identity; legacy database tables are preserved. Do not roll back to the old unauthenticated public actions on an internet-facing deployment.
+
+## Troubleshooting a relay outage
+
+A generic relay error alone does not establish the cause. Do not clear browser data to fix a server outage: that can remove your identity and local history.
+
+- **Database needs an update:** the site owner should check that the configured D1 database is correct, then run `npm run db:migrate:remote` from the current checkout. Migration `0002_authenticated_transport.sql` must exist on that database. A frontend deploy alone does not apply it.
+- **Messaging is not configured:** check the Worker's `serotine_db` D1 binding against `wrangler.toml`.
+- **Temporarily unavailable:** inspect Worker logs and D1 availability. Requests automatically retry; use **Reconnect** after service returns and retry each unconfirmed message using its existing bubble.
+- For production Workers Builds, use the migration-aware `npm run deploy:built` deploy command. Its credentials need access to the intended Worker and D1 database. Keep preview deployments bound to their intended database; do not run the production migration command against an unrelated preview environment.
+
+These diagnostics distinguish known setup failures without exposing query text or message data. Tests and local migrations do not verify the state of a deployed database.
 
 ## Delivery and security model
 
 - An address is a P-256 public key. Its private key is created locally and stays in browser storage. Requests use ECDSA/SHA-256 proofs of possession of that existing P-256 identity, binding action, full payload, timestamp, and single-use nonce. The same underlying key currently serves ECDH and ECDSA for compatibility; separate certified signing and encryption identities are a future protocol change.
 - Content and signaling are encrypted with ECDH-derived AES-256-GCM keys and fresh 96-bit IVs. Encrypted message envelopes bind protocol version, sender, recipient, UUID, timestamp, and content. Both relay and direct delivery validate these fields.
 - Sends are durably queued at the relay before reporting success. The direct channel can deliver the same encrypted packet immediately; the receiver deduplicates its stable ID. “Sent to relay” is **not a delivered or read receipt**.
-- A recipient acknowledges a message only after saving it locally. Fetching alone never deletes it. Inbox queries and acknowledgments are signed and recipient-scoped. Polling continues while a direct channel is open and retries relay errors.
+- A recipient acknowledges a message only after saving it locally. Fetching alone never deletes it. Inbox queries and acknowledgments are signed and recipient-scoped. Polling continues while a direct channel is open and retries relay errors. Signed cursor pagination processes one page at a time so unreadable rows cannot block later messages; those rows remain queued for another attempt.
 - Queued messages expire after seven days. Queries exclude expired records; message writes purge expired ciphertext. Expired signaling and nonce records are also purged during their respective operations. This is logical application deletion, not a promise about provider backups or physical erasure.
 - Sender writes have per-identity request and queue limits. These do not stop Sybil attacks or volumetric abuse. Configure Cloudflare request/rate controls and monitor resource usage before exposing a relay publicly.
 - The relay can observe public routing addresses, message sizes, timing, and requests. WebRTC peers and STUN services can learn IP information. This is not an anonymity network.

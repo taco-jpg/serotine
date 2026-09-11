@@ -82,7 +82,10 @@ export default function ChatLayoutClient({ children }: { children: React.ReactNo
       const pub = await validateAddress(newPub)
       if (pub === identity.publicKey) throw new Error("That is your own address. Ask your contact to share theirs.")
       const current = loadContacts(identity.publicKey)
-      if (current.some(contact => contact.pub === pub)) throw new Error("This contact is already in your list.")
+      if (current.some(contact => contact.pub === pub)) {
+        setNewPub(""); setNewAlias(""); setAddOpen(false); setFilter(""); router.push(`/chat/${pub}`)
+        return
+      }
       const updated = [...current, { pub, alias: newAlias.trim().slice(0, 60) }]
       saveContacts(identity.publicKey, updated); setContacts(updated)
       setNewPub(""); setNewAlias(""); setAddOpen(false); setFilter(""); router.push(`/chat/${pub}`)
@@ -111,6 +114,7 @@ export default function ChatLayoutClient({ children }: { children: React.ReactNo
         <Link href="/chat" className="flex items-center gap-3"><Shield className="size-6 text-indigo-300" /><span className="font-serif text-2xl text-zinc-100">Serotine</span></Link>
         <Button variant="ghost" size="icon" aria-label="Back up identity" onClick={() => { setBackupError(""); setBackupOpen(true) }}><Download className="size-4" /></Button>
       </div>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
       <div className="border-b border-zinc-800/80 p-5">
         <div className="mb-3 flex items-center justify-between"><span className="text-xs font-medium uppercase tracking-[0.15em] text-zinc-500">Your address</span><span aria-live="polite" className="text-xs text-indigo-300">{copied ? "Copied" : ""}</span></div>
         <button type="button" onClick={() => void copyAddress()} className="flex w-full items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900 p-3 text-left transition hover:border-zinc-600">
@@ -126,7 +130,7 @@ export default function ChatLayoutClient({ children }: { children: React.ReactNo
       </form>}
       {error && <p role="alert" className="mx-5 mb-4 text-sm leading-relaxed text-red-300">{error}</p>}
       {contacts.length > 0 && <div className="relative mx-5 mb-3"><Search className="pointer-events-none absolute left-3 top-3 size-4 text-zinc-500" /><Input aria-label="Search contacts" placeholder="Search by name or address" value={filter} onChange={event => setFilter(event.target.value)} className="pl-9" /></div>}
-      <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto px-3 pb-4" aria-label="Conversations">
+      <nav className="space-y-1 px-3 pb-4" aria-label="Conversations">
         {contacts.length === 0 && <div className="px-4 py-7 text-center"><MessageSquare className="mx-auto mb-3 size-7 text-zinc-600" /><p className="text-sm text-zinc-400">Your first conversation starts here.</p><p className="mt-2 text-sm leading-relaxed text-zinc-500">Exchange addresses with someone you trust, then add them above.</p></div>}
         {contacts.length > 0 && filteredContacts.length === 0 && <p role="status" className="px-4 py-6 text-center text-sm text-zinc-400">No contacts match your search.</p>}
         {filteredContacts.map(contact => <div key={contact.pub} className={`flex items-center gap-1 rounded-xl ${pathname === `/chat/${contact.pub}` ? "bg-indigo-400/10 ring-1 ring-inset ring-indigo-400/20" : "hover:bg-zinc-900"}`}>
@@ -136,6 +140,7 @@ export default function ChatLayoutClient({ children }: { children: React.ReactNo
         </div>)}
       </nav>
       <p className="border-t border-zinc-800/80 px-5 py-4 text-xs leading-relaxed text-zinc-500">History stays on this browser.<br />Back up your identity before clearing site data.</p>
+      </div>
     </aside>
     <main className={`${inConversation ? "flex" : "hidden md:flex"} min-h-0 min-w-0 flex-1 flex-col`}>{children}</main>
     <Dialog open={backupOpen} onOpenChange={open => { setBackupOpen(open); if (!open) { setPassword(""); setConfirmPassword(""); setShowPassword(false) } }}><DialogContent><DialogHeader><DialogTitle>Back up your identity</DialogTitle><DialogDescription>Keep this file and its password somewhere safe. It restores your address and private key; message history stays on this browser.</DialogDescription></DialogHeader><form onSubmit={event => void backup(event)} className="space-y-4"><Label htmlFor="export-password">Backup password</Label><Input id="export-password" type={showPassword ? "text" : "password"} autoComplete="new-password" minLength={12} required placeholder="At least 12 characters" value={password} onChange={event => setPassword(event.target.value)} /><Label htmlFor="confirm-export-password">Confirm backup password</Label><Input id="confirm-export-password" type={showPassword ? "text" : "password"} autoComplete="new-password" minLength={12} required value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} /><Button type="button" variant="ghost" size="sm" aria-pressed={showPassword} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeOff className="mr-2 size-4" /> : <Eye className="mr-2 size-4" />}{showPassword ? "Hide passwords" : "Show passwords"}</Button>{confirmPassword && password !== confirmPassword && <p className="text-sm text-amber-200">Passwords do not match yet.</p>}{backupError && <p role="alert" className="text-sm text-red-300">{backupError}</p>}<p className="text-sm text-zinc-400">This password cannot be recovered. Anyone with the file and password can use your identity.</p><DialogFooter><Button type="submit" disabled={exporting || password.length < 12 || password !== confirmPassword}>{exporting ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Download className="mr-2 size-4" />} Download encrypted backup</Button></DialogFooter></form></DialogContent></Dialog>

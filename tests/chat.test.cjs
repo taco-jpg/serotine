@@ -56,6 +56,7 @@ async function inbound(content = 'Incoming message', id = crypto.randomUUID()) {
 }
 function harness(options = {}) {
   const slots = [], effects = [], timers = new Map(), events = new EventTarget()
+  let historyChanged
   const records = new Map((options.history || []).map(item => [`${item.senderPubKey}:${item.id}`, structuredClone(item)]))
   const calls = { sends: [], saves: [], acknowledgments: [], lists: 0, lateUpdates: 0 }
   let cursor = 0, stopped = false, timerId = 0, target = bob.publicKey
@@ -90,7 +91,7 @@ function harness(options = {}) {
       return options.send ? options.send(data, proof) : { success: true }
     },
     async deleteMessage(data) { calls.acknowledgments.push(data); return options.ack ? options.ack(data) : { success: true } },
-    async getSignal() { return { success: true, signal: null } },
+    async getSignal() { return options.signal ? options.signal() : { success: true, signal: null } },
     async storeSignal() { return { success: true } },
   }
   const storage = {
@@ -104,9 +105,11 @@ function harness(options = {}) {
     },
   }
   const hook = loader({ react, '@/app/actions': actions, '@/lib/storage': storage,
+    '@/lib/crypto': { ...cryptoFunctions, decryptFromPeer: (...args) => options.decrypt ? options.decrypt(...args) : cryptoFunctions.decryptFromPeer(...args) },
     '@/lib/identity': { loadIdentity: async () => options.loadIdentity ? options.loadIdentity() : alice, validateAddress: async address => address.toLowerCase() },
     '@/config/webrtc': { RTC_CONFIG: {} },
-  }, { window: events, navigator: { onLine: true }, RTCPeerConnection: undefined,
+    '@/lib/history-events': { subscribeToHistory(owner, peer, refresh) { historyChanged = refresh; return () => { historyChanged = null } } },
+  }, { window: events, navigator: { onLine: true }, RTCPeerConnection: options.RTC, BroadcastChannel: undefined,
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id },
     clearTimeout(id) { timers.delete(id) },
   })(path.join(root, 'hooks/use-p2p-chat.ts')).useP2PChat
@@ -117,7 +120,9 @@ function harness(options = {}) {
     return result
   }
   const api = {
-    options, calls, records, timers, view,
+    options, calls, records, timers, view, events,
+    refreshHistory() { historyChanged?.() },
+    runDelay(delay) { const entry = [...timers.entries()].find(([, timer]) => timer.delay === delay); assert.ok(entry, "timer missing: " + delay); const [id, timer] = entry; timers.delete(id); timer.callback() },
     runTimer() { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.callback() },
     unmount() { for (const item of slots) item?.cleanup?.(); stopped = true },
     switchPeer(peer) { target = peer; return view() },
@@ -265,4 +270,147 @@ test('failed relay acknowledgment is retried without duplicating saved history',
   await until(() => h.calls.acknowledgments.length === 2)
   assert.equal(h.view().messages.length, 1)
   assert.equal(h.calls.saves.length, 1)
+})
+
+
+test('stalled inbox request times out and polling recovers without reloading', async t => {
+  const options = { list: () => new Promise(() => {}) }
+  const h = harness(options)
+  t.after(() => h.unmount())
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 15000))
+  h.runDelay(15000)
+  await until(() => h.view().status === 'offline')
+  assert.match(h.view().error, /too long/)
+  options.list = async () => ({ success: true, messages: [] })
+  h.runDelay(8000)
+  await until(() => h.view().status === 'relay')
+})
+
+test('stalled send releases composer, retains a retry, and ignores late completion', async t => {
+  let finish
+  const options = { send: () => new Promise(resolve => { finish = resolve }) }
+  const h = harness(options)
+  t.after(() => h.unmount())
+  await until(() => h.view().ready)
+  const result = h.view().sendMessage('Keep the same message')
+  const rejected = assert.rejects(result, cause => cause.savedLocally && /too long/.test(cause.message))
+  await until(() => finish && [...h.timers.values()].some(timer => timer.delay === 15000))
+  h.runDelay(15000)
+  await rejected
+  const failed = h.view().messages[0]
+  assert.equal(failed.delivery, 'failed')
+  options.send = async () => ({ success: true })
+  await h.view().sendMessage(failed.content, failed)
+  finish({ success: true })
+  await tick()
+  assert.equal(h.calls.sends[0].id, h.calls.sends[1].id)
+  assert.equal(h.view().messages.length, 1)
+  assert.equal(h.view().messages[0].delivery, 'sent')
+})
+
+test('one stalled acknowledgment does not delay every other received message', async t => {
+  const incoming = await Promise.all([inbound('One'), inbound('Two')])
+  const h = harness({ incoming, ack: () => new Promise(() => {}) })
+  t.after(() => h.unmount())
+  await until(() => h.calls.acknowledgments.length === 1 && [...h.timers.values()].some(timer => timer.delay === 15000))
+  h.runDelay(15000)
+  await until(() => h.view().messages.length === 2 && [...h.timers.values()].some(timer => timer.delay === 3000))
+  assert.equal(h.calls.acknowledgments.length, 1)
+  assert.match(h.view().error, /acknowledgment/)
+})
+
+test('history invalidation and focus recover messages saved by another tab', async t => {
+  const h = harness()
+  t.after(() => h.unmount())
+  await until(() => h.view().ready)
+  const row = { id: crypto.randomUUID(), senderPubKey: bob.publicKey, peerPubKey: bob.publicKey, content: 'From another tab', timestamp: Date.now(), delivery: 'received' }
+  h.records.set(bob.publicKey + ':' + row.id, row)
+  h.refreshHistory()
+  await until(() => h.view().messages.length === 1)
+  const other = { ...row, id: crypto.randomUUID(), content: 'Focus fallback' }
+  h.records.set(bob.publicKey + ':' + other.id, other)
+  h.events.dispatchEvent(new Event('focus'))
+  await until(() => h.view().messages.length === 2)
+  assert.equal(h.calls.acknowledgments.length, 0)
+})
+
+test('reconnect can recover a failed conversation initialization', async t => {
+  const options = { loadHistory: async () => { throw new Error('Storage unavailable') } }
+  const h = harness(options)
+  t.after(() => h.unmount())
+  await until(() => h.view().status === 'offline')
+  assert.equal(h.view().ready, false)
+  options.loadHistory = async () => []
+  h.view().reconnect()
+  await until(() => h.view().ready)
+  assert.equal(h.view().error, null)
+})
+
+test('pagination collects a valid message behind an unreadable full page', async t => {
+  const valid = await inbound('Message 101')
+  const cursor = { createdAt: Date.now(), id: crypto.randomUUID() }
+  const invalid = Array.from({ length: 100 }, () => ({ id: crypto.randomUUID(), encryptedData: 'invalid ciphertext' }))
+  const requests = []
+  const h = harness({ list: async data => {
+    requests.push(data)
+    return data.after ? { success: true, messages: [valid], nextCursor: null } : { success: true, messages: invalid, nextCursor: cursor }
+  } })
+  t.after(() => h.unmount())
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 100))
+  assert.equal(h.calls.acknowledgments.length, 0)
+  h.runDelay(100)
+  await until(() => h.calls.acknowledgments.length === 1)
+  assert.deepEqual(requests[1].after, cursor)
+  assert.equal(h.view().messages[0].content, 'Message 101')
+  assert.match(h.view().error, /decrypted or saved/)
+})
+
+
+test('fresh pending send from another tab stays pending; an abandoned attempt becomes retryable', async t => {
+  const h = harness()
+  t.after(() => h.unmount())
+  await until(() => h.view().ready)
+  const row = { id: crypto.randomUUID(), senderPubKey: alice.publicKey, peerPubKey: bob.publicKey, content: 'Other tab is sending', timestamp: Date.now(), updatedAt: Date.now(), delivery: 'pending' }
+  h.records.set(alice.publicKey + ':' + row.id, row)
+  h.refreshHistory()
+  await until(() => h.view().messages.length === 1)
+  assert.equal(h.view().messages[0].delivery, 'pending')
+  row.updatedAt = Date.now() - 31000
+  h.records.set(alice.publicKey + ':' + row.id, row)
+  h.refreshHistory()
+  await until(() => h.view().messages[0].delivery === 'failed')
+  row.delivery = 'sent'
+  h.records.set(alice.publicKey + ':' + row.id, row)
+  h.refreshHistory()
+  await until(() => h.view().messages[0].delivery === 'sent')
+})
+
+test('unmount during signal decryption cannot create a leaked peer connection', async () => {
+  const originalAlice = alice, originalBob = bob
+  if (alice.publicKey < bob.publicKey) [alice, bob] = [bob, alice]
+  let h
+  try {
+    let release, decrypted = false
+    const peers = []
+    const signal = { version: 2, sender: bob.publicKey, recipient: alice.publicKey, sessionId: crypto.randomUUID(), timestamp: Date.now(), description: { type: 'offer', sdp: 'test' } }
+    const encryptedData = await cryptoFunctions.encryptForPeer(JSON.stringify(signal), bob.pair.privateKey, alice.publicKey)
+    class RTC {
+      constructor() { peers.push(this) }
+      close() {}
+    }
+    h = harness({ RTC, signal: async () => ({ success: true, signal: { encryptedData } }), decrypt: async (...args) => {
+      await new Promise(resolve => { release = resolve })
+      const result = await cryptoFunctions.decryptFromPeer(...args)
+      decrypted = true
+      return result
+    } })
+    await until(() => !!release)
+    h.unmount()
+    release()
+    await until(() => decrypted)
+    for (let i = 0; i < 5; i++) await tick()
+    assert.equal(peers.length, 0)
+    assert.equal(h.calls.lateUpdates, 0)
+    assert.equal(h.timers.size, 0)
+  } finally { h?.unmount(); alice = originalAlice; bob = originalBob }
 })

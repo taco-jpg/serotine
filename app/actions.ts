@@ -1,8 +1,8 @@
 "use server"
 
-import { getDB, type D1DatabaseBinding } from "@/lib/db"
+import { getDB, RelayConfigurationError, type D1DatabaseBinding } from "@/lib/db"
 import { verifyRequestProof } from "@/lib/request-auth"
-import { AUTH_WINDOW_MS, ID_PATTERN, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "@/lib/protocol"
+import { AUTH_WINDOW_MS, ID_PATTERN, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof, type InboxRequest, type InboxCursor } from "@/lib/protocol"
 
 class RequestError extends Error {}
 type Failure = { success: false; error: string }
@@ -16,8 +16,16 @@ export interface RelayMessage {
 
 function failure(error: unknown): Failure {
   if (error instanceof RequestError) return { success: false, error: error.message }
+  if (error instanceof RelayConfigurationError) {
+    console.error("Relay configuration: missing serotine_db binding")
+    return { success: false, error: "Messaging is not configured on this server. The site owner needs to connect its relay database. Your saved messages are still on this browser." }
+  }
+  if (error instanceof Error && /no such (?:table|column)/i.test(error.message)) {
+    console.error("Relay configuration: database migrations are missing; apply the D1 migrations before deployment")
+    return { success: false, error: "The messaging database needs an update by the site owner. Retrying cannot fix this yet. Your saved messages are still on this browser." }
+  }
   console.error("Relay operation failed", error instanceof Error ? error.name : "UnknownError")
-  return { success: false, error: "The relay is unavailable. Your message has not been sent. Please try again." }
+  return { success: false, error: "The relay is temporarily unavailable. Sends are not confirmed. Keep saved messages and retry when the connection returns." }
 }
 function checkPeer(peer: string) {
   if (typeof peer !== "string" || !PUBLIC_KEY_PATTERN.test(peer)) throw new RequestError("Invalid contact address.")
@@ -62,14 +70,21 @@ export async function storeEncryptedMessage(data: { id: string; recipientPubKey:
   } catch (error) { return failure(error) }
 }
 
-export async function getMyMessages(data: { senderPubKey: string }, proof: RequestProof): Promise<{ success: true; messages: RelayMessage[] } | Failure> {
+export async function getMyMessages(data: InboxRequest, proof: RequestProof): Promise<{ success: true; messages: RelayMessage[]; nextCursor: InboxCursor | null } | Failure> {
   try {
     checkPeer(data.senderPubKey)
+    if (data.after !== undefined && (!data.after || !Number.isSafeInteger(data.after.createdAt) || data.after.createdAt < 0 || !ID_PATTERN.test(data.after.id))) {
+      throw new RequestError("Invalid inbox position. Reopen this conversation.")
+    }
     const db = await authorize("message:list", data, proof)
+    const after = data.after
     const { results } = await db.prepare(`SELECT id, senderPubKey, recipientPubKey, encryptedData, createdAt FROM RelayMessage
-      WHERE recipientPubKey = ? AND senderPubKey = ? AND expiresAt > ? ORDER BY createdAt ASC LIMIT 100`)
-      .bind(proof.publicKey, data.senderPubKey, Date.now()).all<RelayMessage>()
-    return { success: true, messages: results }
+      WHERE recipientPubKey = ? AND senderPubKey = ? AND expiresAt > ?
+      ${after ? "AND (createdAt > ? OR (createdAt = ? AND id > ?))" : ""}
+      ORDER BY createdAt ASC, id ASC LIMIT 100`)
+      .bind(proof.publicKey, data.senderPubKey, Date.now(), ...(after ? [after.createdAt, after.createdAt, after.id] : [])).all<RelayMessage>()
+    const last = results.at(-1)
+    return { success: true, messages: results, nextCursor: results.length === 100 && last ? { createdAt: last.createdAt, id: last.id } : null }
   } catch (error) { return failure(error) }
 }
 

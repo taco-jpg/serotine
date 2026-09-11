@@ -7,12 +7,14 @@
     "build": "opennextjs-cloudflare build",
     "build:next": "next build",
     "build:edge": "npm run build",
-    "deploy": "npm run build && opennextjs-cloudflare deploy",
+    "deploy": "npm run build && npm run deploy:built",
+    "deploy:built": "npm run db:migrate:remote && opennextjs-cloudflare deploy",
     "lint": "eslint .",
     "start": "next start",
     "test": "node --test tests/*.test.cjs",
     "typecheck": "tsc --noEmit",
-    "db:migrate:local": "wrangler d1 migrations apply serotine-db --local"
+    "db:migrate:local": "wrangler d1 migrations apply serotine-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply serotine-db --remote"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

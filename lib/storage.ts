@@ -1,4 +1,5 @@
 import { openDB, type DBSchema } from "idb"
+import { notifyHistoryChanged } from "./history-events"
 
 export interface StoredMessage {
   id: string
@@ -6,6 +7,7 @@ export interface StoredMessage {
   senderPubKey: string
   content: string
   timestamp: number
+  updatedAt?: number
   delivery?: "pending" | "sent" | "failed" | "received"
 }
 interface ChatDB extends DBSchema {
@@ -24,6 +26,7 @@ async function initDB(owner: string) {
 export async function saveMessageToStorage(owner: string, message: StoredMessage) {
   const db = await initDB(owner)
   try { await db.put("messages", message) } finally { db.close() }
+  notifyHistoryChanged(owner, message.peerPubKey)
 }
 export async function getMessagesFromStorage(owner: string, peerPubKey: string) {
   const db = await initDB(owner)

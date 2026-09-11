@@ -6,7 +6,7 @@ import { Loader2, KeyRound, Upload, Eye, EyeOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { createIdentity, loadIdentity, restoreIdentityBackup } from "@/lib/identity"
+import { createIdentity, loadIdentity, restoreIdentityBackup, IdentityAccessError } from "@/lib/identity"
 
 export function LoginForm() {
   const router = useRouter()
@@ -19,9 +19,19 @@ export function LoginForm() {
   const [restore, setRestore] = useState(false)
   const [file, setFile] = useState<File | null>(null)
   const [password, setPassword] = useState("")
+  const [blocked, setBlocked] = useState(false)
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
-    void loadIdentity().then(identity => setHasIdentity(!!identity)).catch(cause => { setError(cause.message); setRestore(true); setRecoveryRequired(true) }).finally(() => setChecking(false))
-  }, [])
+    let active = true
+    setChecking(true); setBlocked(false); setRecoveryRequired(false); setError(null)
+    void loadIdentity().then(identity => { if (active) setHasIdentity(!!identity) }).catch(cause => {
+      if (!active) return
+      setHasIdentity(false); setError(cause.message)
+      if (cause instanceof IdentityAccessError) setBlocked(true)
+      else { setRestore(true); setRecoveryRequired(true) }
+    }).finally(() => { if (active) setChecking(false) })
+    return () => { active = false }
+  }, [attempt])
   const run = async (action: () => Promise<unknown>) => {
     setLoading(true); setError(null)
     try { await action(); router.replace("/chat") }
@@ -31,7 +41,7 @@ export function LoginForm() {
   if (checking) return <p role="status" className="flex items-center gap-2 text-sm text-zinc-400"><Loader2 className="size-4 animate-spin" /> Checking this browser…</p>
   return <div className="space-y-5">
     {error && <p role="alert" className="rounded-lg border border-red-400/25 bg-red-400/10 p-3 text-sm text-red-200">{error}</p>}
-    {hasIdentity ? <>
+    {blocked ? <Button className="h-12 w-full" onClick={() => setAttempt(value => value + 1)}>Check again</Button> : hasIdentity ? <>
       <p className="text-sm leading-relaxed text-zinc-400">Your identity is ready on this browser. Pick up where you left off.</p>
       <Button className="w-full h-12" onClick={() => router.replace("/chat")}>Open messages</Button>
     </> : <>

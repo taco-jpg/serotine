@@ -30,6 +30,11 @@ Keep the conversation open to receive messages from that contact. History lives 
 - Search highlights matching text and respects input-method composition. Each message has a **Copy** action, and the composer grows with multiline text. Screen readers get sender labels and arrival announcements without replaying restored history.
 - Adding an address already in your contact list opens its conversation. The whole contact panel scrolls on short screens, including the add-contact form and expanded address.
 
+- A blocked draft read can be retried with **Try loading draft again**; it does not overwrite the unread text. Failed cleanup of submitted text remains pending in this tab and deletes only the submitted revision, preserving newer edits.
+- Creating and restoring identities are serialized with a browser Web Lock where supported, with a per-tab queue and a final storage comparison as fallback. Legacy identity reads no longer write during loading. Older browsers without Web Locks cannot guarantee atomic writes across tabs; use one tab for identity creation/restoration there.
+- Browser storage/HTTPS problems on the login screen offer **Check again** instead of incorrectly requiring a backup restore.
+- Confirmed outgoing messages cannot be downgraded by a slower retry in another tab. Local storage preserves the original text and timestamp for the same message ID, and retries of already-confirmed messages avoid another relay write.
+
 ## Verify and deploy
 
 ```sh
@@ -40,22 +45,22 @@ npm run build
 
 Tests exercise the actual Web Crypto implementation and server actions against SQLite, with only the D1 binding substituted. They cover signed ownership, replay rejection, expired and tampered packets, recipient-scoped acknowledgments, sender-filtered inboxes, retry deduplication, rate limits, and relay failures. Draft regression tests also cover recipient/identity isolation, reloads, failed storage writes, and delayed-send races. They are not an independent security audit or a browser/network compatibility test.
 
-This project deploys to **Cloudflare Workers with OpenNext**, not Pages or `next-on-pages`. `npm run build` must produce `.open-next/worker.js`; generated `.open-next` output is intentionally not committed. For Cloudflare Workers Builds, set the **Build command** to `npm run build` and the production **Deploy command** to `npm run deploy:built`. The deploy command applies pending D1 migrations before uploading the Worker and stops if migration fails. Keep `wrangler.toml` pointed at your intended D1 database and Worker. After authenticating Wrangler for that account:
+This project deploys to **Cloudflare Workers with OpenNext**, not Pages or `next-on-pages`. `npm run build` must produce `.open-next/worker.js`; generated `.open-next` output is intentionally not committed. For Cloudflare Workers Builds, set the **Build command** to `npm run build` and the production **Deploy command** to `npm run deploy:built`. The normal deploy command uploads the Worker. The relay automatically creates any missing v2 tables and indexes on the first authenticated request through its existing D1 binding; no separate migration command or extra deployment-token database permissions are needed for this bootstrap. Keep `wrangler.toml` pointed at your intended D1 database and Worker. After authenticating Wrangler for that account:
 
 ```sh
 npm run deploy
 ```
 
-Apply migrations before deploying code. `0002_authenticated_transport.sql` creates the v2 relay, encrypted signal, and replay-prevention tables without deleting existing tables. Deploying v2 requires both peers to reload into v2. Old unsigned queued messages and signals are not accepted as authenticated v2 traffic. Already-saved browser history is imported once for its original identity; legacy database tables are preserved. Do not roll back to the old unauthenticated public actions on an internet-facing deployment.
+`0002_authenticated_transport.sql` defines the v2 relay, encrypted signal, and replay-prevention tables without deleting existing tables. Automatic setup uses the same additive statements, repairs missing indexes, checks required columns, and caches only successful readiness. Concurrent requests safely initialize independently; failed setup is retried. It never creates a database binding or alters incompatible existing tables. Explicit `npm run db:migrate:remote` remains available for operators and future migrations, but is not required to recover missing v2 tables. Deploying v2 requires both peers to reload into v2. Old unsigned queued messages and signals are not accepted as authenticated v2 traffic. Already-saved browser history is imported once for its original identity; legacy database tables are preserved. Do not roll back to the old unauthenticated public actions on an internet-facing deployment.
 
 ## Troubleshooting a relay outage
 
 A generic relay error alone does not establish the cause. Do not clear browser data to fix a server outage: that can remove your identity and local history.
 
-- **Database needs an update:** the site owner should check that the configured D1 database is correct, then run `npm run db:migrate:remote` from the current checkout. Migration `0002_authenticated_transport.sql` must exist on that database. A frontend deploy alone does not apply it.
+- **Automatic database setup:** after this version is deployed, valid requests create missing v2 tables and indexes automatically. No dashboard change is needed for a missing migration when `serotine_db` already points to a writable D1 database. Incompatible schemas, a missing binding, or service outages remain explicit failures.
 - **Messaging is not configured:** check the Worker's `serotine_db` D1 binding against `wrangler.toml`.
 - **Temporarily unavailable:** inspect Worker logs and D1 availability. Requests automatically retry; use **Reconnect** after service returns and retry each unconfirmed message using its existing bubble.
-- For production Workers Builds, use the migration-aware `npm run deploy:built` deploy command. Its credentials need access to the intended Worker and D1 database. Keep preview deployments bound to their intended database; do not run the production migration command against an unrelated preview environment.
+- For production Workers Builds, use `npm run build` followed by `npm run deploy:built`. Keep preview deployments bound to their intended database. Bootstrap runs through the configured binding, so it does not guess a database or require a separate authenticated Wrangler migration.
 
 These diagnostics distinguish known setup failures without exposing query text or message data. Tests and local migrations do not verify the state of a deployed database.
 

@@ -16,7 +16,7 @@ import { MessageText, literalSearch } from "@/components/message-text"
 
 export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const { sendMessage, status, messages, myPub, ready, error, reconnect } = useP2PChat(params.pubkey)
-  const { content, setContent, clearSubmittedDraft, retryDraftSave, draftReady, draftSaved } = useChatDraft(myPub, params.pubkey)
+  const { content, setContent, clearSubmittedDraft, retryDraftSave, draftReady, draftSaved, draftIssue } = useChatDraft(myPub, params.pubkey)
   const [busy, setBusy] = useState(false)
   const [alias, setAlias] = useState("")
   const [sendError, setSendError] = useState("")
@@ -142,8 +142,8 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
           <Textarea ref={input} aria-label="Message" placeholder={ready ? "Write a message…" : error ? "Conversation could not open. Try again above." : "Opening conversation…"} value={content} onChange={event => setContent(event.target.value)} maxLength={MAX_MESSAGE_LENGTH} disabled={!ready || !draftReady || busy} rows={2} className="max-h-44 min-h-12 resize-none border-0 bg-transparent text-base shadow-none focus-visible:ring-0" onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit() } }} />
           <Button type="submit" aria-label="Send message" disabled={!ready || !draftReady || !content.trim() || busy} size="icon" className="mb-1 mr-1 shrink-0">{busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}</Button>
         </div>
-        <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-zinc-400"><span>Enter to send · Shift + Enter for a new line</span><span className={!draftSaved ? "text-amber-300" : ""}>{!draftSaved ? "Draft is only in this tab · Do not reload or close it" : content ? "Draft saved on this browser" : "History saved on this browser"}</span></div>
-        {!draftSaved && <Button type="button" size="sm" variant="ghost" onClick={retryDraftSave}>Try saving draft again</Button>}
+        <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-zinc-400"><span>Enter to send · Shift + Enter for a new line</span><span className={!draftSaved ? "text-amber-300" : ""}>{!draftSaved ? draftIssue === "read" ? "Saved draft could not be loaded" : draftIssue === "clear" ? "Sent text is waiting to be cleared from storage" : "Draft is only in this tab · Do not reload or close it" : content ? "Draft saved on this browser" : "History saved on this browser"}</span></div>
+        {!draftSaved && <Button type="button" size="sm" variant="ghost" onClick={retryDraftSave}>{draftIssue === "read" ? "Try loading draft again" : draftIssue === "clear" ? "Retry draft cleanup" : "Try saving draft again"}</Button>}
         {content.length > MAX_MESSAGE_LENGTH - 1000 && <p className="mt-1 text-right text-xs text-zinc-500">{content.length.toLocaleString()} / {MAX_MESSAGE_LENGTH.toLocaleString()}</p>}
       </form>
     </footer>

@@ -301,6 +301,9 @@ export function useP2PChat(targetPubKey: string) {
     const session = sessionRef.current
     if (!session?.active || session.peer !== targetPubKey || !ready) throw new Error("Your identity is still loading. Please wait.")
     const text = content.trim()
+    if (retry && (retry.peerPubKey !== targetPubKey || retry.senderPubKey !== session.identity.publicKey || retry.content !== text)) {
+      throw new Error("Retry the original message from this conversation.")
+    }
     if (!text || text.length > MAX_MESSAGE_LENGTH) throw new Error(`Messages must contain 1–${MAX_MESSAGE_LENGTH.toLocaleString()} characters.`)
     const id = retry?.id ?? crypto.randomUUID()
     if (sending.current.has(id)) return
@@ -312,10 +315,12 @@ export function useP2PChat(targetPubKey: string) {
     let accepted = false
     let savedLocally = false
     try {
-      await saveMessageToStorage(session.identity.publicKey, message)
+      const stored = await saveMessageToStorage(session.identity.publicKey, message)
       savedLocally = true
+      Object.assign(message, stored)
       update(message)
-      const envelope: Envelope = { version: 2, id, sender: session.identity.publicKey, recipient: targetPubKey, content: text, timestamp: message.timestamp }
+      if ((message as ChatMessage).delivery === "sent") { if (session.active) setError(null); return }
+      const envelope: Envelope = { version: 2, id, sender: session.identity.publicKey, recipient: targetPubKey, content: message.content, timestamp: message.timestamp }
       const encryptedData = await encryptForPeer(JSON.stringify(envelope), session.privateKey, targetPubKey)
       const data = { id, recipientPubKey: targetPubKey, encryptedData }
       // Queue durably even when direct is available. Both paths use the same ID;
@@ -338,8 +343,9 @@ export function useP2PChat(targetPubKey: string) {
         return
       }
       message.delivery = "failed"
-      await saveMessageToStorage(session.identity.publicKey, message).then(() => { savedLocally = true }).catch(() => {})
+      await saveMessageToStorage(session.identity.publicKey, message).then(stored => { savedLocally = true; Object.assign(message, stored) }).catch(() => {})
       if (savedLocally) update(message)
+      if ((message as ChatMessage).delivery === "sent") { if (session.active) setError(null); return }
       const failure = new MessageSendError(cause instanceof Error ? cause.message : "Message was not sent. Please retry.", savedLocally)
       if (session.active) setError(failure.message)
       throw failure

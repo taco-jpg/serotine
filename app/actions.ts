@@ -21,8 +21,8 @@ function failure(error: unknown): Failure {
     return { success: false, error: "Messaging is not configured on this server. The site owner needs to connect its relay database. Your saved messages are still on this browser." }
   }
   if (error instanceof Error && /no such (?:table|column)/i.test(error.message)) {
-    console.error("Relay configuration: database migrations are missing; apply the D1 migrations before deployment")
-    return { success: false, error: "The messaging database needs an update by the site owner. Retrying cannot fix this yet. Your saved messages are still on this browser." }
+    console.error("Relay configuration: database schema remains incompatible after automatic setup")
+    return { success: false, error: "The messaging database could not finish automatic setup. Your saved messages are still on this browser. Try reconnecting shortly." }
   }
   console.error("Relay operation failed", error instanceof Error ? error.name : "UnknownError")
   return { success: false, error: "The relay is temporarily unavailable. Sends are not confirmed. Keep saved messages and retry when the connection returns." }

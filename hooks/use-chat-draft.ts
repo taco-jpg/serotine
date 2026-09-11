@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 import { MAX_MESSAGE_LENGTH } from "@/lib/protocol"
 
-interface Draft { key: string; content: string; saved: boolean; serialized: string | null }
+interface Draft { key: string; content: string; saved: boolean; serialized: string | null; pending?: "read" | "clear"; clearRevision?: string | null }
 
 // Keep the only copy alive across keyed route remounts in this tab.
 const unsavedDrafts = new Map<string, Draft>()
@@ -19,6 +19,24 @@ function remember(draft: Draft) {
   }
 }
 
+function readDraft(key: string): Draft {
+  try {
+    const serialized = localStorage.getItem(key)
+    const record = serialized ? JSON.parse(serialized) : null
+    if (record && (typeof record.content !== "string" || typeof record.revision !== "string")) throw new Error("Invalid draft")
+    return { key, content: record?.content.slice(0, MAX_MESSAGE_LENGTH) || "", saved: true, serialized }
+  } catch { return { key, content: "", saved: false, serialized: null, pending: "read" } }
+}
+
+function clearRevision(key: string, revision: string | null): Draft {
+  try {
+    const current = localStorage.getItem(key)
+    if (current === revision) localStorage.removeItem(key)
+    else if (current !== null) return readDraft(key) // Preserve a newer edit from another tab.
+    return { key, content: "", saved: true, serialized: null }
+  } catch { return { key, content: "", saved: false, serialized: null, pending: "clear", clearRevision: revision } }
+}
+
 /** Drafts use the same device-local trust boundary as message history. */
 export function useChatDraft(owner: string, peer: string) {
   const key = owner ? `serotine_draft:${owner}:${peer}` : ""
@@ -29,15 +47,9 @@ export function useChatDraft(owner: string, peer: string) {
     mounted.current = true
     if (key) {
       const unsaved = unsavedDrafts.get(key)
-      if (unsaved) { setDraft(unsaved); return () => { mounted.current = false } }
-      try {
-        const serialized = localStorage.getItem(key)
-        const record = serialized ? JSON.parse(serialized) : null
-        if (record && (typeof record.content !== "string" || typeof record.revision !== "string")) throw new Error("Invalid draft")
-        setDraft({ key, content: record?.content.slice(0, MAX_MESSAGE_LENGTH) || "", saved: true, serialized })
-      } catch {
-        setDraft({ key, content: "", saved: false, serialized: null })
-      }
+      const next = unsaved?.pending === "clear" ? clearRevision(key, unsaved.clearRevision ?? null) : unsaved ?? readDraft(key)
+      remember(next)
+      setDraft(next)
     }
     return () => { mounted.current = false }
   }, [key])
@@ -60,15 +72,18 @@ export function useChatDraft(owner: string, peer: string) {
   // a newer edit made after navigation, or in another tab, even if its text matches.
   const clearSubmittedDraft = () => {
     if (!key || draft.key !== key) return
-    let saved = true
-    try {
-      if (localStorage.getItem(key) === draft.serialized) localStorage.removeItem(key)
-    } catch { saved = false }
-    if (unsavedDrafts.get(key)?.serialized === draft.serialized) remember({ key, content: "", saved, serialized: null })
+    const next = clearRevision(key, draft.serialized)
+    const unsaved = unsavedDrafts.get(key)
+    if (!unsaved || unsaved.serialized === draft.serialized) remember(next)
     if (mounted.current) setDraft(current => current.key === key && current.serialized === draft.serialized
-      ? { key, content: "", saved, serialized: null } : current)
+      ? next : current)
   }
 
-  const retryDraftSave = () => setContent(draft.content)
-  return { content: draft.key === key ? draft.content : "", setContent, clearSubmittedDraft, retryDraftSave, draftReady: !!key && draft.key === key, draftSaved: draft.saved }
+  const retryDraftSave = () => {
+    if (!key || draft.key !== key) return
+    if (!draft.pending) { setContent(draft.content); return }
+    const next = draft.pending === "read" ? readDraft(key) : clearRevision(key, draft.clearRevision ?? null)
+    remember(next); setDraft(next)
+  }
+  return { content: draft.key === key ? draft.content : "", setContent, clearSubmittedDraft, retryDraftSave, draftReady: !!key && draft.key === key, draftSaved: draft.saved, draftIssue: draft.pending }
 }

@@ -5,6 +5,20 @@ import { MAX_MESSAGE_LENGTH } from "@/lib/protocol"
 
 interface Draft { key: string; content: string; saved: boolean; serialized: string | null }
 
+// Keep the only copy alive across keyed route remounts in this tab.
+const unsavedDrafts = new Map<string, Draft>()
+const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+  if ([...unsavedDrafts.values()].some(draft => draft.content)) { event.preventDefault(); event.returnValue = "" }
+}
+function remember(draft: Draft) {
+  if (draft.saved) unsavedDrafts.delete(draft.key)
+  else unsavedDrafts.set(draft.key, draft)
+  if (typeof window !== "undefined") {
+    window.removeEventListener("beforeunload", warnBeforeUnload)
+    if (unsavedDrafts.size) window.addEventListener("beforeunload", warnBeforeUnload)
+  }
+}
+
 /** Drafts use the same device-local trust boundary as message history. */
 export function useChatDraft(owner: string, peer: string) {
   const key = owner ? `serotine_draft:${owner}:${peer}` : ""
@@ -14,6 +28,8 @@ export function useChatDraft(owner: string, peer: string) {
   useEffect(() => {
     mounted.current = true
     if (key) {
+      const unsaved = unsavedDrafts.get(key)
+      if (unsaved) { setDraft(unsaved); return () => { mounted.current = false } }
       try {
         const serialized = localStorage.getItem(key)
         const record = serialized ? JSON.parse(serialized) : null
@@ -35,7 +51,9 @@ export function useChatDraft(owner: string, peer: string) {
       else localStorage.removeItem(key)
     } catch { saved = false }
     // A failed disk write must never discard text from the composer.
-    setDraft({ key, content, saved, serialized })
+    const next = { key, content, saved, serialized }
+    remember(next)
+    setDraft(next)
   }
 
   // This closure belongs to one submitted revision. A slow send must not erase
@@ -46,9 +64,11 @@ export function useChatDraft(owner: string, peer: string) {
     try {
       if (localStorage.getItem(key) === draft.serialized) localStorage.removeItem(key)
     } catch { saved = false }
+    if (unsavedDrafts.get(key)?.serialized === draft.serialized) remember({ key, content: "", saved, serialized: null })
     if (mounted.current) setDraft(current => current.key === key && current.serialized === draft.serialized
       ? { key, content: "", saved, serialized: null } : current)
   }
 
-  return { content: draft.key === key ? draft.content : "", setContent, clearSubmittedDraft, draftReady: !!key && draft.key === key, draftSaved: draft.saved }
+  const retryDraftSave = () => setContent(draft.content)
+  return { content: draft.key === key ? draft.content : "", setContent, clearSubmittedDraft, retryDraftSave, draftReady: !!key && draft.key === key, draftSaved: draft.saved }
 }

@@ -20,12 +20,14 @@ interface CloudflareEnv {
   serotine_db: D1DatabaseBinding
 }
 
+export class RelayConfigurationError extends Error {}
+
 export async function getDB(): Promise<D1DatabaseBinding> {
   const { env } = await getCloudflareContext()
   const db = (env as unknown as CloudflareEnv).serotine_db
 
   if (!db) {
-    throw new Error("The serotine_db D1 binding is not configured")
+    throw new RelayConfigurationError("The serotine_db D1 binding is not configured")
   }
 
   return db

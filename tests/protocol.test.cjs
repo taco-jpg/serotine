@@ -13,6 +13,8 @@ const repoRequire = createRequire(path.join(root, 'package.json'))
 const ts = repoRequire('typescript')
 let sqlite
 let dbUnavailable = false
+let dbFailure = null
+class RelayConfigurationError extends Error {}
 const database = {
   prepare(sql) {
     const statement = sqlite.prepare(sql)
@@ -39,7 +41,8 @@ function loadTs(filename) {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true,
   }, fileName: filename }).outputText
   function requireSource(specifier) {
-    if (specifier === '@/lib/db') return { getDB: async () => {
+    if (specifier === '@/lib/db') return { RelayConfigurationError, getDB: async () => {
+      if (dbFailure) throw dbFailure
       if (dbUnavailable) throw new Error('simulated D1 binding unavailable')
       return database
     } }
@@ -102,6 +105,7 @@ beforeEach(() => {
   if (sqlite) sqlite.close()
   sqlite = new DatabaseSync(':memory:')
   dbUnavailable = false
+  dbFailure = null
   for (const filename of fs.readdirSync(path.join(root, 'migrations')).filter(file => file.endsWith('.sql')).sort()) {
     sqlite.exec(fs.readFileSync(path.join(root, 'migrations', filename), 'utf8'))
   }
@@ -289,4 +293,48 @@ test('D1 failures return a recoverable result; fresh-proof retry can succeed', a
   try { assert.equal((await send(data)).success, false) }
   finally { console.error = warn; dbUnavailable = false }
   assert.deepEqual(await send(data), { success: true })
+})
+
+
+test('signed cursor reaches rows after an unacknowledged full page, including equal timestamps', async () => {
+  const createdAt = Date.now() - 1000
+  for (let index = 0; index < 105; index++) seedMessage(alice, bob, { createdAt })
+  seedMessage(mallory, bob, { createdAt })
+  seedMessage(alice, mallory, { createdAt })
+  const first = await inbox()
+  assert.equal(first.messages.length, 100)
+  assert.ok(first.nextCursor)
+  const data = { senderPubKey: alice.publicKey, after: first.nextCursor }
+  const second = await actions.getMyMessages(data, await proof('message:list', data, bob))
+  assert.equal(second.messages.length, 5)
+  assert.equal(second.nextCursor, null)
+  assert.equal(new Set([...first.messages, ...second.messages].map(row => row.id)).size, 105)
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM RelayMessage').get().count, 107, 'pagination never acknowledges or deletes')
+})
+
+test('cursor tampering and malformed cursor fields are rejected', async () => {
+  const data = { senderPubKey: alice.publicKey, after: { createdAt: Date.now(), id: crypto.randomUUID() } }
+  const signed = await proof('message:list', data, bob)
+  assert.equal((await actions.getMyMessages({ ...data, after: { ...data.after, createdAt: 1 } }, signed)).success, false)
+  for (const after of [null, {}, { createdAt: -1, id: crypto.randomUUID() }, { createdAt: 1.5, id: crypto.randomUUID() }, { createdAt: 1, id: 'bad' }]) {
+    const bad = { senderPubKey: alice.publicKey, after }
+    assert.equal((await actions.getMyMessages(bad, await proof('message:list', bad, bob))).success, false)
+  }
+})
+
+test('missing relay tables and bindings report actionable setup errors without exposing SQL', async () => {
+  const old = console.error
+  console.error = () => {}
+  try {
+    dbFailure = new RelayConfigurationError('missing binding')
+    const missingBinding = await inbox()
+    assert.equal(missingBinding.success, false)
+    assert.match(missingBinding.error, /site owner.*connect/)
+    dbFailure = null
+    sqlite.exec('DROP TABLE RequestNonce')
+    const missingTable = await inbox()
+    assert.equal(missingTable.success, false)
+    assert.match(missingTable.error, /database needs an update/)
+    assert.doesNotMatch(missingTable.error, /RequestNonce|SELECT|DELETE/)
+  } finally { console.error = old }
 })

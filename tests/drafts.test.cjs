@@ -129,3 +129,22 @@ test('blocked or malformed draft storage does not disable the composer', () => {
   damaged.view().setContent('Recovered draft')
   assert.equal(harness(damaged.storage).view().content, 'Recovered draft')
 })
+
+
+test('unsaved drafts survive switching contacts and identities in the same tab', () => {
+  const options = { failWrites: true }, h = harness(new Map(), options)
+  h.view().setContent('Do not lose Bob draft')
+  h.switchTo('alice', 'carol')
+  h.view().setContent('Do not lose Carol draft')
+  h.switchTo('other-owner', 'bob')
+  assert.equal(h.view().content, '')
+  h.switchTo('alice', 'bob')
+  assert.equal(h.view().content, 'Do not lose Bob draft')
+  assert.equal(h.view().draftSaved, false)
+  options.failWrites = false
+  h.view().retryDraftSave()
+  assert.equal(h.view().draftSaved, true)
+  assert.equal(harness(h.storage).view().content, 'Do not lose Bob draft')
+  h.switchTo('alice', 'carol')
+  assert.equal(h.view().content, 'Do not lose Carol draft')
+})

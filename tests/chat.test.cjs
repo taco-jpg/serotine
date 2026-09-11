@@ -89,7 +89,7 @@ function harness(options = {}) {
       calls.sends.push(structuredClone(data))
       return options.send ? options.send(data, proof) : { success: true }
     },
-    async deleteMessage(data) { calls.acknowledgments.push(data); return { success: true } },
+    async deleteMessage(data) { calls.acknowledgments.push(data); return options.ack ? options.ack(data) : { success: true } },
     async getSignal() { return { success: true, signal: null } },
     async storeSignal() { return { success: true } },
   }
@@ -156,7 +156,11 @@ test('relay failure preserves a failed message and retry retains its original ID
   const h = harness(options)
   t.after(() => h.unmount())
   await until(() => h.view().ready)
-  await assert.rejects(h.view().sendMessage('Please keep this draft'), /unavailable/)
+  await assert.rejects(h.view().sendMessage('Please keep this draft'), error => {
+    assert.match(error.message, /unavailable/)
+    assert.equal(error.savedLocally, true, 'composer may clear because history owns the retry')
+    return true
+  })
   const failed = h.view().messages[0]
   assert.equal(failed.delivery, 'failed')
   options.send = async () => ({ success: true })
@@ -171,9 +175,13 @@ test('local persistence failure prevents network transmission', async t => {
   const h = harness({ storageFailure: true })
   t.after(() => h.unmount())
   await until(() => h.view().ready)
-  await assert.rejects(h.view().sendMessage('Do not lose this'), /storage full/)
+  await assert.rejects(h.view().sendMessage('Do not lose this'), error => {
+    assert.match(error.message, /storage full/)
+    assert.equal(error.savedLocally, false, 'composer must retain the only copy')
+    return true
+  })
   assert.equal(h.calls.sends.length, 0)
-  assert.equal(h.view().messages[0].delivery, 'failed')
+  assert.equal(h.view().messages.length, 0, 'do not create a second retry path for an unsaved draft')
 })
 
 test('received relay message is saved under the sender before acknowledgment', async t => {
@@ -242,4 +250,19 @@ test('outgoing and incoming messages sharing one ID coexist', async t => {
   await until(() => h.calls.acknowledgments.length === 1)
   assert.equal(h.view().messages.length, 2)
   assert.equal(h.records.size, 2)
+})
+
+test('failed relay acknowledgment is retried without duplicating saved history', async t => {
+  const row = await inbound()
+  const options = { incoming: [row], ack: async () => ({ success: false, error: 'Unavailable' }) }
+  const h = harness(options)
+  t.after(() => h.unmount())
+  await until(() => h.timers.size > 0)
+  assert.match(h.view().error, /acknowledgment/)
+  assert.equal(h.view().messages.length, 1)
+  options.ack = async () => ({ success: true })
+  h.runTimer()
+  await until(() => h.calls.acknowledgments.length === 2)
+  assert.equal(h.view().messages.length, 1)
+  assert.equal(h.calls.saves.length, 1)
 })

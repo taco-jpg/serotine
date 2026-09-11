@@ -8,6 +8,7 @@ import { createRequestProof } from "@/lib/request-auth"
 import { isEnvelope, ID_PATTERN, MAX_MESSAGE_LENGTH, MAX_PACKET_LENGTH, type Envelope } from "@/lib/protocol"
 import { saveMessageToStorage, getMessagesFromStorage, migrateLegacyHistory, type StoredMessage } from "@/lib/storage"
 import { RTC_CONFIG } from "@/config/webrtc"
+import { MessageSendError } from "@/lib/message-send-error"
 
 export type Status = "connecting" | "online" | "relay" | "offline"
 export type ChatMessage = StoredMessage
@@ -162,7 +163,8 @@ export function useP2PChat(targetPubKey: string) {
           try {
             if (await receive(message.encryptedData, message.id)) {
               const ack = { id: message.id, senderPubKey: targetPubKey }
-              await deleteMessage(ack, await proof("message:ack", ack))
+              const acknowledged = await deleteMessage(ack, await proof("message:ack", ack))
+              if (!acknowledged.success && now()) setError("Message saved. Relay acknowledgment will be retried automatically.")
             } else if (now()) setError("An invalid encrypted message was left in the relay. Verify this contact’s address.")
           } catch {
             if (now()) setError("A message could not be decrypted or saved. It remains in the relay for another attempt.")
@@ -231,8 +233,10 @@ export function useP2PChat(targetPubKey: string) {
       if (session.active) setMessages(previous => [...previous.filter(m => m.id !== item.id || m.senderPubKey !== item.senderPubKey), item].sort((a, b) => a.timestamp - b.timestamp))
     }
     let accepted = false
+    let savedLocally = false
     try {
       await saveMessageToStorage(session.identity.publicKey, message)
+      savedLocally = true
       update(message)
       const envelope: Envelope = { version: 2, id, sender: session.identity.publicKey, recipient: targetPubKey, content: text, timestamp: message.timestamp }
       const encryptedData = await encryptForPeer(JSON.stringify(envelope), session.privateKey, targetPubKey)
@@ -257,9 +261,9 @@ export function useP2PChat(targetPubKey: string) {
         return
       }
       message.delivery = "failed"
-      update(message)
-      await saveMessageToStorage(session.identity.publicKey, message).catch(() => {})
-      const failure = cause instanceof Error ? cause : new Error("Message was not sent. Please retry.")
+      await saveMessageToStorage(session.identity.publicKey, message).then(() => { savedLocally = true }).catch(() => {})
+      if (savedLocally) update(message)
+      const failure = new MessageSendError(cause instanceof Error ? cause.message : "Message was not sent. Please retry.", savedLocally)
       if (session.active) setError(failure.message)
       throw failure
     } finally { sending.current.delete(id) }

@@ -148,3 +148,33 @@ test('unsaved drafts survive switching contacts and identities in the same tab',
   h.switchTo('alice', 'carol')
   assert.equal(h.view().content, 'Do not lose Carol draft')
 })
+
+
+test('retrying an unread draft loads the original instead of deleting it', () => {
+  const key = 'serotine_draft:alice:bob'
+  const saved = JSON.stringify({ content: 'Original draft', revision: 'original' })
+  const storage = new Map([[key, saved]])
+  const options = { failReads: true }, h = harness(storage, options)
+  assert.equal(h.view().draftIssue, 'read')
+  options.failReads = false
+  h.view().retryDraftSave()
+  assert.equal(h.view().content, 'Original draft')
+  assert.equal(storage.get(key), saved)
+})
+
+test('failed cleanup keeps sent text cleared across navigation and retries only its revision', () => {
+  const options = {}, h = harness(new Map(), options)
+  h.view().setContent('Already sent')
+  options.failWrites = true
+  h.view().clearSubmittedDraft()
+  h.switchTo('alice', 'carol')
+  h.switchTo('alice', 'bob')
+  assert.equal(h.view().content, '')
+  assert.equal(h.view().draftIssue, 'clear')
+  const newer = JSON.stringify({ content: 'A newer draft from another tab', revision: 'new-revision' })
+  h.storage.set('serotine_draft:alice:bob', newer)
+  options.failWrites = false
+  h.view().retryDraftSave()
+  assert.equal(h.view().content, 'A newer draft from another tab')
+  assert.equal(h.storage.get('serotine_draft:alice:bob'), newer)
+})

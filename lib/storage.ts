@@ -25,8 +25,17 @@ async function initDB(owner: string) {
 }
 export async function saveMessageToStorage(owner: string, message: StoredMessage) {
   const db = await initDB(owner)
-  try { await db.put("messages", message) } finally { db.close() }
-  notifyHistoryChanged(owner, message.peerPubKey)
+  try {
+    const tx = db.transaction("messages", "readwrite")
+    const existing = await tx.store.get([message.peerPubKey, message.senderPubKey, message.id])
+    // A slower retry in another tab must never erase a confirmed relay send.
+    const stored = existing?.delivery === "sent" && message.senderPubKey === owner
+      ? existing : { ...message, ...(existing ? { content: existing.content, timestamp: existing.timestamp } : {}) }
+    await tx.store.put(stored)
+    await tx.done
+    notifyHistoryChanged(owner, message.peerPubKey)
+    return stored
+  } finally { db.close() }
 }
 export async function getMessagesFromStorage(owner: string, peerPubKey: string) {
   const db = await initDB(owner)

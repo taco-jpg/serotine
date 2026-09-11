@@ -99,6 +99,7 @@ function harness(options = {}) {
     async getMessagesFromStorage() { return options.loadHistory ? options.loadHistory() : [...records.values()].map(item => structuredClone(item)) },
     async saveMessageToStorage(owner, item) {
       if (options.storageFailure) throw new Error('Browser storage full')
+      if (options.save) return options.save(owner, item)
       assert.equal(owner, alice.publicKey)
       calls.saves.push(structuredClone(item))
       records.set(`${item.senderPubKey}:${item.id}`, structuredClone(item))
@@ -413,4 +414,16 @@ test('unmount during signal decryption cannot create a leaked peer connection', 
     assert.equal(h.calls.lateUpdates, 0)
     assert.equal(h.timers.size, 0)
   } finally { h?.unmount(); alice = originalAlice; bob = originalBob }
+})
+
+
+test('retry skips the relay when another tab already confirmed the same saved message', async t => {
+  const sent = { id: crypto.randomUUID(), senderPubKey: alice.publicKey, peerPubKey: bob.publicKey, content: 'Confirmed elsewhere', timestamp: Date.now(), delivery: 'sent' }
+  const h = harness({ save: async () => structuredClone(sent) })
+  t.after(() => h.unmount())
+  await until(() => h.view().ready)
+  await h.view().sendMessage(sent.content, { ...sent, delivery: 'failed' })
+  assert.equal(h.calls.sends.length, 0)
+  assert.equal(h.view().messages[0].delivery, 'sent')
+  await assert.rejects(h.view().sendMessage('Altered text', sent), /original message/)
 })

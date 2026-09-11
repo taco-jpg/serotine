@@ -106,3 +106,28 @@ test('corrupt contacts fail explicitly without damaging identity or stored data'
   saved.set(contactKey, JSON.stringify([{ pub: bob.publicKey, alias: 'Bob' }, { pub: bob.publicKey, alias: 'Duplicate' }, { pub: alice.publicKey, alias: 'Self' }, null, { pub: 'garbage' }]))
   assert.deepEqual(identity.loadContacts(alice.publicKey), [{ pub: bob.publicKey, alias: 'Bob' }])
 })
+
+
+test('concurrent creation cannot replace an identity that another call just created', async () => {
+  const attempts = await Promise.allSettled([identity.createIdentity(), identity.createIdentity()])
+  assert.equal(attempts.filter(result => result.status === 'fulfilled').length, 1)
+  const winner = attempts.find(result => result.status === 'fulfilled').value
+  assert.deepEqual(await identity.loadIdentity(), winner)
+})
+
+test('concurrent restores cannot overwrite each other with different identities', async () => {
+  const attempts = await Promise.allSettled([identity.restoreIdentityBackup(JSON.stringify(alice), ''), identity.restoreIdentityBackup(JSON.stringify(bob), '')])
+  assert.equal(attempts.filter(result => result.status === 'fulfilled').length, 1)
+  const winner = attempts.find(result => result.status === 'fulfilled').value
+  assert.deepEqual(await identity.loadIdentity(), winner)
+})
+
+test('blocked storage is a retryable access error and cannot be treated as corrupt identity', async () => {
+  const original = localStorage.getItem
+  localStorage.getItem = () => { throw new Error('Storage access denied') }
+  try {
+    await assert.rejects(identity.loadIdentity(), error => error instanceof identity.IdentityAccessError)
+    await assert.rejects(identity.restoreIdentityBackup(JSON.stringify(alice), ''), error => error instanceof identity.IdentityAccessError)
+    assert.equal(saved.size, 0)
+  } finally { localStorage.getItem = original }
+})

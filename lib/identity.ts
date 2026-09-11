@@ -4,6 +4,27 @@ import { createRequestProof, verifyRequestProof } from "./request-auth"
 
 const IDENTITY_KEY = "serotine_identity_v2"
 export interface Identity { version: 2; publicKey: string; privateKey: JsonWebKey }
+export class IdentityAccessError extends Error {}
+
+let identityWrites: Promise<void> = Promise.resolve()
+function mutateIdentity<T>(action: () => Promise<T>): Promise<T> {
+  const run = async (): Promise<T> => typeof navigator !== "undefined" && navigator.locks
+    ? await navigator.locks.request("serotine:identity", action) : await action()
+  const result = identityWrites.then(run, run)
+  identityWrites = result.then(() => {}, () => {})
+  return result
+}
+function identitySnapshot() {
+  try { return [IDENTITY_KEY, "serotine_identity_public_enc", "serotine_identity_private_enc"].map(key => localStorage.getItem(key)) }
+  catch { throw new IdentityAccessError("Browser storage is blocked. Allow storage for this site, then check again.") }
+}
+function saveIdentity(identity: Identity, expected: (string | null)[]) {
+  if (identitySnapshot().some((value, index) => value !== expected[index])) {
+    throw new IdentityAccessError("The identity changed in another tab. Check again before continuing.")
+  }
+  try { localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity)) }
+  catch { throw new IdentityAccessError("Your identity could not be saved. Check available browser storage and try again.") }
+}
 
 export async function validateIdentity(value: unknown): Promise<Identity> {
   if (!value || typeof value !== "object") throw new Error("This is not a valid identity backup.")
@@ -16,24 +37,24 @@ export async function validateIdentity(value: unknown): Promise<Identity> {
 }
 
 export async function loadIdentity(): Promise<Identity | null> {
-  if (!globalThis.crypto?.subtle) throw new Error("Use an up-to-date browser over HTTPS to open Serotine.")
-  const saved = localStorage.getItem(IDENTITY_KEY)
+  if (!globalThis.crypto?.subtle) throw new IdentityAccessError("Use an up-to-date browser over HTTPS to open Serotine.")
+  const [saved, publicKey, privateKey] = identitySnapshot()
   if (saved) return validateIdentity(JSON.parse(saved))
-  const publicKey = localStorage.getItem("serotine_identity_public_enc")
-  const privateKey = localStorage.getItem("serotine_identity_private_enc")
   if (!publicKey && !privateKey) return null
   if (!publicKey || !privateKey) throw new Error("Your local identity is incomplete. Restore your backup to continue.")
-  const identity = await validateIdentity({ version: 2, publicKey: publicKey.toLowerCase(), privateKey: JSON.parse(privateKey) })
-  localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity))
-  return identity
+  // Reading a legacy identity must not race a create/restore write in another tab.
+  return validateIdentity({ version: 2, publicKey: publicKey.toLowerCase(), privateKey: JSON.parse(privateKey) })
 }
 
 export async function createIdentity(): Promise<Identity> {
-  if (await loadIdentity()) throw new Error("An identity already exists on this browser.")
-  const pair = await generateEncryptionKeyPair()
-  const identity: Identity = { version: 2, publicKey: await exportPublicKeyToHex(pair.publicKey), privateKey: await exportKey(pair.privateKey) }
-  localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity))
-  return identity
+  return mutateIdentity(async () => {
+    const before = identitySnapshot()
+    if (await loadIdentity()) throw new Error("An identity already exists on this browser.")
+    const pair = await generateEncryptionKeyPair()
+    const identity: Identity = { version: 2, publicKey: await exportPublicKeyToHex(pair.publicKey), privateKey: await exportKey(pair.privateKey) }
+    saveIdentity(identity, before)
+    return identity
+  })
 }
 
 export async function validateAddress(address: string): Promise<string> {
@@ -75,11 +96,17 @@ export async function restoreIdentityBackup(text: string, password: string): Pro
     value = { version: 2, publicKey: await exportPublicKeyToHex(publicKey), privateKey: value }
   }
   const identity = await validateIdentity(value)
-  let existing: Identity | null = null
-  try { existing = await loadIdentity() } catch { /* A valid backup may repair corrupt local state. */ }
-  if (existing && existing.publicKey !== identity.publicKey) throw new Error("A different identity is already saved here. Use a separate browser profile to restore this one.")
-  localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity))
-  return identity
+  return mutateIdentity(async () => {
+    const before = identitySnapshot()
+    let existing: Identity | null = null
+    try { existing = await loadIdentity() } catch (cause) {
+      if (cause instanceof IdentityAccessError) throw cause
+      // A valid backup may repair corrupt local state, but never blocked access.
+    }
+    if (existing && existing.publicKey !== identity.publicKey) throw new Error("A different identity is already saved here. Use a separate browser profile to restore this one.")
+    saveIdentity(identity, before)
+    return identity
+  })
 }
 
 export interface Contact { pub: string; alias: string }

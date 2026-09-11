@@ -334,7 +334,7 @@ test('missing relay tables and bindings report actionable setup errors without e
     sqlite.exec('DROP TABLE RequestNonce')
     const missingTable = await inbox()
     assert.equal(missingTable.success, false)
-    assert.match(missingTable.error, /database needs an update/)
+    assert.match(missingTable.error, /database could not finish automatic setup/)
     assert.doesNotMatch(missingTable.error, /RequestNonce|SELECT|DELETE/)
   } finally { console.error = old }
 })

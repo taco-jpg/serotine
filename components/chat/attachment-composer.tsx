@@ -101,7 +101,6 @@ export function AttachmentComposer({ owner = "", disabled = false, captureRef, p
     setError("")
     try {
       if (queueRef.current.length + files.length > MAX_QUEUED_FILES) throw new Error(`You can queue up to ${MAX_QUEUED_FILES} files. Send or remove a file before adding more.`)
-      // Reject an invalid batch together, preserving every existing selection.
       const prepared: PendingFile[] = []
       for (const original of files) {
         const result = await compactAttachment(original, autoCompact)

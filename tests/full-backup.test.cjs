@@ -19,10 +19,22 @@ function database(name) {
   const keyFor = (store, value, key) => key !== undefined ? JSON.stringify(key) : JSON.stringify(store === 'messages' ? [value.peerPubKey, value.senderPubKey, value.id] : value.key)
   const facade = (store, staging) => ({
     async get(key) { return structuredClone((staging?.get(store) ?? rows(store)).get(JSON.stringify(key))) },
+    async getAll() { return structuredClone([...(staging?.get(store) ?? rows(store)).values()]) },
+    index(index) {
+      assert.equal(index, 'by-peer')
+      return { async getAll(peerPubKey) {
+        return structuredClone([...(staging?.get(store) ?? rows(store)).values()].filter(row => row.peerPubKey === peerPubKey))
+      } }
+    },
     async put(value, key) {
       writes++
       if (staging && !staging.has(store)) staging.set(store, new Map(rows(store)))
       ;(staging?.get(store) ?? rows(store)).set(keyFor(store, value, key), structuredClone(value))
+    },
+    async delete(key) {
+      writes++
+      if (staging && !staging.has(store)) staging.set(store, new Map(rows(store)))
+      ;(staging?.get(store) ?? rows(store)).delete(JSON.stringify(key))
     },
   })
   return {
@@ -75,6 +87,13 @@ async function encryptPayload(value) {
   const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', iterations: 600000, salt }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt'])
   const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: new TextEncoder().encode('serotine-full-backup:v1:PBKDF2-SHA256-600000:AES-256-GCM') }, key, new TextEncoder().encode(JSON.stringify(value)))
   return JSON.stringify({ format: 'serotine-full-backup', version: 1, salt: Buffer.from(salt).toString('base64'), iv: Buffer.from(iv).toString('base64'), ciphertext: Buffer.from(ciphertext).toString('base64') })
+}
+async function decryptPayload(text) {
+  const envelope = JSON.parse(text)
+  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey'])
+  const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', iterations: 600000, salt: Buffer.from(envelope.salt, 'base64') }, material, { name: 'AES-GCM', length: 256 }, false, ['decrypt'])
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: Buffer.from(envelope.iv, 'base64'), additionalData: new TextEncoder().encode('serotine-full-backup:v1:PBKDF2-SHA256-600000:AES-256-GCM') }, key, Buffer.from(envelope.ciphertext, 'base64'))
+  return JSON.parse(new TextDecoder().decode(plain))
 }
 const snapshot = () => ({ format: 'serotine-full-snapshot', version: 1, createdAt: Date.now(), identity: alice,
   contacts: [{ pub: bob.publicKey, alias: 'Bob' }], messages: structuredClone(expectedMessages), messaging: structuredClone(expectedMessaging) })
@@ -208,6 +227,106 @@ test('backup merge preserves newer local message rows and existing contact alias
   await backup.restoreBackup(encrypted, password)
   assert.deepEqual(await storage.exportAllMessagesFromStorage(alice.publicKey), [newer])
   assert.deepEqual(identity.loadContacts(alice.publicKey), [{ pub: bob.publicKey, alias: 'Robert' }, { pub: charlie.publicKey, alias: 'Charlie' }])
+})
+
+test('full backup export excludes deleted legacy history and files while retaining later messages', async () => {
+  const deletedAt = expectedMessages[0].timestamp
+  const fresh = { ...expectedMessages[0], id: crypto.randomUUID(), timestamp: deletedAt + 1, content: 'After deletion', attachments: [] }
+  await storage.importMessagesToStorage(alice.publicKey, [...expectedMessages, fresh])
+  await events.saveMessagingPreferences(alice.publicKey, { ...expectedMessaging.preferences,
+    deleted: { [bob.publicKey]: { deletedAt, eventKeys: [] } } })
+  const exported = await decryptPayload(await backup.exportFullBackup(alice, password))
+  assert.deepEqual(exported.messages, [fresh])
+  assert.equal(exported.messaging.preferences.deleted[bob.publicKey].deletedAt, deletedAt)
+  assert.equal(JSON.stringify(exported).includes('legacy.bin'), false)
+})
+
+test('restoring an older backup cannot resurrect locally deleted legacy messages or files', async () => {
+  const deletedAt = expectedMessages[0].timestamp
+  const fresh = { ...expectedMessages[0], id: crypto.randomUUID(), timestamp: deletedAt + 1, content: 'New conversation', attachments: [] }
+  await storage.importMessagesToStorage(alice.publicKey, [...expectedMessages, fresh])
+  await events.saveMessagingPreferences(alice.publicKey, { ...expectedMessaging.preferences,
+    deleted: { [bob.publicKey]: { deletedAt, eventKeys: [] } } })
+  await backup.restoreBackup(encrypted, password)
+  assert.deepEqual(await storage.exportAllMessagesFromStorage(alice.publicKey), [fresh])
+  assert.equal((await events.getMessagingPreferences(alice.publicKey)).deleted[bob.publicKey].deletedAt, deletedAt)
+})
+
+test('restored deletion markers purge existing legacy files but preserve other chats and newer messages', async () => {
+  const deletedAt = expectedMessages[0].timestamp
+  const fresh = { ...expectedMessages[0], id: crypto.randomUUID(), timestamp: deletedAt + 1, content: 'After deletion', attachments: [] }
+  const unrelated = { ...expectedMessages[0], peerPubKey: charlie.publicKey }
+  await storage.importMessagesToStorage(alice.publicKey, [...expectedMessages, fresh, unrelated])
+  const incoming = snapshot()
+  incoming.messaging.preferences.deleted = { [bob.publicKey]: { deletedAt, eventKeys: [] } }
+  await backup.restoreBackup(await encryptPayload(incoming), password)
+  assert.deepEqual(await storage.exportAllMessagesFromStorage(alice.publicKey), [fresh, unrelated])
+})
+
+test('deleting a stored chat removes incoming history and outgoing file chunks while preserving other conversations', async () => {
+  await events.importMessagingSnapshot(alice.publicKey, structuredClone(expectedMessaging))
+  const otherEvent = await messaging.signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: alice.publicKey,
+    conversationId: charlie.publicKey, recipients: [charlie.publicKey], timestamp: Date.now(), kind: 'message', payload: { content: 'Keep this chat' } }, alice)
+  const unrelated = { key: events.eventStorageKey(otherEvent), event: otherEvent, local: true, delivered: [], receivedAt: Date.now() }
+  await events.saveStoredEvent(alice.publicKey, unrelated)
+  await events.saveMessagingPreferences(alice.publicKey, { ...expectedMessaging.preferences, archived: [bob.publicKey, charlie.publicKey] })
+  await events.deleteStoredConversation(alice.publicKey, bob.publicKey)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), [unrelated])
+  const exported = await events.exportMessagingSnapshot(alice.publicKey)
+  assert.deepEqual(exported.events, [unrelated])
+  assert.deepEqual(exported.preferences.archived, [charlie.publicKey])
+  assert.deepEqual(new Set(exported.preferences.deleted[bob.publicKey].eventKeys), new Set(expectedMessaging.events.map(record => record.key)))
+  await events.validateMessagingSnapshot(exported, alice.publicKey)
+  for (const record of expectedMessaging.events) assert.equal(await events.saveStoredEvent(alice.publicKey, record), false)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), [unrelated])
+})
+
+test('old v3 backups and stale preference saves cannot resurrect deleted events or erase their tombstone', async () => {
+  await events.importMessagingSnapshot(alice.publicKey, structuredClone(expectedMessaging))
+  await events.deleteStoredConversation(alice.publicKey, bob.publicKey)
+  const deletion = (await events.getMessagingPreferences(alice.publicKey)).deleted[bob.publicKey]
+  await events.saveMessagingPreferences(alice.publicKey, structuredClone(expectedMessaging.preferences))
+  await events.importMessagingSnapshot(alice.publicKey, structuredClone(expectedMessaging))
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), [])
+  assert.deepEqual((await events.getMessagingPreferences(alice.publicKey)).deleted[bob.publicKey], deletion)
+
+  const freshEvent = await messaging.signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: bob.publicKey,
+    conversationId: alice.publicKey, recipients: [alice.publicKey], timestamp: deletion.deletedAt + 1, kind: 'message', payload: { content: 'Start again' } }, bob)
+  const fresh = { key: events.eventStorageKey(freshEvent), event: freshEvent, local: false, delivered: [alice.publicKey], receivedAt: deletion.deletedAt + 1 }
+  assert.equal(await events.saveStoredEvent(alice.publicKey, fresh), true)
+  await backup.restoreBackup(encrypted, password)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), [fresh])
+  assert.deepEqual(await storage.exportAllMessagesFromStorage(alice.publicKey), [])
+  assert.deepEqual((await events.exportMessagingSnapshot(alice.publicKey)).preferences.deleted[bob.publicKey], deletion)
+})
+
+test('older preferences without archive or deletion fields load and validate with empty defaults', async () => {
+  const older = structuredClone(expectedMessaging)
+  delete older.preferences.archived; delete older.preferences.deleted
+  const validated = await events.validateMessagingSnapshot(older, alice.publicKey)
+  assert.deepEqual(validated.preferences.archived, [])
+  assert.deepEqual(validated.preferences.deleted, {})
+  const oldPreferences = structuredClone(older.preferences)
+  delete oldPreferences.archived; delete oldPreferences.deleted
+  await database(`serotine-events:${alice.publicKey}`).put('metadata', oldPreferences, 'preferences')
+  const loaded = await events.getMessagingPreferences(alice.publicKey)
+  assert.deepEqual(loaded.archived, [])
+  assert.deepEqual(loaded.deleted, {})
+})
+
+test('archive and deletion backup fields reject malformed data before writes', async () => {
+  for (const archived of [null, bob.publicKey, ['invalid-conversation']]) {
+    const invalid = structuredClone(expectedMessaging); invalid.preferences.archived = archived
+    await assert.rejects(events.validateMessagingSnapshot(invalid, alice.publicKey), /archived chats are invalid/)
+  }
+  for (const deleted of [null, [], { invalid: { deletedAt: 1, eventKeys: [] } },
+    { [bob.publicKey]: { deletedAt: -1, eventKeys: [] } },
+    { [bob.publicKey]: { deletedAt: 1, eventKeys: 'not-an-array' } },
+    { [charlie.publicKey]: { deletedAt: 1, eventKeys: [expectedMessaging.events[0].key] } }]) {
+    const invalid = structuredClone(expectedMessaging); invalid.preferences.deleted = deleted
+    await assert.rejects(events.validateMessagingSnapshot(invalid, alice.publicKey), /deleted chats are invalid/)
+  }
+  assert.equal(writes, 0)
 })
 
 test('existing encrypted identity backups and raw legacy private keys still restore', async () => {

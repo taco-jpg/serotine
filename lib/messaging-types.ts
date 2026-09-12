@@ -14,10 +14,14 @@ export interface MessageRecord {
 export interface ConversationRecord {
   id: string; kind: "direct" | "group" | "self"; name: string; members: string[]
   unreadCount: number; lastMessage?: MessageRecord; updatedAt: number; notificationMode: NotificationMode
-  blocked: boolean; request: boolean; group?: GroupState; sendError?: string
+  blocked: boolean; request: boolean; archived: boolean; group?: GroupState; sendError?: string
+}
+export interface ConversationDeletion {
+  deletedAt: number; eventKeys: string[]; attachmentIds?: string[]; group?: GroupState; leftMembers?: string[]
 }
 export interface MessagingPreferences {
   accepted: string[]; blocked: string[]; notifications: Record<string, NotificationMode>; readAt: Record<string, number>; readReceipts: boolean
+  archived: string[]; deleted: Record<string, ConversationDeletion>
 }
 export type EventKind = "message" | "edit" | "pin" | "poll" | "vote" | "receipt" | "group" | "leave" | "attachment" | "attachment-chunk"
 export interface EventPayload {
@@ -45,6 +49,8 @@ export interface MessagingContextValue extends MessagingModel {
   createGroup: (name: string, members: string[]) => Promise<string>
   updateGroup: (conversationId: string, changes: { name?: string; members?: string[] }) => Promise<void>
   leaveGroup: (conversationId: string) => Promise<void>
+  archiveConversation: (conversationId: string, archived?: boolean) => Promise<void>
+  deleteConversation: (conversationId: string) => Promise<void>
   acceptRequest: (conversationId: string) => Promise<void>
   blockContact: (publicKey: string, blocked?: boolean) => Promise<void>
   markRead: (conversationId: string) => Promise<void>

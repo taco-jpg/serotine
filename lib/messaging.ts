@@ -3,8 +3,9 @@ import { loadContacts, shortAddress, validateAddress, type Contact, type Identit
 import { ID_PATTERN, isEnvelope, MAX_MESSAGE_LENGTH, PUBLIC_KEY_PATTERN } from "./protocol"
 import { createRequestProof } from "./request-auth"
 import { deleteMessage, getEventFeed, getLegacyInbox, storeEncryptedEvent } from "./relay-client"
-import { exportAllMessagesFromStorage, migrateLegacyHistory } from "./storage"
-import { defaultMessagingPreferences, eventStorageKey, getMessagingPreferences, getStoredEvents, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor } from "./messaging-store"
+import { deleteConversationHistoryFromStorage, exportAllMessagesFromStorage, migrateLegacyHistory } from "./storage"
+import { defaultMessagingPreferences, deleteStoredConversation, eventStorageKey, getMessagingPreferences, getStoredEvents, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor } from "./messaging-store"
+import { isDeletedConversationEvent } from "./messaging-history"
 import { ATTACHMENT_CHUNK_BYTES, MAX_ATTACHMENT_CHUNKS, isAttachmentMeta } from "./attachments"
 import { legacyMessageEvents } from "./legacy-messaging"
 import { notifyIncoming, requestMessagingNotifications } from "./message-notifications"
@@ -27,7 +28,7 @@ async function signText(text: string, identity: Identity) {
 export async function signGroup(group: Omit<GroupState, "signature">, identity: Identity): Promise<GroupState> { return { ...group, signature: await signText(groupText(group), identity) } }
 export async function signMessagingEvent(event: Omit<MessagingEvent, "signature">, identity: Identity): Promise<MessagingEvent> { return { ...event, signature: await signText(eventText(event), identity) } }
 const verifiedGroups = new Map<string, string>()
-async function validateGroup(group: GroupState) {
+export async function validateGroup(group: GroupState) {
   if (!group || !validGroupId(group.id) || !validText(group.name, 80) || !PUBLIC_KEY_PATTERN.test(group.admin) || !Array.isArray(group.members) || group.members.length < 1 || group.members.length > MAX_MEMBERS || !group.members.every(x => typeof x === "string" && PUBLIC_KEY_PATTERN.test(x)) || new Set(group.members).size !== group.members.length || !group.members.includes(group.admin) || !Number.isSafeInteger(group.epoch) || group.epoch < 1 || !validTime(group.updatedAt) || typeof group.signature !== "string" || !/^[0-9a-f]{128}$/.test(group.signature)) return false
   const text = groupText(group)
   if (verifiedGroups.get(group.signature) === text) return true
@@ -91,9 +92,13 @@ function canSendTo(record: StoredEvent, peer: string) {
   return !record.delivered.includes(peer) && (!record.error || (!!record.failedRecipients && !record.failedRecipients.includes(peer)))
 }
 /** Only validated immutable events may enter this reducer. Authority is checked again for controls. */
-export function buildMessagingModel(records: StoredEvent[], owner: string, contacts: Contact[], preferences: MessagingPreferences, authorizedOutput?: Set<string>): MessagingModel {
+export function buildMessagingModel(records: StoredEvent[], owner: string, contacts: Contact[], preferences: MessagingPreferences, authorizedOutput?: Set<string>, includeDeletedConversations = false): MessagingModel {
   const groups = new Map<string, GroupState>()
   const left = new Map<string, Set<string>>()
+  for (const [cid, deletion] of Object.entries(preferences.deleted ?? {})) if (deletion.group) {
+    groups.set(cid, deletion.group)
+    left.set(cid, new Set(deletion.leftMembers ?? []))
+  }
   const messages = new Map<string, MessageRecord>()
   const authorized = authorizedOutput ?? new Set<string>()
   authorized.clear()
@@ -101,6 +106,7 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
   const ordered = [...records].sort((a, b) => a.receivedAt - b.receivedAt || (a.sequence && b.sequence ? a.sequence - b.sequence : 0) || a.event.timestamp - b.event.timestamp || a.key.localeCompare(b.key))
   for (const record of ordered) {
     const e = record.event, cid = conversationForEvent(e, owner)
+    if (isDeletedConversationEvent(record, owner, preferences)) continue
     if (e.author !== owner && preferences.blocked.includes(e.author)) continue
     if (e.group) {
       const prior = groups.get(cid)
@@ -108,7 +114,7 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
       if (prior && e.group.epoch < prior.epoch) continue
       if (!prior || e.group.epoch > prior.epoch) { groups.set(cid, e.group); left.set(cid, new Set()) }
       else if (JSON.stringify(prior) !== JSON.stringify(e.group)) continue
-      if (e.kind !== "group" && (!e.group.members.includes(owner) || left.get(cid)?.has(e.author))) continue
+      if (e.kind !== "group" && (!e.group.members.includes(owner) || left.get(cid)?.has(e.author) || left.get(cid)?.has(owner))) continue
       if (e.kind === "leave") { authorized.add(record.key); if (e.author === e.group.admin) e.group.members.forEach(member => left.get(cid)?.add(member)); else left.get(cid)?.add(e.author); continue }
     }
     authorized.add(record.key)
@@ -150,15 +156,15 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
     sendErrors.set(conversationForEvent(record.event, owner), record.error!)
   }
   const ids = new Set([owner, ...contacts.map(c => c.pub), ...groups.keys(), ...list.map(m => m.conversationId), ...preferences.accepted, ...sendErrors.keys()])
-  const conversations: ConversationRecord[] = [...ids].map((id): ConversationRecord => {
+  const conversations: ConversationRecord[] = [...ids].filter(id => includeDeletedConversations || !preferences.deleted?.[id] || list.some(message => message.conversationId === id)).map((id): ConversationRecord => {
     const group = groups.get(id)
     const rows = list.filter(m => m.conversationId === id)
     const lastMessage = rows.at(-1)
     const known = id === owner || contacts.some(c => c.pub === id) || preferences.accepted.includes(id) || rows.some(m => m.senderPubKey === owner) || group?.admin === owner
     const blocked = preferences.blocked.includes(id) || !!(group && preferences.blocked.includes(group.admin))
-    return { id, kind: group ? "group" : id === owner ? "self" : "direct", name: group?.name ?? (id === owner ? "You" : contacts.find(c => c.pub === id)?.alias || shortAddress(id)), members: group ? group.members.filter(x => !left.get(id)?.has(x)) : id === owner ? [owner] : [owner, id], unreadCount: blocked ? 0 : rows.filter(m => m.senderPubKey !== owner && m.timestamp > (preferences.readAt[id] ?? 0)).length, lastMessage, updatedAt: lastMessage?.timestamp ?? group?.updatedAt ?? 0, notificationMode: preferences.notifications[id] ?? "all", blocked, request: !known && !blocked, group, sendError: sendErrors.get(id) }
+    return { id, kind: group ? "group" : id === owner ? "self" : "direct", name: group?.name ?? (id === owner ? "You" : contacts.find(c => c.pub === id)?.alias || shortAddress(id)), members: group ? group.members.filter(x => !left.get(id)?.has(x)) : id === owner ? [owner] : [owner, id], unreadCount: blocked ? 0 : rows.filter(m => m.senderPubKey !== owner && m.timestamp > (preferences.readAt[id] ?? 0)).length, lastMessage, updatedAt: lastMessage?.timestamp ?? group?.updatedAt ?? 0, notificationMode: preferences.notifications[id] ?? "all", blocked, request: !known && !blocked, archived: preferences.archived?.includes(id) ?? false, group, sendError: sendErrors.get(id) }
   }).sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name))
-  return { messages: list, groups: [...groups.values()], conversations, requests: conversations.filter(c => c.request) }
+  return { messages: list, groups: [...groups.values()], conversations, requests: conversations.filter(c => c.request && !c.archived) }
 }
 
 export class MessagingEngine {
@@ -275,20 +281,23 @@ export class MessagingEngine {
     this.assertActive()
     if (!this.key) throw new Error("Your identity is still loading.")
     const owner = this.identity.publicKey
+    const startedAt = Date.now()
+    const preferences = await getMessagingPreferences(owner)
     let group: GroupState | undefined
     let recipients: string[]
     if (validGroupId(cid)) { group = this.groupFor(cid); recipients = group.members.filter(x => x !== owner); if (!recipients.length) recipients = [owner] }
     else { cid = await validateAddress(cid); if (this.preferences.blocked.includes(cid)) throw new Error("Unblock this contact before sending a message."); recipients = [cid] }
     this.assertActive()
     if (kind === "group") throw new Error("Use group management to update a group.")
-    const event = await signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: owner, conversationId: cid, recipients, timestamp: Date.now(), kind, payload, ...(group ? { group } : {}) }, this.identity)
+    const event = await signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: owner, conversationId: cid, recipients, timestamp: Math.max(startedAt, (preferences.deleted?.[cid]?.deletedAt ?? 0) + 1), kind, payload, ...(group ? { group } : {}) }, this.identity)
     if (!await validateMessagingEvent(event)) throw new Error("This message is invalid or too large.")
     await this.queue(event)
     return event.id
   }
   private async queue(event: MessagingEvent) {
     this.assertActive()
-    await saveStoredEvent(this.identity.publicKey, { key: eventStorageKey(event), event, local: true, delivered: [], receivedAt: Date.now() })
+    const saved = await saveStoredEvent(this.identity.publicKey, { key: eventStorageKey(event), event, local: true, delivered: [], receivedAt: Date.now() })
+    if (saved === false) throw new Error("This chat was deleted while the message was being prepared. Send a new message to reopen it.")
     this.assertActive()
     // Chunks are durable individually, but refreshing the full history after each
     // piece would repeatedly clone an entire large file. Its metadata refreshes
@@ -341,6 +350,18 @@ export class MessagingEngine {
     this.groupFor(cid)
     await this.sendEvent(cid, "leave", {})
     try { await this.setNotificationMode(cid, "muted") } catch (error) { this.fail(error) }
+  }
+  archiveConversation = async (cid: string, archived = true) => {
+    this.assertActive()
+    if (!validGroupId(cid) && !PUBLIC_KEY_PATTERN.test(cid)) throw new Error("Choose a valid conversation.")
+    await this.updatePreferences(p => ({ ...p, archived: archived ? [...new Set([...(p.archived ?? []), cid])] : (p.archived ?? []).filter(id => id !== cid) }))
+  }
+  deleteConversation = async (cid: string) => {
+    this.assertActive()
+    const owner = this.identity.publicKey
+    await deleteStoredConversation(owner, cid)
+    this.assertActive()
+    try { await deleteConversationHistoryFromStorage(owner, cid) } finally { await this.refresh() }
   }
   private async updatePreferences(change: (value: MessagingPreferences) => MessagingPreferences) {
     this.assertActive()
@@ -424,6 +445,7 @@ export class MessagingEngine {
             const data = { id: record.event.id, recipientPubKey, encryptedData }
             const proof = await createRequestProof("event:send", data, this.identity.privateKey, owner)
             this.assertActive()
+            if (isDeletedConversationEvent(record, owner, await getMessagingPreferences(owner))) return
             const result = await storeEncryptedEvent(data, proof)
             this.assertActive()
             if (!result.success && result.retryAfterMs) {
@@ -484,7 +506,7 @@ export class MessagingEngine {
       for (const id of notifications) {
         const message = this.model.messages.find(m => m.id === id)
         const conversation = message && this.model.conversations.find(c => c.id === message.conversationId)
-        if (message && conversation) void notifyIncoming(message, conversation, owner)
+        if (message && conversation && !conversation.archived) void notifyIncoming(message, conversation, owner)
       }
       await this.reconcileDepartures()
       await this.sendDeliveryReceipts()
@@ -495,7 +517,8 @@ export class MessagingEngine {
     }
   }
   private async reconcileDepartures() {
-    for (const conversation of this.model.conversations) {
+    const internal = buildMessagingModel(this.records, this.identity.publicKey, this.contacts, this.preferences, undefined, true)
+    for (const conversation of internal.conversations) {
       this.assertActive()
       const group = conversation.group
       if (!group || group.admin !== this.identity.publicKey || !conversation.members.includes(this.identity.publicKey) || sameSet(group.members, conversation.members)) continue

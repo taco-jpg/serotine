@@ -3,16 +3,17 @@
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
 import { useEffect, useMemo, useState } from "react"
-import { Shield, Plus, Copy, Check, Loader2, Search, Pencil, Users, Link2, MoreHorizontal, UserRound, Settings2, Bell, BellOff, Ban, Trash2, Inbox, RefreshCw } from "lucide-react"
+import { Shield, Plus, Copy, Check, Loader2, Search, Pencil, Users, Link2, Archive, UserRound, Settings2, Bell, BellOff, Ban, Trash2, Inbox, RefreshCw } from "lucide-react"
 import { IdentityIcon } from "@/components/ui/identity-icon"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
-import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
 import { MessagingProvider, useMessaging } from "@/components/messaging-provider"
 import { AccountTools } from "@/components/account-tools"
 import { ConversationRow, messagePreview } from "@/components/conversation-sidebar"
+import { ConversationActions } from "@/components/conversation-actions"
 import { loadContacts, saveContacts, validateAddress, shortAddress, type Contact } from "@/lib/identity"
 import type { ConversationRecord } from "@/lib/messaging-types"
 import { requestMessagingNotifications } from "@/lib/message-notifications"
@@ -38,6 +39,7 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
   const [addOpen, setAddOpen] = useState(false)
   const [addError, setAddError] = useState("")
   const [filter, setFilter] = useState("")
+  const [conversationView, setConversationView] = useState<"inbox" | "archived">("inbox")
   const [editing, setEditing] = useState<Contact | null>(null)
   const [editAlias, setEditAlias] = useState("")
   const [editError, setEditError] = useState("")
@@ -100,8 +102,11 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener("keydown", onKey)
   }, [])
 
-  const activeConversations = useMemo(() => conversations.filter(item => !item.blocked && !item.request && item.kind !== "self").sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name)), [conversations])
-  const filteredConversations = activeConversations.filter(item => `${item.name} ${item.id}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()))
+  const listedConversations = useMemo(() => conversations.filter(item => item.kind !== "self" && (item.archived || (!item.blocked && !item.request))).sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name)), [conversations])
+  const activeConversations = listedConversations.filter(item => !item.archived)
+  const archivedConversations = listedConversations.filter(item => item.archived)
+  const visibleConversations = conversationView === "archived" ? archivedConversations : activeConversations
+  const filteredConversations = visibleConversations.filter(item => `${item.name} ${item.id}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()))
   const selfConversation = conversations.find(item => item.kind === "self")
   const totalUnread = activeConversations.reduce((count, item) => count + item.unreadCount, 0)
   const searchResults = useMemo(() => {
@@ -141,7 +146,7 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
         if (!current.some(contact => contact.pub === pub)) saveContacts(identity.publicKey, [...current, { pub, alias: newAlias.trim().slice(0, 60) }])
         await messaging.acceptRequest(pub)
       }
-      setNewPub(""); setNewAlias(""); setAddOpen(false); setFilter(""); router.push(conversationHref(pub))
+      setNewPub(""); setNewAlias(""); setAddOpen(false); setFilter(""); setConversationView("inbox"); router.push(conversationHref(pub))
     } catch (cause) { setAddError(errorMessage(cause)) }
     finally { setAdding(false) }
   }
@@ -151,7 +156,7 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
     setCreating(true); setGroupError("")
     try {
       const id = await messaging.createGroup(groupName.trim(), groupMembers)
-      setGroupOpen(false); setGroupName(""); setGroupMembers([]); setFilter(""); router.push(conversationHref(id))
+      setGroupOpen(false); setGroupName(""); setGroupMembers([]); setFilter(""); setConversationView("inbox"); router.push(conversationHref(id))
     } catch (cause) { setGroupError(errorMessage(cause)) }
     finally { setCreating(false) }
   }
@@ -185,18 +190,24 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         <div className="px-3 pt-3">{selfConversation ? <ConversationRow conversation={selfConversation} selected={selectedConversation === identity.publicKey} owner={identity.publicKey} /> : <Link href={conversationHref(identity.publicKey)} className="flex items-center gap-3 rounded-xl p-3 text-sm font-medium text-indigo-200 hover:bg-zinc-900"><UserRound className="size-5" /> Message yourself</Link>}</div>
-        <div className="flex items-center justify-between px-5 pb-2 pt-5"><h2 className="text-sm font-medium text-zinc-300">Inbox {totalUnread > 0 && <span className="ml-1 text-xs text-indigo-300">{totalUnread} unread</span>}</h2><div className="flex gap-1"><Button size="icon" variant="ghost" aria-label="Create group chat" onClick={() => { setGroupError(""); setGroupOpen(true) }}><Users className="size-4" /></Button><Button size="icon" variant="ghost" aria-label="Add contact" onClick={() => { setAddError(""); setAddOpen(true) }}><Plus className="size-4" /></Button></div></div>
-        {requests.length > 0 && <button type="button" onClick={() => { setRequestError(""); setRequestsOpen(true) }} className="mx-4 mb-3 flex w-[calc(100%-2rem)] items-center gap-3 rounded-xl border border-indigo-400/20 bg-indigo-400/5 px-3 py-3 text-left text-sm text-indigo-200"><Inbox className="size-4" /><span className="flex-1">Message requests</span><span className="rounded-full bg-indigo-400/15 px-2 py-0.5 text-xs">{requests.length}</span></button>}
-        {(activeConversations.length > 3 || filter) && <div className="relative mx-4 mb-3"><Search className="pointer-events-none absolute left-3 top-3 size-4 text-zinc-500" /><Input aria-label="Filter conversations" placeholder="Filter conversations" value={filter} onChange={event => setFilter(event.target.value)} className="pl-9" /></div>}
+        <div className="flex items-center justify-between px-5 pb-2 pt-5"><h2 className="text-sm font-medium text-zinc-300">Chats {totalUnread > 0 && <span className="ml-1 text-xs text-indigo-300">{totalUnread} unread</span>}</h2><div className="flex gap-1"><Button size="icon" variant="ghost" aria-label="Create group chat" onClick={() => { setGroupError(""); setGroupOpen(true) }}><Users className="size-4" /></Button><Button size="icon" variant="ghost" aria-label="Add contact" onClick={() => { setAddError(""); setAddOpen(true) }}><Plus className="size-4" /></Button></div></div>
+        <div className="mx-4 mb-3 flex gap-1 rounded-lg bg-zinc-900 p-1" role="group" aria-label="Conversation view">
+          <button type="button" aria-pressed={conversationView === "inbox"} onClick={() => { setConversationView("inbox"); setFilter(""); setNotice("") }} className={`flex min-h-10 flex-1 items-center justify-center gap-2 rounded-md px-2 text-xs font-medium ${conversationView === "inbox" ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-200"}`}><Inbox className="size-3.5" />Inbox<span className="text-zinc-400">{activeConversations.length}</span></button>
+          <button type="button" aria-pressed={conversationView === "archived"} onClick={() => { setConversationView("archived"); setFilter(""); setNotice("") }} className={`flex min-h-10 flex-1 items-center justify-center gap-2 rounded-md px-2 text-xs font-medium ${conversationView === "archived" ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-200"}`}><Archive className="size-3.5" />Archived<span className="text-zinc-400">{archivedConversations.length}</span></button>
+        </div>
+        {conversationView === "archived" && <p className="mx-5 mb-3 text-xs leading-relaxed text-zinc-500">Hidden from your inbox. Messages stay saved until you delete the chat.</p>}
+        {conversationView === "inbox" && requests.length > 0 && <button type="button" onClick={() => { setRequestError(""); setRequestsOpen(true) }} className="mx-4 mb-3 flex w-[calc(100%-2rem)] items-center gap-3 rounded-xl border border-indigo-400/20 bg-indigo-400/5 px-3 py-3 text-left text-sm text-indigo-200"><Inbox className="size-4" /><span className="flex-1">Message requests</span><span className="rounded-full bg-indigo-400/15 px-2 py-0.5 text-xs">{requests.length}</span></button>}
+        {(visibleConversations.length > 3 || filter) && <div className="relative mx-4 mb-3"><Search className="pointer-events-none absolute left-3 top-3 size-4 text-zinc-500" /><Input aria-label="Filter conversations" placeholder="Filter conversations" value={filter} onChange={event => setFilter(event.target.value)} className="pl-9" /></div>}
         {(error || messaging.error) && <p role="alert" className="mx-5 mb-4 break-words text-sm leading-relaxed text-red-300">{error || messaging.error}</p>}
         {notice && <p role="status" className="mx-5 mb-4 text-sm text-indigo-200">{notice}</p>}
-        <nav className="space-y-1 px-3 pb-4" aria-label="Conversations">
+        <nav className="space-y-1 px-3 pb-4" aria-label={conversationView === "archived" ? "Archived conversations" : "Conversations"}>
           {!ready && <p role="status" className="px-4 py-6 text-sm text-zinc-500">Loading conversations…</p>}
-          {ready && activeConversations.length === 0 && <div className="px-4 py-6 text-center"><Inbox className="mx-auto mb-3 size-7 text-zinc-600" /><p className="text-sm text-zinc-400">Your inbox is ready.</p><p className="mt-2 text-sm leading-relaxed text-zinc-500">Add a friend or create a group to start talking.</p><div className="mt-4 flex flex-wrap justify-center gap-2"><Button size="sm" onClick={() => setAddOpen(true)}><Plus className="size-3.5" /> Add contact</Button><Button size="sm" variant="outline" onClick={() => setGroupOpen(true)}><Users className="size-3.5" /> New group</Button></div></div>}
-          {activeConversations.length > 0 && filteredConversations.length === 0 && <p role="status" className="px-4 py-6 text-center text-sm text-zinc-400">No conversations match your filter.</p>}
+          {ready && conversationView === "inbox" && activeConversations.length === 0 && <div className="px-4 py-6 text-center"><Inbox className="mx-auto mb-3 size-7 text-zinc-600" /><p className="text-sm text-zinc-400">No chats in your inbox.</p><p className="mt-2 text-sm leading-relaxed text-zinc-500">{archivedConversations.length ? "Open Archived to restore a chat, or start a new one." : "Add a friend or create a group to start talking."}</p><div className="mt-4 flex flex-wrap justify-center gap-2"><Button size="sm" onClick={() => setAddOpen(true)}><Plus className="size-3.5" /> Add contact</Button><Button size="sm" variant="outline" onClick={() => setGroupOpen(true)}><Users className="size-3.5" /> New group</Button></div></div>}
+          {ready && conversationView === "archived" && archivedConversations.length === 0 && <div className="px-4 py-6 text-center"><Archive className="mx-auto mb-3 size-7 text-zinc-600" /><p className="text-sm text-zinc-400">No archived chats.</p><p className="mt-2 text-sm leading-relaxed text-zinc-500">Open a chat’s options and choose Archive chat to hide it here.</p></div>}
+          {visibleConversations.length > 0 && filteredConversations.length === 0 && <p role="status" className="px-4 py-6 text-center text-sm text-zinc-400">No conversations match your filter.</p>}
           {filteredConversations.map(conversation => {
             const contact = contacts.find(item => item.pub === conversation.id)
-            return <ConversationRow key={conversation.id} conversation={conversation} selected={selectedConversation === conversation.id} owner={identity.publicKey} actions={conversation.kind === "direct" ? <DropdownMenu><DropdownMenuTrigger asChild><Button className="mr-1 size-7 shrink-0 text-zinc-500" variant="ghost" size="icon" aria-label={`Options for ${conversation.name}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{contact ? <DropdownMenuItem onSelect={() => { setEditing(contact); setEditAlias(contact.alias); setEditError("") }}><Pencil /> Rename contact</DropdownMenuItem> : <DropdownMenuItem onSelect={() => { setNewPub(conversation.id); setNewAlias(""); setAddError(""); setAddOpen(true) }}><Plus /> Add to contacts</DropdownMenuItem>}<DropdownMenuItem onSelect={() => void copy(conversation.id)}><Copy /> Copy address</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => { void messaging.blockContact(conversation.id).catch(cause => setError(errorMessage(cause))) }}><Ban /> Block messages</DropdownMenuItem>{contact && <DropdownMenuItem variant="destructive" onSelect={() => setRemove(contact)}><Trash2 /> Remove contact</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu> : undefined} />
+            return <ConversationRow key={conversation.id} conversation={conversation} selected={selectedConversation === conversation.id} owner={identity.publicKey} actions={<ConversationActions conversation={conversation} onError={setError} onNotice={setNotice}>{conversation.kind === "direct" && <>{contact ? <DropdownMenuItem onSelect={() => { setEditing(contact); setEditAlias(contact.alias); setEditError("") }}><Pencil /> Rename contact</DropdownMenuItem> : <DropdownMenuItem onSelect={() => { setNewPub(conversation.id); setNewAlias(""); setAddError(""); setAddOpen(true) }}><Plus /> Add to contacts</DropdownMenuItem>}<DropdownMenuItem onSelect={() => void copy(conversation.id)}><Copy /> Copy address</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => { void messaging.blockContact(conversation.id).catch(cause => setError(errorMessage(cause))) }}><Ban /> Block messages</DropdownMenuItem>{contact && <DropdownMenuItem variant="destructive" onSelect={() => setRemove(contact)}><Trash2 /> Remove contact</DropdownMenuItem>}</>}</ConversationActions>} />
           })}
         </nav>
       </div>

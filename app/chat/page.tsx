@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 
 export default function ChatIndexPage() {
   const { identity, conversations } = useMessaging()
-  const unread = conversations.filter(conversation => !conversation.blocked && !conversation.request).reduce((sum, conversation) => sum + conversation.unreadCount, 0)
+  const unread = conversations.filter(conversation => !conversation.blocked && !conversation.request && !conversation.archived).reduce((sum, conversation) => sum + conversation.unreadCount, 0)
   return <div className="flex h-full flex-col items-center justify-center p-10 text-center">
     <div className="mb-7 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5"><MessageSquare className="size-10 text-indigo-300" /></div>
     <p className="mb-3 text-xs font-medium uppercase tracking-[0.2em] text-zinc-500">Your private space</p>

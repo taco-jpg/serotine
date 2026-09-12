@@ -1,12 +1,14 @@
 import {
   deleteMessage, getMyMessages, getSignal, storeEncryptedMessage, storeSignal,
+  getEventFeed, getLegacyInbox, storeEncryptedEvent,
 } from "@/app/actions"
-import { ID_PATTERN, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "@/lib/protocol"
+import { ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "@/lib/protocol"
 
 export const dynamic = "force-dynamic"
 
 // Includes the encrypted packet (up to 64,000 characters), proof, and JSON framing.
 const MAX_BODY_BYTES = 80 * 1024
+const MAX_EVENT_BODY_BYTES = 144 * 1024
 const INVALID_REQUEST = "Invalid messaging request. Reload Serotine and try again."
 
 type JsonObject = Record<string, unknown>
@@ -23,8 +25,8 @@ function peer(value: unknown): value is string {
 function id(value: unknown): value is string {
   return typeof value === "string" && ID_PATTERN.test(value)
 }
-function packet(value: unknown): value is string {
-  return typeof value === "string" && value.length >= 32 && value.length <= MAX_PACKET_LENGTH
+function packet(value: unknown, maximum = MAX_PACKET_LENGTH): value is string {
+  return typeof value === "string" && value.length >= 32 && value.length <= maximum
 }
 function proofShape(value: unknown): value is RequestProof {
   return object(value) && keys(value, ["publicKey", "timestamp", "nonce", "signature"])
@@ -35,6 +37,11 @@ function cursor(value: unknown): value is { createdAt: number; id: string } {
   return object(value) && keys(value, ["createdAt", "id"])
     && typeof value.createdAt === "number" && Number.isSafeInteger(value.createdAt)
     && value.createdAt >= 0 && id(value.id)
+}
+function legacyCursor(value: unknown): boolean {
+  return object(value) && keys(value, ["createdAt", "id", "senderPubKey"])
+    && typeof value.createdAt === "number" && Number.isSafeInteger(value.createdAt)
+    && value.createdAt >= 0 && id(value.id) && peer(value.senderPubKey)
 }
 function json(value: unknown, status = 200) {
   return Response.json(value, {
@@ -47,9 +54,9 @@ function failure(error: string, status: number) {
 }
 
 class BodyTooLarge extends Error {}
-async function readBody(request: Request): Promise<unknown> {
+async function readBody(request: Request, maximum = MAX_BODY_BYTES): Promise<unknown> {
   const declaredLength = request.headers.get("content-length")
-  if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > MAX_BODY_BYTES) {
+  if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > maximum) {
     throw new BodyTooLarge()
   }
   if (!request.body) throw new SyntaxError()
@@ -61,7 +68,7 @@ async function readBody(request: Request): Promise<unknown> {
       const { value, done } = await reader.read()
       if (done) break
       length += value.byteLength
-      if (length > MAX_BODY_BYTES) {
+      if (length > maximum) {
         void reader.cancel().catch(() => {})
         throw new BodyTooLarge()
       }
@@ -86,7 +93,8 @@ export async function POST(request: Request): Promise<Response> {
     return failure(INVALID_REQUEST, 415)
   }
   let body: unknown
-  try { body = await readBody(request) }
+  const eventTransport = request.headers.get("x-serotine-events") === "1"
+  try { body = await readBody(request, eventTransport ? MAX_EVENT_BODY_BYTES : MAX_BODY_BYTES) }
   catch (error) {
     return error instanceof BodyTooLarge
       ? failure("This messaging request is too large. Shorten your message and try again.", 413)
@@ -104,9 +112,22 @@ export async function POST(request: Request): Promise<Response> {
   }
   const data = body.data
   const proof = body.proof
+  // Enlarged bodies are only available to the explicitly bounded event actions.
+  if (eventTransport && body.action !== "event:send" && body.action !== "event:sync") return failure(INVALID_REQUEST, 400)
   try {
     // An explicit allowlist keeps this endpoint from invoking arbitrary server exports.
     switch (body.action) {
+      case "event:send":
+        if (!keys(data, ["id", "recipientPubKey", "encryptedData"])
+          || !id(data.id) || !peer(data.recipientPubKey) || !packet(data.encryptedData, MAX_EVENT_PACKET_LENGTH)) break
+        return json(await storeEncryptedEvent(data as unknown as Parameters<typeof storeEncryptedEvent>[0], proof))
+      case "event:sync":
+        if (!keys(data, [], ["after"]) || (Object.hasOwn(data, "after")
+          && (typeof data.after !== "number" || !Number.isSafeInteger(data.after) || data.after < 0))) break
+        return json(await getEventFeed(data as unknown as Parameters<typeof getEventFeed>[0], proof))
+      case "message:inbox":
+        if (!keys(data, [], ["after"]) || (Object.hasOwn(data, "after") && !legacyCursor(data.after))) break
+        return json(await getLegacyInbox(data as unknown as Parameters<typeof getLegacyInbox>[0], proof))
       case "message:send":
         if (!keys(data, ["id", "recipientPubKey", "encryptedData"])
           || !id(data.id) || !peer(data.recipientPubKey) || !packet(data.encryptedData)) break

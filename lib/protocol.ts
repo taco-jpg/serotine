@@ -1,12 +1,19 @@
 /** Shared, deterministic wire format. Never include private keys in a request. */
 export const MAX_MESSAGE_LENGTH = 8000
 export const MAX_PACKET_LENGTH = 64000
+// Rich events have their own limits; legacy text envelopes keep their v2 bounds.
+export const MAX_EVENT_CONTENT_LENGTH = 48000
+export const MAX_EVENT_PACKET_LENGTH = 128000
+export const EVENT_FEED_PAGE_SIZE = 50
 export const AUTH_WINDOW_MS = 60_000
 export const PUBLIC_KEY_PATTERN = /^04[0-9a-f]{128}$/
 export const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 export interface InboxCursor { createdAt: number; id: string }
 export interface InboxRequest { senderPubKey: string; after?: InboxCursor }
+export interface LegacyInboxCursor extends InboxCursor { senderPubKey: string }
+export interface LegacyInboxRequest { after?: LegacyInboxCursor }
+export interface EventFeedRequest { after?: number }
 
 export interface RequestProof {
   publicKey: string

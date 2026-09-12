@@ -3,7 +3,8 @@
 import { getDB, RelayConfigurationError, type D1DatabaseBinding } from "@/lib/db"
 import { verifyRequestProof } from "@/lib/request-auth"
 import { relayFailureKind } from "@/lib/relay-diagnostics"
-import { AUTH_WINDOW_MS, ID_PATTERN, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof, type InboxRequest, type InboxCursor } from "@/lib/protocol"
+import { ensureEventRelaySchema } from "@/lib/event-relay-schema"
+import { AUTH_WINDOW_MS, EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof, type InboxRequest, type InboxCursor, type EventFeedRequest, type LegacyInboxCursor, type LegacyInboxRequest } from "@/lib/protocol"
 
 class RequestError extends Error {}
 type Failure = { success: false; error: string }
@@ -14,6 +15,7 @@ export interface RelayMessage {
   encryptedData: string
   createdAt: number
 }
+export interface RelayEvent extends RelayMessage { sequence: number }
 
 function failure(error: unknown): Failure {
   if (error instanceof RequestError) return { success: false, error: error.message }
@@ -95,6 +97,78 @@ export async function getMyMessages(data: InboxRequest, proof: RequestProof): Pr
       .bind(proof.publicKey, data.senderPubKey, Date.now(), ...(after ? [after.createdAt, after.createdAt, after.id] : [])).all<RelayMessage>()
     const last = results.at(-1)
     return { success: true, messages: results, nextCursor: results.length === 100 && last ? { createdAt: last.createdAt, id: last.id } : null }
+  } catch (error) { return failure(error) }
+}
+
+/** Identity-wide compatibility inbox, including previously unknown contacts. */
+export async function getLegacyInbox(data: LegacyInboxRequest, proof: RequestProof): Promise<{ success: true; messages: RelayMessage[]; nextCursor: LegacyInboxCursor | null } | Failure> {
+  try {
+    const after = data.after
+    if (after !== undefined && (!after || !Number.isSafeInteger(after.createdAt) || after.createdAt < 0
+      || typeof after.id !== "string" || !ID_PATTERN.test(after.id)
+      || typeof after.senderPubKey !== "string" || !PUBLIC_KEY_PATTERN.test(after.senderPubKey))) {
+      throw new RequestError("Invalid inbox position. Reopen the app.")
+    }
+    const db = await authorize("message:inbox", data, proof)
+    const { results } = await db.prepare(`SELECT id, senderPubKey, recipientPubKey, encryptedData, createdAt FROM RelayMessage
+      WHERE recipientPubKey = ? AND expiresAt > ?
+      ${after ? "AND (createdAt > ? OR (createdAt = ? AND id > ?) OR (createdAt = ? AND id = ? AND senderPubKey > ?))" : ""}
+      ORDER BY createdAt ASC, id ASC, senderPubKey ASC LIMIT 100`)
+      .bind(proof.publicKey, Date.now(), ...(after ? [after.createdAt, after.createdAt, after.id, after.createdAt, after.id, after.senderPubKey] : [])).all<RelayMessage>()
+    const last = results.at(-1)
+    return { success: true, messages: results, nextCursor: results.length === 100 && last ? { createdAt: last.createdAt, id: last.id, senderPubKey: last.senderPubKey } : null }
+  } catch (error) { return failure(error) }
+}
+
+/** Append-only encrypted history, retained seven days for every linked device. */
+export async function storeEncryptedEvent(data: { id: string; recipientPubKey: string; encryptedData: string }, proof: RequestProof): Promise<{ success: true } | Failure> {
+  try {
+    checkPeer(data.recipientPubKey)
+    if (typeof data.id !== "string" || !ID_PATTERN.test(data.id)) throw new RequestError("Invalid message.")
+    if (typeof data.encryptedData !== "string" || data.encryptedData.length < 32 || data.encryptedData.length > MAX_EVENT_PACKET_LENGTH) {
+      throw new RequestError("Invalid encrypted event.")
+    }
+    const payloadBytes = new TextEncoder().encode(data.encryptedData).byteLength
+    if (payloadBytes > MAX_EVENT_PACKET_LENGTH) throw new RequestError("Invalid encrypted event.")
+    const db = await authorize("event:send", data, proof)
+    // A 2 MiB file contains 64 chunks; a group can have up to twenty members.
+    await limitWrites(db, proof, "event:send", 2000)
+    await ensureEventRelaySchema(db)
+    const now = Date.now()
+    await db.prepare("DELETE FROM RelayEvent WHERE expiresAt <= ?").bind(now).run()
+    const existing = await db.prepare("SELECT id FROM RelayEvent WHERE recipientPubKey = ? AND senderPubKey = ? AND id = ?")
+      .bind(data.recipientPubKey, proof.publicKey, data.id).first()
+    if (existing) return { success: true }
+    // Admission and insertion are one statement, preventing concurrent requests
+    // from overshooting the per-identity row/byte budget. Triggers maintain usage.
+    const result = await db.prepare(`INSERT INTO RelayEvent (id, senderPubKey, recipientPubKey, encryptedData, payloadBytes, createdAt, expiresAt)
+      SELECT ?, ?, ?, ?, ?, ?, ?
+      WHERE COALESCE((SELECT eventCount FROM RelayEventUsage WHERE senderPubKey = ?), 0) < 16000
+        AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= 134217728
+      ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING`)
+      .bind(data.id, proof.publicKey, data.recipientPubKey, data.encryptedData, payloadBytes, now, now + 7 * 86400_000,
+        proof.publicKey, proof.publicKey, payloadBytes).run()
+    if (result.meta.changes === 0) {
+      const duplicate = await db.prepare("SELECT id FROM RelayEvent WHERE recipientPubKey = ? AND senderPubKey = ? AND id = ?")
+        .bind(data.recipientPubKey, proof.publicKey, data.id).first()
+      if (!duplicate) throw new RequestError("Your seven-day relay storage is full. Wait for older messages to expire before sending more files.")
+    }
+    return { success: true }
+  } catch (error) { return failure(error) }
+}
+
+export async function getEventFeed(data: EventFeedRequest, proof: RequestProof): Promise<{ success: true; messages: RelayEvent[]; nextCursor: number; hasMore: boolean } | Failure> {
+  try {
+    if (data.after !== undefined && (!Number.isSafeInteger(data.after) || data.after < 0)) throw new RequestError("Invalid sync position. Reopen the app.")
+    const db = await authorize("event:sync", data, proof)
+    await ensureEventRelaySchema(db)
+    const after = data.after ?? 0
+    const { results } = await db.prepare(`SELECT sequence, id, senderPubKey, recipientPubKey, encryptedData, createdAt FROM RelayEvent
+      WHERE (recipientPubKey = ? OR senderPubKey = ?) AND sequence > ? AND expiresAt > ?
+      ORDER BY sequence ASC LIMIT ${EVENT_FEED_PAGE_SIZE + 1}`)
+      .bind(proof.publicKey, proof.publicKey, after, Date.now()).all<RelayEvent>()
+    const messages = results.slice(0, EVENT_FEED_PAGE_SIZE)
+    return { success: true, messages, nextCursor: messages.at(-1)?.sequence ?? after, hasMore: results.length > EVENT_FEED_PAGE_SIZE }
   } catch (error) { return failure(error) }
 }
 

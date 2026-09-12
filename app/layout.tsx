@@ -5,7 +5,7 @@ import { ThemeProvider } from "@/components/theme-provider"
 
 export const metadata: Metadata = {
   title: "Serotine | Secure Communication",
-  description: "Private, end-to-end encrypted peer-to-peer messaging.",
+  description: "Private, end-to-end encrypted chats, groups, and file sharing.",
 }
 
 export default function RootLayout({

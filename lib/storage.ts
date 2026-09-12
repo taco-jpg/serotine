@@ -42,6 +42,52 @@ export async function getMessagesFromStorage(owner: string, peerPubKey: string) 
   try { return await db.getAllFromIndex("messages", "by-peer", peerPubKey) } finally { db.close() }
 }
 
+/** Export every conversation, including older history not yet opened this session. */
+export async function exportAllMessagesFromStorage(owner: string): Promise<StoredMessage[]> {
+  const db = await initDB(owner)
+  try { return await db.getAll("messages") } finally { db.close() }
+}
+
+/** Validate the whole batch before opening a write transaction. */
+export function validateStoredMessages(value: unknown, owner: string): StoredMessage[] {
+  const address = /^04[0-9a-f]{128}$/
+  if (!address.test(owner) || !Array.isArray(value) || value.length > 100_000) throw new Error("The backup message history is invalid or too large.")
+  const seen = new Set<string>()
+  return value.map((row: unknown) => {
+    if (!row || typeof row !== "object") throw new Error("The backup contains an invalid message.")
+    const item = row as StoredMessage
+    if (typeof item.id !== "string" || item.id.length < 1 || item.id.length > 160
+      || !address.test(item.peerPubKey) || !address.test(item.senderPubKey)
+      || (item.senderPubKey !== owner && item.senderPubKey !== item.peerPubKey)
+      || typeof item.content !== "string" || item.content.length > 64_000
+      || !Number.isSafeInteger(item.timestamp) || item.timestamp <= 0
+      || (item.updatedAt !== undefined && (!Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0))
+      || (item.delivery !== undefined && !["pending", "sent", "failed", "received"].includes(item.delivery))) {
+      throw new Error("The backup contains an invalid or unrelated message.")
+    }
+    const key = JSON.stringify([item.peerPubKey, item.senderPubKey, item.id])
+    if (seen.has(key)) throw new Error("The backup contains duplicate messages.")
+    seen.add(key)
+    return { id: item.id, peerPubKey: item.peerPubKey, senderPubKey: item.senderPubKey, content: item.content, timestamp: item.timestamp,
+      ...(item.updatedAt !== undefined ? { updatedAt: item.updatedAt } : {}), ...(item.delivery ? { delivery: item.delivery } : {}) }
+  })
+}
+
+/** Merge a restored history without overwriting newer local rows or resending it. */
+export async function importMessagesToStorage(owner: string, value: unknown): Promise<void> {
+  const messages = validateStoredMessages(value, owner)
+  const db = await initDB(owner)
+  try {
+    const tx = db.transaction("messages", "readwrite")
+    for (const row of messages) {
+      const existing = await tx.store.get([row.peerPubKey, row.senderPubKey, row.id])
+      if (!existing) await tx.store.put(row)
+    }
+    await tx.done
+    for (const peer of new Set(messages.map(row => row.peerPubKey))) notifyHistoryChanged(owner, peer)
+  } finally { db.close() }
+}
+
 // Old versions had one shared store and only one identity. Import once for that
 // original identity; preserve the old database and normalize received P2P rows.
 export async function migrateLegacyHistory(owner: string) {

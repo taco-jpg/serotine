@@ -6,7 +6,8 @@ import { Loader2, KeyRound, Upload, Eye, EyeOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { createIdentity, loadIdentity, restoreIdentityBackup, IdentityAccessError } from "@/lib/identity"
+import { createIdentity, loadIdentity, IdentityAccessError } from "@/lib/identity"
+import { MAX_BACKUP_FILE_BYTES, restoreBackup } from "@/lib/full-backup"
 
 export function LoginForm() {
   const router = useRouter()
@@ -51,12 +52,12 @@ export function LoginForm() {
           {loading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <KeyRound className="mr-2 size-4" />} Create my identity
         </Button>
         <p className="text-sm leading-relaxed text-zinc-500">After entering, download a backup. Clearing browser data without one permanently removes access to your identity.</p>
-      </> : <form className="space-y-4" onSubmit={event => { event.preventDefault(); if (file) void run(async () => { if (file.size > 32000) throw new Error("Choose a Serotine backup smaller than 32 KB."); return restoreIdentityBackup(await file.text(), password) }) }}>
-        <div className="space-y-2"><Label htmlFor="backup-file">Identity backup</Label><Input id="backup-file" type="file" accept=".json,application/json" required onChange={event => setFile(event.target.files?.[0] ?? null)} /></div>
+      </> : <form className="space-y-4" onSubmit={event => { event.preventDefault(); if (file) void run(async () => { if (file.size > MAX_BACKUP_FILE_BYTES) throw new Error("Choose a Serotine backup no larger than 100 MiB."); return restoreBackup(await file.text(), password) }) }}>
+        <div className="space-y-2"><Label htmlFor="backup-file">Serotine backup</Label><Input id="backup-file" type="file" accept=".json,application/json" required onChange={event => setFile(event.target.files?.[0] ?? null)} /><p className="text-sm text-zinc-500">Restore a full chat backup or an older identity backup. This also links a device to your existing identity.</p></div>
         <div className="space-y-2"><Label htmlFor="backup-password">Backup password</Label><Input id="backup-password" type={showPassword ? "text" : "password"} autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} /><Button type="button" variant="ghost" size="sm" aria-pressed={showPassword} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeOff className="mr-2 size-4" /> : <Eye className="mr-2 size-4" />}{showPassword ? "Hide password" : "Show password"}</Button><p className="text-sm text-zinc-500">Leave blank for an older unencrypted key export.</p></div>
-        <Button className="w-full h-12" disabled={!file || loading}>{loading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Upload className="mr-2 size-4" />} Restore identity</Button>
+        <Button className="w-full h-12" disabled={!file || loading}>{loading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Upload className="mr-2 size-4" />} Restore backup</Button>
       </form>}
-      {recoveryRequired ? <p className="text-sm leading-relaxed text-zinc-400">The identity saved on this browser could not be opened. Restore its backup to repair it. Your existing local data has been preserved.</p> : <Button variant="ghost" className="w-full" disabled={loading} onClick={() => { setRestore(!restore); setError(null) }}>{restore ? "Create a new identity" : "I have an identity backup"}</Button>}
+      {recoveryRequired ? <p className="text-sm leading-relaxed text-zinc-400">The identity saved on this browser could not be opened. Restore its backup to repair it. Your existing local data has been preserved.</p> : <Button variant="ghost" className="w-full" disabled={loading} onClick={() => { setRestore(!restore); setError(null) }}>{restore ? "Create a new identity" : "I have a backup"}</Button>}
     </>}
   </div>
 }

@@ -1,7 +1,7 @@
 import type * as Actions from "@/app/actions"
-import { ID_PATTERN, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "./protocol"
+import { EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "./protocol"
 
-type RelayAction = "message:send" | "message:list" | "message:ack" | "signal:send" | "signal:read"
+type RelayAction = "message:send" | "message:list" | "message:inbox" | "message:ack" | "signal:send" | "signal:read" | "event:send" | "event:sync"
 type JsonObject = Record<string, unknown>
 const TIMEOUT_MS = 15_000
 const UNEXPECTED = "The messaging relay returned an unexpected response. Reload Serotine and reconnect. Your saved messages are still on this browser."
@@ -11,14 +11,14 @@ class RelayTransportError extends Error {}
 function object(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
-function packet(value: unknown): value is string {
-  return typeof value === "string" && value.length >= 32 && value.length <= MAX_PACKET_LENGTH
+function packet(value: unknown, maximum = MAX_PACKET_LENGTH): value is string {
+  return typeof value === "string" && value.length >= 32 && value.length <= maximum
 }
 function cursor(value: unknown) {
   return object(value) && typeof value.createdAt === "number" && Number.isSafeInteger(value.createdAt)
     && value.createdAt >= 0 && typeof value.id === "string" && ID_PATTERN.test(value.id)
 }
-function validResult(action: RelayAction, value: unknown): boolean {
+function validResult(action: RelayAction, value: unknown, data: unknown, proof: RequestProof): boolean {
   if (!object(value)) return false
   if (value.success === false) {
     return typeof value.error === "string" && value.error.trim().length > 0
@@ -29,9 +29,29 @@ function validResult(action: RelayAction, value: unknown): boolean {
   if (action === "signal:read") {
     return value.signal === null || (object(value.signal) && packet(value.signal.encryptedData))
   }
-  if (action === "message:list") {
+  if (action === "event:sync") {
+    const after = object(data) && typeof data.after === "number" ? data.after : 0
+    if (!Array.isArray(value.messages) || value.messages.length > EVENT_FEED_PAGE_SIZE
+      || typeof value.nextCursor !== "number" || !Number.isSafeInteger(value.nextCursor) || value.nextCursor < after
+      || typeof value.hasMore !== "boolean" || (value.hasMore && value.messages.length !== EVENT_FEED_PAGE_SIZE)) return false
+    let previous = after
+    for (const message of value.messages) {
+      if (!object(message) || typeof message.id !== "string" || !ID_PATTERN.test(message.id)
+        || typeof message.senderPubKey !== "string" || !PUBLIC_KEY_PATTERN.test(message.senderPubKey)
+        || typeof message.recipientPubKey !== "string" || !PUBLIC_KEY_PATTERN.test(message.recipientPubKey)
+        || (message.senderPubKey !== proof.publicKey && message.recipientPubKey !== proof.publicKey)
+        || !packet(message.encryptedData, MAX_EVENT_PACKET_LENGTH)
+        || typeof message.createdAt !== "number" || !Number.isSafeInteger(message.createdAt) || message.createdAt < 0
+        || typeof message.sequence !== "number" || !Number.isSafeInteger(message.sequence) || message.sequence <= previous) return false
+      previous = message.sequence
+    }
+    return value.nextCursor === previous
+  }
+  if (action === "message:list" || action === "message:inbox") {
     return Array.isArray(value.messages) && value.messages.length <= 100
-      && (value.nextCursor === null || cursor(value.nextCursor))
+      && (value.nextCursor === null || (cursor(value.nextCursor)
+        && (action !== "message:inbox" || (object(value.nextCursor)
+          && typeof value.nextCursor.senderPubKey === "string" && PUBLIC_KEY_PATTERN.test(value.nextCursor.senderPubKey)))))
       && value.messages.every(message => object(message)
         && typeof message.id === "string" && ID_PATTERN.test(message.id)
         && typeof message.senderPubKey === "string" && PUBLIC_KEY_PATTERN.test(message.senderPubKey)
@@ -56,7 +76,8 @@ async function relay<Result>(action: RelayAction, data: unknown, proof: RequestP
     return await Promise.race([timeout, (async () => {
       const response = await fetch("/api/relay", {
         method: "POST", mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        headers: { "Content-Type": "application/json", Accept: "application/json",
+          ...(action.startsWith("event:") ? { "X-Serotine-Events": "1" } : {}) },
         body: JSON.stringify({ version: 2, action, data, proof }), signal: controller.signal,
       })
       if (response.status === 404) {
@@ -69,7 +90,7 @@ async function relay<Result>(action: RelayAction, data: unknown, proof: RequestP
       let result: unknown
       try { result = await response.json() }
       catch { throw new RelayTransportError(UNEXPECTED) }
-      if (!validResult(action, result)) throw new RelayTransportError(UNEXPECTED)
+      if (!validResult(action, result, data, proof)) throw new RelayTransportError(UNEXPECTED)
       if (!response.ok && (result as JsonObject).success !== false) throw new RelayTransportError(UNEXPECTED)
       return result as Result
     })()])
@@ -89,3 +110,6 @@ export const getMyMessages: typeof Actions.getMyMessages = (data, proof) => rela
 export const deleteMessage: typeof Actions.deleteMessage = (data, proof) => relay("message:ack", data, proof)
 export const storeSignal: typeof Actions.storeSignal = (data, proof) => relay("signal:send", data, proof)
 export const getSignal: typeof Actions.getSignal = (data, proof) => relay("signal:read", data, proof)
+export const storeEncryptedEvent: typeof Actions.storeEncryptedEvent = (data, proof) => relay("event:send", data, proof)
+export const getEventFeed: typeof Actions.getEventFeed = (data, proof) => relay("event:sync", data, proof)
+export const getLegacyInbox: typeof Actions.getLegacyInbox = (data, proof) => relay("message:inbox", data, proof)

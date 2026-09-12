@@ -13,6 +13,11 @@ const owner = 'alice'
 const message = { senderPubKey: 'bob' }
 const conversation = { blocked: false, request: false, notificationMode: 'all' }
 
+test('expired private messages do not create notifications', () => {
+  assert.equal(shouldNotify({ ...message, private: true, expiresAt: Date.now() - 1 }, conversation, owner), false)
+  assert.equal(shouldNotify({ ...message, private: true, expiresAt: Date.now() + 60000 }, conversation, owner), true)
+})
+
 test('notification filters protect archived chats, muted chats, requests, blocked senders and self-chat', () => {
   assert.equal(shouldNotify(message, conversation, owner), true)
   assert.equal(shouldNotify({ senderPubKey: owner }, conversation, owner), false)

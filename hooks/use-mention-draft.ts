@@ -24,14 +24,20 @@ function readSpans(value: unknown, content: string): MentionSpan[] {
 }
 
 /** Restore only spans bound to this exact saved text and draft revision. */
-export function useMentionDraft(owner: string, peer: string, content: string, draftReady: boolean) {
+export function useMentionDraft(owner: string, peer: string, content: string, draftReady: boolean, persistent = true) {
   const key = owner ? `serotine_mention_draft:${owner}:${peer}` : ""
   const draftKey = `serotine_draft:${owner}:${peer}`
-  const revision = draftReady ? readRevision(draftKey, content) : null
+  const revision = draftReady && persistent ? readRevision(draftKey, content) : null
   const [state, setState] = useState<{ key: string; draft: MentionDraft }>({ key: "", draft: { content: "", revision: null, spans: [] } })
 
   useEffect(() => {
     if (!key || !draftReady) return
+    if (!persistent) {
+      memory.delete(key)
+      try { localStorage.removeItem(key) } catch { /* No private text is saved. */ }
+      setState({ key, draft: { content: "", revision: null, spans: [] } })
+      return
+    }
     let draft: MentionDraft = { content, revision, spans: [] }
     const remembered = memory.get(key)
     if (content && remembered?.content === content && remembered.revision === revision) draft = remembered
@@ -47,12 +53,12 @@ export function useMentionDraft(owner: string, peer: string, content: string, dr
       try { localStorage.removeItem(key) } catch { /* An old revision cannot reattach to a new draft. */ }
     }
     setState({ key, draft })
-  }, [key, content, draftReady, revision])
+  }, [key, content, draftReady, revision, persistent])
 
   // Call after useChatDraft.setContent so the text revision exists before saving
   // its recipient bindings. Selection changes can still work with blocked storage.
   const saveMentionDraft = (nextContent: string, nextSpans: MentionSpan[]) => {
-    if (!key || !draftReady) return
+    if (!key || !draftReady || !persistent) return
     const draft: MentionDraft = { content: nextContent, revision: readRevision(draftKey, nextContent), spans: readSpans(nextSpans, nextContent) }
     if (draft.spans.length) memory.set(key, draft)
     else memory.delete(key)
@@ -64,7 +70,7 @@ export function useMentionDraft(owner: string, peer: string, content: string, dr
   }
 
   return {
-    mentionSpans: draftReady && state.key === key && state.draft.content === content && state.draft.revision === revision ? state.draft.spans : [],
+    mentionSpans: persistent && draftReady && state.key === key && state.draft.content === content && state.draft.revision === revision ? state.draft.spans : [],
     saveMentionDraft,
   }
 }

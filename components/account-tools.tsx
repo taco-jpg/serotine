@@ -98,7 +98,11 @@ export function AccountTools({ identity }: { identity: Identity }) {
           <label className="flex items-center gap-2 text-sm text-muted-foreground"><input type="checkbox" checked={showPassword} onChange={event => setShowPassword(event.target.checked)} />Show password</label>
           <p className="text-xs text-muted-foreground">{mode === "restore" ? "Leave blank only for an older unencrypted identity export." : "At least 12 characters. You need this password to restore the file."}</p>
         </div>
-        {mode !== "restore" && <div className="space-y-2"><Label htmlFor={`${id}-confirmation`}>Confirm password</Label><Input id={`${id}-confirmation`} type={showPassword ? "text" : "password"} autoComplete="new-password" required maxLength={1024} disabled={busy} value={confirmation} onChange={event => setConfirmation(event.target.value)} /></div>}
+        {mode !== "restore" && <div className="space-y-2">
+          <Label htmlFor={`${id}-confirmation`}>Confirm password</Label>
+          <Input id={`${id}-confirmation`} type={showPassword ? "text" : "password"} autoComplete="new-password" aria-describedby={`${id}-confirmation-help`} required maxLength={1024} disabled={busy} value={confirmation} onChange={event => setConfirmation(event.target.value)} onPaste={event => event.preventDefault()} onDrop={event => event.preventDefault()} />
+          <p id={`${id}-confirmation-help`} className="text-xs text-muted-foreground">Retype your password to confirm it. Pasting and dropping text are disabled here. You can still copy from either box.</p>
+        </div>}
         <Button type="submit" className="w-full" disabled={busy || !!conflict || (mode === "restore" ? !file : password.length < 12 || !confirmation)}>
           {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : mode === "restore" ? <Upload className="mr-2 size-4" /> : mode === "link" ? <MonitorSmartphone className="mr-2 size-4" /> : <Download className="mr-2 size-4" />}
           {busy ? (mode === "restore" ? "Restoring…" : "Encrypting backup…") : mode === "restore" ? "Restore backup" : mode === "link" ? "Download device transfer" : "Download encrypted backup"}

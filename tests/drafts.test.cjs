@@ -7,7 +7,7 @@ const ts = require('typescript')
 
 function harness(storage = new Map(), options = {}) {
   const slots = [], effects = []
-  let cursor = 0, owner = 'alice', peer = 'bob', stopped = false, lateUpdates = 0
+  let cursor = 0, owner = 'alice', peer = 'bob', stopped = false, lateUpdates = 0, persistent = true
   const react = {
     useState(initial) {
       const index = cursor++
@@ -50,13 +50,14 @@ function harness(storage = new Map(), options = {}) {
   const hook = load(path.join(__dirname, '../hooks/use-chat-draft.ts')).useChatDraft
   function view() {
     cursor = 0
-    const result = hook(owner, peer)
+    const result = hook(owner, peer, persistent)
     while (effects.length) effects.shift()()
     return result
   }
   view()
   return {
     view, storage,
+    privacy(enabled) { persistent = !enabled; view(); return view() },
     switchTo(nextOwner, nextPeer) { owner = nextOwner; peer = nextPeer; return view() },
     unmount() { for (const slot of slots) slot?.cleanup?.(); stopped = true },
     get lateUpdates() { return lateUpdates },
@@ -75,6 +76,39 @@ test('draft survives reload and remains isolated by identity and recipient', () 
   assert.equal(h.view().content, 'Hello Bob\nSecond line')
   h.unmount()
   assert.equal(harness(storage).view().content, 'Hello Bob\nSecond line')
+})
+
+test('private drafts never persist, survive only the mounted conversation and clear on mode changes', () => {
+  const h = harness()
+  h.view().setContent('Ordinary saved draft')
+  h.privacy(true).setContent('sensitive-private-value')
+  assert.equal(h.view().content, 'sensitive-private-value')
+  assert.equal(h.storage.size, 0)
+  h.view().retryDraftSave()
+  assert.equal(h.storage.size, 0)
+  assert.equal(h.privacy(false).content, '')
+  assert.equal(h.storage.size, 0)
+  h.privacy(true).setContent('second-private-value')
+  h.switchTo('alice', 'carol')
+  h.switchTo('alice', 'bob')
+  assert.equal(h.view().content, '')
+  assert.equal(h.storage.size, 0)
+})
+
+test('private draft sends preserve newer edits and stale normal closures cannot write after entering private mode', () => {
+  const h = harness()
+  const stale = h.view().setContent
+  h.privacy(true)
+  stale('should never be written')
+  assert.equal(h.storage.size, 0)
+  h.view().setContent('First private revision')
+  const finish = h.view().clearSubmittedDraft
+  h.view().setContent('Next private revision')
+  finish()
+  assert.equal(h.view().content, 'Next private revision')
+  h.view().clearSubmittedDraft()
+  assert.equal(h.view().content, '')
+  assert.equal(h.storage.size, 0)
 })
 
 test('an old send cannot clear a newer draft after navigating away and back', () => {

@@ -10,9 +10,10 @@ const MessagingContext = createContext<MessagingContextValue | null>(null)
 const unavailable = async (): Promise<never> => { throw new Error("Your identity is still loading. Try again in a moment.") }
 const empty = {
   identity: null, contacts: [], ready: false, error: null, status: "connecting", conversations: [], messages: [], groups: [], requests: [], preferences: defaultMessagingPreferences(),
-  sendText: unavailable, editMessage: unavailable, deleteMessage: unavailable, pinMessage: unavailable, createPoll: unavailable, vote: unavailable, createGroup: unavailable, updateGroup: unavailable, leaveGroup: unavailable,
+  sendText: unavailable, sendSecret: unavailable, setPrivateMode: unavailable, destroyPrivateHistory: unavailable, editMessage: unavailable, deleteMessage: unavailable, pinMessage: unavailable, createPoll: unavailable, vote: unavailable, createGroup: unavailable, updateGroup: unavailable, leaveGroup: unavailable,
   acceptRequest: unavailable, blockContact: unavailable, markRead: unavailable, archiveConversation: unavailable, deleteConversation: unavailable, setNotificationMode: unavailable, setReadReceipts: unavailable, requestNotifications: unavailable, retry: unavailable, sync: unavailable, sendEvent: unavailable, refresh: unavailable,
   getAttachmentChunks: () => [],
+  getPrivateMode: () => 0,
 } satisfies MessagingContextValue
 
 export function MessagingProvider({ children }: { children: ReactNode }) {
@@ -73,6 +74,8 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
   const value = useMemo<MessagingContextValue>(() => engine ? {
     identity: engine.identity, contacts: engine.contacts, ready, error: error ?? engine.error, status: engine.status, preferences: engine.preferences, ...engine.model,
     sendText: engine.sendText, editMessage: engine.editMessage, deleteMessage: engine.deleteMessage, pinMessage: engine.pinMessage, createPoll: engine.createPoll, vote: engine.vote, createGroup: engine.createGroup,
+    sendSecret: engine.sendSecret, setPrivateMode: engine.setPrivateMode, destroyPrivateHistory: engine.destroyPrivateHistory,
+    getPrivateMode: engine.getPrivateMode,
     updateGroup: engine.updateGroup, leaveGroup: engine.leaveGroup, acceptRequest: engine.acceptRequest, blockContact: engine.blockContact, markRead: engine.markRead,
     archiveConversation: engine.archiveConversation, deleteConversation: engine.deleteConversation,
     setNotificationMode: engine.setNotificationMode, setReadReceipts: engine.setReadReceipts, requestNotifications: engine.requestNotifications, retry: engine.retry, sync: engine.sync,

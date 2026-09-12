@@ -129,7 +129,7 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
     const query = searchQuery.trim().toLocaleLowerCase()
     if (!query) return []
     const allowed = new Set(conversations.filter(item => !item.blocked && !item.request).map(item => item.id))
-    return messages.filter(message => allowed.has(message.conversationId) && [message.content, message.attachment?.name, message.poll?.question, ...(message.poll?.options || [])].filter(Boolean).join(" ").toLocaleLowerCase().includes(query)).sort((a, b) => b.timestamp - a.timestamp)
+    return messages.filter(message => !message.private && allowed.has(message.conversationId) && [message.content, message.attachment?.name, message.poll?.question, ...(message.poll?.options || [])].filter(Boolean).join(" ").toLocaleLowerCase().includes(query)).sort((a, b) => b.timestamp - a.timestamp)
   }, [searchQuery, messages, conversations])
 
   const copy = async (value: string) => {

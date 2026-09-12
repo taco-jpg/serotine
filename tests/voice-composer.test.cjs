@@ -57,7 +57,7 @@ function harness(getUserMedia, options = {}) {
   function view() { cursor = 0; tree = AttachmentComposer({ onSend: options.onSend || (async (...args) => sends.push(args)) }); while (pendingEffects.length) pendingEffects.shift()(); return tree }
   function walk(node, fn) { if (!node) return; if (Array.isArray(node)) return node.forEach(child => walk(child, fn)); if (typeof node === 'object') { fn(node); walk(node.props?.children, fn) } }
   function label(node) { if (Array.isArray(node)) return node.map(label).join(''); if (typeof node === 'string' || typeof node === 'number') return String(node); return node?.props ? label(node.props.children) : '' }
-  function click(text) { view(); let found; walk(tree, node => { if (node.type === 'button' && label(node) === text) found = node }); assert.ok(found, 'button: ' + text); assert.ok(!found.props.disabled); found.props.onClick() }
+  function click(name) { view(); let found; walk(tree, node => { if (node.type === 'button' && (node.props['aria-label'] || label(node)) === name) found = node }); assert.ok(found, 'button: ' + name); assert.ok(!found.props.disabled); found.props.onClick() }
   function select(files) { view(); let found; walk(tree, node => { if (node.type === 'input' && node.props.type === 'file') found = node }); assert.ok(found); assert.ok(!found.props.disabled); found.props.onChange({ target: { files, value: 'files' } }) }
   return { view, click, select, instances, stops, sends, intervals, text() { return label(view()) }, unmount() { for (const slot of state) slot?.cleanup?.(); unmounted = true }, get lateUpdates() { return lateUpdates } }
 }
@@ -65,7 +65,7 @@ function harness(getUserMedia, options = {}) {
 test('late microphone permission after cancel closes every track and never starts recording', async () => {
   let resolve, stopped = 0
   const h = harness(() => new Promise(done => { resolve = done }))
-  h.click('Voice')
+  h.click('Record voice message')
   assert.match(h.text(), /Waiting for microphone/)
   h.click('Cancel')
   resolve({ getTracks: () => [{ stop() { stopped++ } }] })
@@ -79,7 +79,7 @@ test('late microphone permission after cancel closes every track and never start
 test('voice recording stops microphone, previews audio, and sends only after explicit send', async () => {
   let stopped = 0
   const h = harness(async () => ({ getTracks: () => [{ stop() { stopped++ } }] }))
-  h.click('Voice'); await tick(); h.view()
+  h.click('Record voice message'); await tick(); h.view()
   h.instances[0].data()
   h.click('Stop & preview')
   h.stops.shift()()
@@ -96,10 +96,10 @@ test('voice recording stops microphone, previews audio, and sends only after exp
 test('cancelled recording finishing later cannot stop or replace a new recording', async () => {
   const stopped = [0, 0]; let request = 0
   const h = harness(async () => { const id = request++; return { getTracks: () => [{ stop() { stopped[id]++ } }] } })
-  h.click('Voice'); await tick(); h.view()
+  h.click('Record voice message'); await tick(); h.view()
   h.instances[0].data('old recording')
   h.click('Cancel')
-  h.click('Voice'); await tick(); h.view()
+  h.click('Record voice message'); await tick(); h.view()
   h.stops.shift()()
   assert.equal(stopped[1], 0, 'old stop must not close the new microphone')
   assert.match(h.text(), /Recording/)
@@ -113,7 +113,7 @@ test('cancelled recording finishing later cannot stop or replace a new recording
 test('unmounting during recording stops hardware tracks and recording timer', async () => {
   let stopped = 0
   const h = harness(async () => ({ getTracks: () => [{ stop() { stopped++ } }] }))
-  h.click('Voice'); await tick(); h.view()
+  h.click('Record voice message'); await tick(); h.view()
   assert.equal(h.intervals.size, 1)
   h.unmount()
   assert.ok(stopped > 0)
@@ -129,7 +129,7 @@ test('adding batches preserves earlier files and each explicit send removes only
   h.select([new File(['third'], 'third.txt')]); await tick()
   assert.match(h.text(), /3 files queued/)
   assert.equal(h.sends.length, 0)
-  assert.throws(() => h.click('Voice'), 'a recording must not overwrite queued files')
+  assert.throws(() => h.click('Record voice message'), 'a recording must not overwrite queued files')
   h.click('Send file'); await tick()
   assert.equal(h.sends.length, 1)
   assert.equal(h.sends[0][0].name, 'first.txt')

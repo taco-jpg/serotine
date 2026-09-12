@@ -7,7 +7,9 @@ const root = path.join(__dirname, '..')
 const modules = new Map(), stores = new Map(), prefs = new Map(), cursors = new Map()
 const packets = [], attempts = []
 const runtimeWindow = new EventTarget()
-let rejectRecipient, rateLimitRecipient, failPersistence = false, historyReads = 0
+let rejectRecipient, rateLimitRecipient, rejectError, failPersistence = false, historyReads = 0
+const retiredRecipient = "This contact's address has been permanently retired. Ask them for their new address."
+const retiredIdentity = 'This identity has been permanently retired. Use your new address; old backups and linked devices cannot access this relay.'
 const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true })
 const recordsFor = owner => { if (!stores.has(owner)) stores.set(owner, new Map()); return stores.get(owner) }
 const store = {
@@ -30,7 +32,7 @@ const relay = {
     assert.equal(await authentication.verifyRequestProof('event:send', data, proof), true)
     attempts.push({ owner: proof.publicKey, ...data })
     if (data.recipientPubKey === rateLimitRecipient) return { success: false, error: 'Too many requests. Wait a minute and try again.', retryAfterMs: 61000 }
-    if (data.recipientPubKey === rejectRecipient) return { success: false, error: 'Recipient relay unavailable' }
+    if (data.recipientPubKey === rejectRecipient) return { success: false, error: rejectError }
     if (!packets.some(p => p.senderPubKey === proof.publicKey && p.recipientPubKey === data.recipientPubKey && p.id === data.id)) packets.push({ ...data, senderPubKey: proof.publicKey, sequence: packets.length + 1, createdAt: Date.now() })
     return { success: true }
   },
@@ -61,12 +63,12 @@ function load(filename) {
 const cryptography = load(path.join(root, 'lib/crypto.ts'))
 const authentication = load(path.join(root, 'lib/request-auth.ts'))
 const { MessagingEngine } = load(path.join(root, 'lib/messaging.ts'))
-let alice, bob, charlie
+let alice, bob, charlie, dave
 before(async () => {
   async function identity() { const keys = await cryptography.generateEncryptionKeyPair(); return { version: 2, publicKey: await cryptography.exportPublicKeyToHex(keys.publicKey), privateKey: await cryptography.exportKey(keys.privateKey) } }
-  ;[alice, bob, charlie] = await Promise.all([identity(), identity(), identity()])
+  ;[alice, bob, charlie, dave] = await Promise.all([identity(), identity(), identity(), identity()])
 })
-beforeEach(() => { stores.clear(); prefs.clear(); cursors.clear(); packets.length = attempts.length = 0; rejectRecipient = rateLimitRecipient = undefined; failPersistence = false; historyReads = 0 })
+beforeEach(() => { stores.clear(); prefs.clear(); cursors.clear(); packets.length = attempts.length = 0; rejectRecipient = rateLimitRecipient = undefined; rejectError = 'Recipient relay unavailable'; failPersistence = false; historyReads = 0 })
 async function engine(identity) {
   const instance = new MessagingEngine(identity)
   instance.key = await cryptography.importKey(identity.privateKey, 'encryption', 'private')
@@ -200,6 +202,186 @@ test('failed fanout retains recipient acknowledgements and retries only its miss
   assert.equal(attempts.filter(a => a.id === id && a.recipientPubKey === bob.publicKey).length, 1)
   assert.equal(sender.instance.model.messages.find(m => m.id === id).delivery, 'sent')
 })
+
+test('a retired contact only fails its own conversation while healthy sends and incoming messages stay online', async () => {
+  const peer = await engine(charlie)
+  const incoming = await peer.instance.sendText(alice.publicKey, 'You can still receive messages')
+  await peer.synchronize()
+  const sender = await engine(alice)
+  const failed = await sender.instance.sendText(bob.publicKey, 'This old address is retired')
+  const healthy = await sender.instance.sendText(charlie.publicKey, 'This conversation works')
+  rejectRecipient = bob.publicKey
+  rejectError = retiredRecipient
+  await sender.synchronize()
+  assert.equal(sender.instance.status, 'online')
+  assert.equal(sender.instance.error, null)
+  assert.equal(sender.instance.model.messages.find(m => m.id === failed).delivery, 'failed')
+  assert.equal(sender.instance.model.messages.find(m => m.id === failed).error, retiredRecipient)
+  assert.equal(sender.instance.model.conversations.find(c => c.id === bob.publicKey).sendError, retiredRecipient)
+  assert.equal(sender.instance.model.conversations.find(c => c.id === charlie.publicKey).sendError, undefined)
+  assert.equal(sender.instance.model.conversations.find(c => c.id === alice.publicKey).sendError, undefined)
+  assert.equal(sender.instance.model.messages.find(m => m.id === healthy).delivery, 'sent')
+  assert.equal(sender.instance.model.messages.find(m => m.id === incoming).content, 'You can still receive messages')
+})
+
+test('saved failed sends survive recreation without making a healthy relay offline and recovery clears global errors', async t => {
+  const original = await engine(alice)
+  const id = await original.instance.sendText(bob.publicKey, 'Preserve the failure for retry')
+  rejectRecipient = bob.publicKey
+  rejectError = retiredRecipient
+  await original.synchronize()
+  for (const record of recordsFor(alice.publicKey).values()) delete record.failedRecipients
+  original.instance.dispose()
+  const attempted = attempts.filter(a => a.id === id).length
+  const recreated = await engine(alice)
+  await recreated.synchronize()
+  assert.equal(recreated.instance.status, 'online')
+  assert.equal(recreated.instance.error, null)
+  assert.equal(recreated.instance.model.conversations.find(c => c.id === bob.publicKey).sendError, retiredRecipient)
+  const feed = t.mock.method(relay, 'getEventFeed', async () => ({ success: false, error: 'The relay is unavailable' }))
+  await recreated.synchronize()
+  assert.equal(recreated.instance.status, 'offline')
+  assert.equal(recreated.instance.error, 'The relay is unavailable')
+  feed.mock.restore()
+  await recreated.synchronize()
+  assert.equal(recreated.instance.status, 'online')
+  assert.equal(recreated.instance.error, null)
+  assert.equal(recreated.instance.model.messages.find(m => m.id === id).delivery, 'failed')
+  assert.equal(attempts.filter(a => a.id === id).length, attempted, 'saved failures require an explicit retry')
+})
+
+test('a retired first group member does not block later members or later outbox batches', async () => {
+  const sender = await engine(alice)
+  const cid = await sender.instance.createGroup('Team', [bob.publicKey, charlie.publicKey])
+  await sender.synchronize()
+  const groupMessage = await sender.instance.sendText(cid, 'Reach the active members')
+  const unrelated = []
+  for (let i = 0; i < 6; i++) unrelated.push(await sender.instance.sendText(alice.publicKey, `Saved note ${i}`))
+  rejectRecipient = bob.publicKey
+  rejectError = retiredRecipient
+  await sender.synchronize()
+  const record = [...recordsFor(alice.publicKey).values()].find(r => r.event.id === groupMessage)
+  assert.deepEqual(record.delivered, [charlie.publicKey])
+  assert.ok(record.error.endsWith(retiredRecipient), 'a later successful member must not clear the first refusal')
+  assert.equal(sender.instance.model.conversations.find(c => c.id === cid).sendError, record.error)
+  assert.equal(sender.instance.model.conversations.find(c => c.id === alice.publicKey).sendError, undefined)
+  for (const id of unrelated) assert.equal(sender.instance.model.messages.find(m => m.id === id).delivery, 'sent')
+  assert.equal(sender.instance.status, 'online')
+  assert.equal(sender.instance.error, null)
+  rejectRecipient = undefined
+  await sender.instance.retry(groupMessage)
+  await sender.synchronize()
+  assert.equal(sender.instance.model.messages.find(m => m.id === groupMessage).delivery, 'sent')
+  assert.equal(sender.instance.model.conversations.find(c => c.id === cid).sendError, undefined)
+  assert.equal(attempts.filter(a => a.id === groupMessage && a.recipientPubKey === charlie.publicKey).length, 1, 'confirmed members must never be sent the event again')
+  assert.equal(attempts.filter(a => a.id === groupMessage && a.recipientPubKey === bob.publicKey).length, 2)
+})
+
+for (const kind of ['receipt', 'group']) test(`failed ${kind} events expose their conversation error even without visible messages`, async () => {
+  const sender = await engine(alice)
+  const cid = kind === 'group'
+    ? await sender.instance.createGroup('Invite', [bob.publicKey])
+    : bob.publicKey
+  if (kind === 'receipt') await sender.instance.sendEvent(cid, 'receipt', { targetId: crypto.randomUUID(), receipt: 'delivered' })
+  rejectRecipient = bob.publicKey
+  rejectError = retiredRecipient
+  await sender.synchronize()
+  assert.equal(sender.instance.model.messages.length, 0)
+  const conversation = sender.instance.model.conversations.find(c => c.id === cid)
+  assert.ok(conversation, 'the failure must remain discoverable without a message bubble')
+  assert.ok(conversation.sendError.endsWith(retiredRecipient))
+  assert.equal(sender.instance.model.conversations.find(c => c.id === alice.publicKey).sendError, undefined)
+  assert.equal(sender.instance.status, 'online')
+  assert.equal(sender.instance.error, null)
+})
+
+test('a failed group departure stays visible on its conversation after local membership ends', async () => {
+  const sender = await engine(alice)
+  const cid = await sender.instance.createGroup('Departing group', [bob.publicKey])
+  await sender.synchronize()
+  await sender.instance.leaveGroup(cid)
+  rejectRecipient = bob.publicKey
+  rejectError = retiredRecipient
+  await sender.synchronize()
+  const departure = [...recordsFor(alice.publicKey).values()].find(r => r.event.kind === 'leave')
+  const conversation = sender.instance.model.conversations.find(c => c.id === cid)
+  assert.ok(departure.error.endsWith(retiredRecipient))
+  assert.equal(conversation.sendError, departure.error)
+  assert.equal(conversation.members.includes(alice.publicKey), false)
+  assert.equal(sender.instance.model.messages.length, 0)
+  assert.equal(sender.instance.status, 'online')
+  assert.equal(sender.instance.error, null)
+})
+
+test('a group resumes rate-limited members after recreation while retired recipients still wait for explicit retry', async () => {
+  const sender = await engine(alice)
+  const cid = await sender.instance.createGroup('Mixed delivery', [bob.publicKey, charlie.publicKey, dave.publicKey])
+  await sender.synchronize()
+  const id = await sender.instance.sendText(cid, 'Every active member should receive this')
+  rejectRecipient = bob.publicKey
+  rejectError = retiredRecipient
+  rateLimitRecipient = charlie.publicKey
+  await sender.synchronize()
+  const saved = [...recordsFor(alice.publicKey).values()].find(r => r.event.id === id)
+  assert.deepEqual(saved.failedRecipients, [bob.publicKey], 'rate limits must not become permanent recipient failures')
+  assert.deepEqual(saved.delivered, [])
+  assert.equal(attempts.filter(a => a.id === id && a.recipientPubKey === dave.publicKey).length, 0)
+  sender.instance.dispose()
+  rateLimitRecipient = undefined
+  const recreated = await engine(alice)
+  recreated.instance.outboxRetryAt = Date.now() - 1
+  await recreated.synchronize()
+  const resumed = [...recordsFor(alice.publicKey).values()].find(r => r.event.id === id)
+  assert.deepEqual(resumed.delivered, [charlie.publicKey, dave.publicKey])
+  assert.deepEqual(resumed.failedRecipients, [bob.publicKey])
+  assert.ok(resumed.error.endsWith(retiredRecipient))
+  assert.equal(recreated.instance.model.conversations.find(c => c.id === cid).sendError, resumed.error)
+  assert.equal(recreated.instance.status, 'online')
+  assert.equal(recreated.instance.error, null)
+  assert.equal(attempts.filter(a => a.id === id && a.recipientPubKey === bob.publicKey).length, 1)
+  assert.equal(attempts.filter(a => a.id === id && a.recipientPubKey === charlie.publicKey).length, 2)
+  assert.equal(attempts.filter(a => a.id === id && a.recipientPubKey === dave.publicKey).length, 1)
+  rejectRecipient = undefined
+  await recreated.instance.retry(id)
+  await recreated.synchronize()
+  const delivered = [...recordsFor(alice.publicKey).values()].find(r => r.event.id === id)
+  assert.equal(delivered.error, undefined)
+  assert.equal(delivered.failedRecipients, undefined)
+  assert.equal(recreated.instance.model.messages.find(m => m.id === id).delivery, 'sent')
+  assert.equal(recreated.instance.model.conversations.find(c => c.id === cid).sendError, undefined)
+  assert.equal(attempts.filter(a => a.id === id && a.recipientPubKey === bob.publicKey).length, 2)
+  assert.equal(attempts.filter(a => a.id === id && a.recipientPubKey === charlie.publicKey).length, 2)
+  assert.equal(attempts.filter(a => a.id === id && a.recipientPubKey === dave.publicKey).length, 1)
+})
+
+test('a thrown send request still allows incoming sync to determine connectivity', async t => {
+  const peer = await engine(charlie)
+  const incoming = await peer.instance.sendText(alice.publicKey, 'Still reachable')
+  await peer.synchronize()
+  const sender = await engine(alice)
+  const failed = await sender.instance.sendText(bob.publicKey, 'The write request fails')
+  t.mock.method(relay, 'storeEncryptedEvent', async (data, proof) => {
+    assert.equal(await authentication.verifyRequestProof('event:send', data, proof), true)
+    throw new Error('Failed to fetch')
+  })
+  await sender.synchronize()
+  assert.equal(sender.instance.model.messages.find(m => m.id === incoming).content, 'Still reachable')
+  assert.equal(sender.instance.model.messages.find(m => m.id === failed).delivery, 'failed')
+  assert.equal(sender.instance.model.conversations.find(c => c.id === bob.publicKey).sendError, 'Failed to fetch')
+  assert.equal(sender.instance.status, 'online')
+  assert.equal(sender.instance.error, null)
+})
+
+for (const method of ['getEventFeed', 'getLegacyInbox']) {
+  for (const failure of ['The relay is unavailable', retiredIdentity]) test(`${method} refusal keeps a global sync error: ${failure}`, async t => {
+    const sender = await engine(alice)
+    t.mock.method(relay, method, async () => ({ success: false, error: failure }))
+    await sender.synchronize()
+    assert.equal(sender.instance.status, 'offline')
+    assert.equal(sender.instance.error, failure)
+    assert.equal(sender.instance.model.conversations.find(c => c.id === alice.publicKey).sendError, undefined)
+  })
+}
 
 test('failure to queue a new message does not publish it to the relay', async () => {
   const sender = await engine(alice)

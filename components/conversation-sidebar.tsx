@@ -34,7 +34,7 @@ export function ConversationRow({ conversation, selected, owner, actions }: {
         <span className="flex items-center gap-2"><span className={`truncate text-sm ${conversation.unreadCount ? "font-semibold text-zinc-100" : "font-medium text-zinc-200"}`}>{conversation.kind === "self" ? "Message yourself" : conversation.name}</span>{conversation.notificationMode === "muted" && <BellOff className="size-3 shrink-0 text-zinc-500" aria-label="Muted" />}<span className="ml-auto shrink-0 text-[10px] text-zinc-500">{last ? messageTime(last.timestamp) : ""}</span></span>
         <span className="mt-1 flex items-center gap-1 text-xs text-zinc-500">
           {outgoing && last?.delivery === "pending" && <Clock3 className="size-3 shrink-0" aria-label="Queued" />}
-          {outgoing && last?.delivery === "failed" && <CircleAlert className="size-3 shrink-0 text-amber-300" aria-label="Send failed" />}
+          {(conversation.sendError || (outgoing && last?.delivery === "failed")) && <CircleAlert className="size-3 shrink-0 text-amber-300" aria-label="Delivery issue in this conversation" />}
           {outgoing && (last?.delivery === "delivered" || last?.delivery === "read") && <CheckCheck className={`size-3 shrink-0 ${last.delivery === "read" ? "text-indigo-300" : ""}`} aria-label={last.delivery} />}
           {last?.attachment && (last.attachment.kind === "voice" ? <Mic className="size-3 shrink-0" /> : <File className="size-3 shrink-0" />)}
           {last?.poll && <BarChart3 className="size-3 shrink-0" />}

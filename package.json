@@ -16,6 +16,7 @@
     "db:migrate:local": "wrangler d1 migrations apply serotine-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply serotine-db --remote",
     "test:browser": "node scripts/browser-smoke.cjs",
+    "test:media": "node scripts/media-smoke.cjs",
     "test:cleanup": "node scripts/chat-cleanup-smoke.cjs",
     "test:recovery": "node scripts/recovery-smoke.cjs"
   },

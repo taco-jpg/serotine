@@ -11,7 +11,9 @@ Browser-based, end-to-end encrypted messaging with device-local identities and a
 - **Mentions:** type `@` in the message box to search conversation members. Use arrow keys and Enter/Tab, or click a result, to insert a mention. Editing or deleting its text removes that notification target.
 - **Replies and pins:** reply to a particular message, jump to the original, and keep important messages in the pinned panel.
 - **Editing and receipts:** edit your own text with an edited label. Sending, relay confirmation, delivery, and optional read receipts are separate states.
-- **Shared files and links:** browse a conversation's attachments and links together. Files are limited to 10 MiB, encrypted in chunks, and checked against a SHA-256 digest before opening or downloading. Supported images and audio have inline previews; other formats download as files.
+- **Shared files and links:** browse a conversation's attachments and links together. Files are limited to 10 MiB, encrypted in chunks, and checked against a SHA-256 digest before opening or downloading. Images and uploaded GIFs display at a useful size; tap or click to open the larger viewer. Supported videos play inline with playback controls, including on phones. Audio has inline controls; unsupported formats retain a download option.
+- **GIF search:** the GIF button searches GIPHY and inserts the selected GIF into your draft for explicit Send. GIPHY GIFs open inline after choosing Load GIF. Searches and loaded GIFs contact GIPHY directly; the relay receives only an encrypted message containing the GIF reference. Search uses the G content rating. See the one-time app key setup below.
+- **File bank:** upload frequently used files and GIFs once, then search, rename, remove, or queue them from any conversation under the same identity. You can also save a selected attachment to the bank before sending. The bank holds up to 100 files and 50 MiB per identity, with the normal 10 MiB per-file limit. Files stay in this browser, survive reloads, and are sent through the normal encrypted attachment flow. Bank files are not included in backups or synchronized to linked devices; keep original copies. Clearing site data removes them.
 - **Adding files:** drop files anywhere in the open chat, paste files into the message box, or use Attach. Up to eight files can wait in the preview queue; each requires an explicit Send. Pending file selections stay in memory and do not survive navigation or reload.
 - **Auto compact files:** an optional browser-local setting losslessly compresses supported files to `.gz` when it saves at least 5% and 1 KiB. Recipients extract the downloaded archive. Photos, audio, video, and common compressed formats keep their original format. Source files up to 50 MiB can be compacted if the result fits the 10 MiB send limit.
 - **Invites:** copy an invitation link containing only your public address. The recipient explicitly adds you; opening a link does not automatically trust an identity.
@@ -65,9 +67,16 @@ For browser integration, run `npx playwright install chromium` once, then `npm r
 
 Run `npm run test:cleanup` for desktop and mobile archive/restore/delete controls, reload persistence, deletion confirmation, and protection against replay or old-backup imports restoring deleted history.
 
-Run `npm run test:recovery` separately to exercise the real mobile restore confirmation, identity archives, permanent retirement, and old-device denial with synthetic identities. Each browser suite starts its own development server; run them sequentially.
+Run `npm run test:recovery` separately to exercise the real mobile restore confirmation, identity archives, permanent retirement, and old-device denial with synthetic identities. Run `npm run test:media` for inline images/videos, file bank persistence, and GIF search/viewing with mocked provider responses. Each browser suite starts its own development server; run them sequentially.
 
 Tests cover the actual Web Crypto and SQLite implementations alongside controlled browser/storage boundaries. They exercise authenticated relay access, replay protection, identity scoping, retained synchronization, group authorization, message controls, attachment integrity, and encrypted backups. Automated tests are not an independent security audit or a substitute for real-device deployment checks.
+
+## GIF provider setup
+
+Create a GIPHY API app in the [GIPHY developer dashboard](https://developers.giphy.com/dashboard/) and set `NEXT_PUBLIC_GIPHY_API_KEY` in `.env.local` for development or the build environment for deployment. Restart development or rebuild and deploy after setting it. This is a public browser API key, so do not put a private server credential in that variable. Follow GIPHY's production approval and quota requirements for your app.
+
+Without the key, the GIF picker explains that search is not configured; uploaded GIFs, image/video attachments, and the file bank still work. GIPHY failures show a retry action or an ordinary link. GIF metadata and media are fetched directly from GIPHY after user interaction. The picker does not upload chat history, contact addresses, or bank files to GIPHY. Provider GIFs remain references rather than copied assets in the bank, in line with [GIPHY's integration requirements](https://developers.giphy.com/docs/api/).
+
 
 ## Deployment
 

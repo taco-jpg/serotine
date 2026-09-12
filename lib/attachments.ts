@@ -96,9 +96,10 @@ export function attachmentProgress(metadata: AttachmentMeta, chunks: AttachmentC
 }
 
 /** Only these native media formats are previewed. HTML, SVG and PDFs are download-only. */
-export function attachmentPreviewKind(mime: string): "image" | "audio" | null {
+export function attachmentPreviewKind(mime: string): "image" | "audio" | "video" | null {
   if (["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"].includes(mime)) return "image"
   if (["audio/webm", "audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav", "audio/x-wav", "audio/aac", "audio/flac"].includes(mime)) return "audio"
+  if (["video/mp4", "video/webm", "video/ogg", "video/quicktime"].includes(mime)) return "video"
   return null
 }
 

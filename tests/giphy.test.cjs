@@ -1,0 +1,202 @@
+const assert = require('node:assert/strict')
+const { test } = require('node:test')
+const fs = require('node:fs')
+const path = require('node:path')
+const ts = require('typescript')
+const root = path.resolve(__dirname, '..')
+const tick = () => new Promise(resolve => setImmediate(resolve))
+
+function sample(id = 'abc123', overrides = {}) {
+  const rendition = { url: `https://media2.giphy.com/media/${id}/giphy.gif?cid=keep-this&rid=giphy.gif`, width: '400', height: '300' }
+  return { id, title: 'Dancing cat', alt_text: 'A cat dancing', username: 'artist', rating: 'g', images: { fixed_height: rendition, downsized: rendition }, ...overrides }
+}
+function response(data, total = data.length) {
+  return { ok: true, status: 200, json: async () => ({ data, meta: { status: 200 }, pagination: { total_count: total } }) }
+}
+function text(node) {
+  if (Array.isArray(node)) return node.map(text).join('')
+  return typeof node === 'string' || typeof node === 'number' ? String(node) : text(node?.props?.children || [])
+}
+function nodes(node, predicate) {
+  if (Array.isArray(node)) return node.flatMap(child => nodes(child, predicate))
+  if (!node || typeof node !== 'object') return []
+  return [...(predicate(node) ? [node] : []), ...nodes(node.props?.children, predicate)]
+}
+
+function runtime(fetch, key = 'test-only-key') {
+  let active
+  const cache = new Map()
+  const react = Object.fromEntries(['useState', 'useRef', 'useEffect'].map(name => [name, (...args) => active[name](...args)]))
+  function load(filename) {
+    if (!path.extname(filename)) filename += fs.existsSync(filename + '.tsx') ? '.tsx' : '.ts'
+    if (cache.has(filename)) return cache.get(filename).exports
+    const module = { exports: {} }; cache.set(filename, module)
+    const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { fileName: filename, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText
+    new Function('require', 'module', 'exports', 'fetch', 'process', code)(specifier => {
+      if (specifier === 'react') return react
+      if (specifier === '@/components/ui/button') return { Button: 'button' }
+      if (specifier === '@/components/ui/input') return { Input: 'input' }
+      if (specifier === '@/components/ui/dialog') return Object.fromEntries(['Dialog', 'DialogContent', 'DialogDescription', 'DialogHeader', 'DialogTitle', 'DialogTrigger'].map(name => [name, name]))
+      if (specifier.startsWith('@/')) return load(path.join(root, specifier.slice(2)))
+      if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
+      return require(specifier)
+    }, module, module.exports, fetch, { env: { NEXT_PUBLIC_GIPHY_API_KEY: key } })
+    return module.exports
+  }
+  function mount(Component, props) {
+    const slots = [], effects = []
+    let cursor = 0, unmounted = false, lateUpdates = 0
+    const hooks = {
+      useState(initial) {
+        const index = cursor++
+        if (!(index in slots)) slots[index] = initial
+        return [slots[index], value => { if (unmounted) lateUpdates++; slots[index] = typeof value === 'function' ? value(slots[index]) : value }]
+      },
+      useRef(initial) { const index = cursor++; if (!(index in slots)) slots[index] = { current: initial }; return slots[index] },
+      useEffect(effect, dependencies) {
+        const index = cursor++, previous = slots[index]
+        if (!previous || dependencies.some((dependency, i) => dependency !== previous.dependencies[i])) {
+          previous?.cleanup?.()
+          const slot = { dependencies, cleanup: null }; slots[index] = slot
+          effects.push(() => { slot.cleanup = effect() })
+        }
+      },
+    }
+    function view() { active = hooks; cursor = 0; const result = Component(props); while (effects.length) effects.shift()(); return result }
+    return {
+      view,
+      click(label) {
+        const button = nodes(view(), node => node.type === 'button' && (node.props['aria-label'] || text(node)) === label)[0]
+        assert.ok(button, `button: ${label}`); assert.ok(!button.props.disabled)
+        button.props.onClick()
+      },
+      search(query) {
+        nodes(view(), node => node.type === 'input')[0].props.onChange({ target: { value: query } })
+        nodes(view(), node => node.type === 'form')[0].props.onSubmit({ preventDefault() {} })
+        view()
+      },
+      unmount() { for (const slot of slots) slot?.cleanup?.(); unmounted = true },
+      get lateUpdates() { return lateUpdates },
+    }
+  }
+  return { lib: load(path.join(root, 'lib/giphy.ts')), load, mount }
+}
+
+test('recognizes only complete GIPHY page/embed links and persists a canonical ID URL', () => {
+  const { lib } = runtime(() => { throw Error('no network') })
+  for (const link of ['https://giphy.com/gifs/abc123', 'https://www.giphy.com/gifs/dancing-cat-abc123?source=share', ' https://giphy.com/embed/abc123/ ']) assert.equal(lib.parseGiphyUrl(link), 'abc123')
+  for (const link of ['https://giphy.com.evil.test/gifs/abc123', 'https://giphy.com@evil.test/gifs/abc123', 'http://giphy.com/gifs/abc123', 'https://giphy.com:443/gifs/abc123', 'https://giphy.com/gifs/a%2Fb', 'https://giphy.com/gifs/abc123\nmore text', 'See https://giphy.com/gifs/abc123', 'https://giphy.com/gifs/abc123/extra', 'javascript:alert(1)']) assert.equal(lib.parseGiphyUrl(link), null, link)
+  assert.equal(lib.giphyPageUrl('abc123'), 'https://giphy.com/gifs/abc123')
+  assert.throws(() => lib.giphyPageUrl('../a'))
+})
+
+test('search is directly fetched with an exact encoded query, G rating, and no browser credentials', async () => {
+  const calls = [], controller = new AbortController()
+  const { lib } = runtime(async (...args) => { calls.push(args); return response([sample()], 2) })
+  const result = await lib.fetchGiphyPage({ query: 'cat & dog + @artist', signal: controller.signal })
+  const [url, options] = calls[0]
+  assert.equal(url.origin, 'https://api.giphy.com')
+  assert.equal(url.pathname, '/v1/gifs/search')
+  assert.equal(url.searchParams.get('q'), 'cat & dog + @artist')
+  assert.equal(url.searchParams.get('rating'), 'g')
+  assert.equal(url.searchParams.get('customer_id'), null)
+  assert.equal(options.credentials, 'omit')
+  assert.equal(options.referrerPolicy, 'no-referrer')
+  assert.equal(options.cache, 'no-store')
+  assert.equal(options.signal, controller.signal)
+  assert.equal(result.nextOffset, 1)
+  assert.equal(result.gifs[0].imageUrl, sample().images.downsized.url)
+})
+
+test('trending pagination stops at the provider limit and preserves provider order', async () => {
+  const calls = []
+  const { lib } = runtime(async url => { calls.push(url); return response([sample('second'), sample('first')], 900) })
+  const page = await lib.fetchGiphyPage({ offset: 498 })
+  assert.equal(calls[0].pathname, '/v1/gifs/trending')
+  assert.equal(calls[0].searchParams.has('q'), false)
+  assert.deepEqual(page.gifs.map(gif => gif.id), ['second', 'first'])
+  assert.equal(page.nextOffset, null)
+  await assert.rejects(lib.fetchGiphyPage({ offset: 500 }), /No more/)
+  await assert.rejects(lib.fetchGiphyPage({ query: 'a'.repeat(51) }), /50 characters/)
+  assert.equal(calls.length, 1)
+})
+
+test('missing keys make no request and provider rate/auth failures are actionable', async () => {
+  const missing = runtime(() => { throw Error('must not fetch') }, '').lib
+  assert.equal(missing.hasGiphyApiKey(), false)
+  await assert.rejects(missing.fetchGiphyPage({}), /not been enabled/)
+  await assert.rejects(runtime(async () => ({ ok: false, status: 429 })).lib.fetchGiphyPage({}), /search limit/)
+  await assert.rejects(runtime(async () => ({ ok: false, status: 403 })).lib.fetchGiphyPage({}), /current GIPHY key/)
+})
+
+test('provider content fails closed on ratings, unexpected IDs, and unsafe media origins', async () => {
+  for (const rating of ['r', 'pg-13', undefined]) await assert.rejects(runtime(async () => response(sample('abc123', { rating }))).lib.fetchGiphyGif('abc123'), /content filter/)
+  await assert.rejects(runtime(async () => response(sample('other'))).lib.fetchGiphyGif('abc123'), /different GIF/)
+  const bad = sample('abc123', { images: { fixed_height: { url: 'https://media2.giphy.com.evil.test/gif', width: 10, height: 10 } } })
+  await assert.rejects(runtime(async () => response(bad)).lib.fetchGiphyGif('abc123'), /unavailable image/)
+  await assert.rejects(runtime(() => { throw Error('must not fetch') }).lib.fetchGiphyGif('../search'), /Invalid GIF ID/)
+})
+
+test('received GIFs have no remote media or fetch before consent; hide/unmount aborts late loads', async () => {
+  const calls = []
+  const r = runtime((url, options) => new Promise(resolve => calls.push({ url, options, resolve })))
+  const { GifMessage } = r.load(path.join(root, 'components/chat/gif-message.tsx'))
+  const element = GifMessage({ id: 'abc123' }), h = r.mount(element.type, element.props)
+  h.view()
+  assert.equal(calls.length, 0)
+  assert.equal(nodes(h.view(), node => ['img', 'video', 'iframe'].includes(node.type)).length, 0)
+  h.click('Load GIF'); h.view()
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url.pathname, '/v1/gifs/abc123')
+  h.click('Hide GIF'); h.view()
+  assert.equal(calls[0].options.signal.aborted, true)
+  calls[0].resolve(response(sample()))
+  await tick()
+  assert.equal(nodes(h.view(), node => node.type === 'img').length, 0)
+  h.click('Load GIF'); h.view()
+  h.unmount()
+  assert.equal(calls[1].options.signal.aborted, true)
+  calls[1].resolve(response(sample()))
+  await tick()
+  assert.equal(h.lateUpdates, 0)
+})
+
+test('received GIF renders at a useful size after loading and recovers from broken media', async () => {
+  const r = runtime(async () => response(sample()))
+  const { GifMessage } = r.load(path.join(root, 'components/chat/gif-message.tsx'))
+  const element = GifMessage({ id: 'abc123' }), h = r.mount(element.type, element.props)
+  h.click('Load GIF'); h.view(); await tick()
+  const img = nodes(h.view(), node => node.type === 'img')[0]
+  assert.equal(img.props.src, sample().images.downsized.url)
+  assert.equal(img.props.width, 400)
+  assert.equal(img.props.referrerPolicy, 'no-referrer')
+  img.props.onError()
+  assert.match(text(h.view()), /could not be displayed/)
+  assert.equal(nodes(h.view(), node => node.type === 'img').length, 0)
+  h.click('Try again'); h.view(); await tick()
+  assert.equal(nodes(h.view(), node => node.type === 'img').length, 1)
+  h.unmount()
+})
+
+test('picker only searches on intent, ignores stale responses, and stages a canonical URL', async () => {
+  const calls = [], selected = []
+  const r = runtime((url, options) => new Promise(resolve => calls.push({ url, options, resolve })))
+  const { GifPicker } = r.load(path.join(root, 'components/chat/gif-picker.tsx'))
+  const outer = r.mount(GifPicker, { onSelectGif: url => selected.push(url) })
+  outer.view().props.onOpenChange(true)
+  const element = nodes(outer.view(), node => typeof node.type === 'function' && node.type.name === 'GifSearch')[0]
+  const h = r.mount(element.type, element.props)
+  h.view()
+  assert.equal(calls.length, 0)
+  h.search('old'); h.search('new')
+  assert.equal(calls[0].options.signal.aborted, true)
+  calls[1].resolve(response([sample('new123')], 1)); await tick()
+  calls[0].resolve(response([sample('old123')], 1)); await tick()
+  assert.deepEqual(nodes(h.view(), node => node.type === 'img').map(node => node.props.src), [sample('new123').images.fixed_height.url])
+  assert.deepEqual(selected, [])
+  h.click('Choose Dancing cat')
+  assert.deepEqual(selected, ['https://giphy.com/gifs/new123'])
+  assert.equal(outer.view().props.open, false)
+  h.unmount(); outer.unmount()
+  assert.equal(h.lateUpdates, 0)
+})

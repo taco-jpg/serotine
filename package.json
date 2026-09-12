@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "db:migrate:local": "wrangler d1 migrations apply serotine-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply serotine-db --remote",
-    "test:browser": "node scripts/browser-smoke.cjs"
+    "test:browser": "node scripts/browser-smoke.cjs",
+    "test:recovery": "node scripts/recovery-smoke.cjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

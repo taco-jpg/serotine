@@ -4,10 +4,13 @@ import { getDB, RelayConfigurationError, type D1DatabaseBinding } from "@/lib/db
 import { verifyRequestProof } from "@/lib/request-auth"
 import { relayFailureKind } from "@/lib/relay-diagnostics"
 import { ensureEventRelaySchema } from "@/lib/event-relay-schema"
+import { ensureIdentityRetirementSchema } from "@/lib/identity-retirement-schema"
 import { AUTH_WINDOW_MS, EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_EVENT_SENDS_PER_MINUTE, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, MESSAGE_PAGE_SIZE, PUBLIC_KEY_PATTERN, type RequestProof, type InboxRequest, type InboxCursor, type EventFeedRequest, type LegacyInboxCursor, type LegacyInboxRequest } from "@/lib/protocol"
 
 class RequestError extends Error {}
 class RateLimitError extends RequestError {}
+const RETIRED_IDENTITY = "This identity has been permanently retired. Use your new address; old backups and linked devices cannot access this relay."
+const RETIRED_RECIPIENT = "This contact's address has been permanently retired. Ask them for their new address."
 const MAX_PENDING_BYTES = 20 * 1024 * 1024
 type Failure = { success: false; error: string; retryAfterMs?: number }
 export interface RelayMessage {
@@ -54,6 +57,10 @@ function checkPacket(packet: string, limit = MAX_PACKET_LENGTH) {
 async function authorize(action: string, payload: unknown, proof: RequestProof): Promise<D1DatabaseBinding> {
   if (!await verifyRequestProof(action, payload, proof)) throw new RequestError("Identity verification failed. Check your device clock and reopen the app.")
   const db = await getDB()
+  await ensureIdentityRetirementSchema(db)
+  // This also covers direct Server Action calls, not just the HTTP route.
+  // A fresh signed retirement retry stays available after a lost response.
+  if (action !== "identity:retire") await requireActiveIdentity(db, proof.publicKey)
   const now = Date.now()
   await db.prepare("DELETE FROM RequestNonce WHERE expiresAt < ?").bind(now).run()
   // Retain future-dated proofs until their entire acceptance window has elapsed.
@@ -61,6 +68,27 @@ async function authorize(action: string, payload: unknown, proof: RequestProof):
     .bind(proof.publicKey, proof.nonce, action, Math.max(now, proof.timestamp) + AUTH_WINDOW_MS).run()
   if (result.meta.changes !== 1) throw new RequestError("This request was already used. Please retry.")
   return db
+}
+async function requireActiveIdentity(db: D1DatabaseBinding, publicKey: string, recipient = false) {
+  const retired = await db.prepare("SELECT publicKey FROM RetiredIdentity WHERE publicKey = ?").bind(publicKey).first()
+  if (retired) throw new RequestError(recipient ? RETIRED_RECIPIENT : RETIRED_IDENTITY)
+}
+async function requireActiveParticipants(db: D1DatabaseBinding, sender: string, recipient: string) {
+  await requireActiveIdentity(db, sender)
+  await requireActiveIdentity(db, recipient, true)
+}
+
+/** The signed identity can retire only itself. No key or history is deleted. */
+export async function retireIdentity(data: Record<string, never>, proof: RequestProof): Promise<{ success: true } | Failure> {
+  try {
+    if (!data || typeof data !== "object" || Array.isArray(data) || Object.keys(data).length !== 0) {
+      throw new RequestError("Invalid identity retirement request.")
+    }
+    const db = await authorize("identity:retire", data, proof)
+    await db.prepare("INSERT OR IGNORE INTO RetiredIdentity(publicKey, retiredAt) VALUES (?, ?)")
+      .bind(proof.publicKey, Date.now()).run()
+    return { success: true }
+  } catch (error) { return failure(error) }
 }
 async function limitWrites(db: D1DatabaseBinding, proof: RequestProof, action: string, limit: number) {
   const row = await db.prepare("SELECT COUNT(*) AS count FROM RequestNonce WHERE publicKey = ? AND action = ? AND expiresAt > ?")
@@ -74,6 +102,7 @@ export async function storeEncryptedMessage(data: { id: string; recipientPubKey:
     const packetBytes = checkPacket(data.encryptedData)
     if (!ID_PATTERN.test(data.id) || data.recipientPubKey === proof.publicKey) throw new RequestError("Invalid message.")
     const db = await authorize("message:send", data, proof)
+    await requireActiveIdentity(db, data.recipientPubKey, true)
     await limitWrites(db, proof, "message:send", 60)
     const now = Date.now()
     await db.prepare("DELETE FROM RelayMessage WHERE expiresAt <= ?").bind(now).run()
@@ -86,9 +115,11 @@ export async function storeEncryptedMessage(data: { id: string; recipientPubKey:
         SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(CAST(encryptedData AS BLOB))), 0) AS bytes
         FROM RelayMessage WHERE senderPubKey = ?
       ) AS pending WHERE pending.count < 500 AND pending.bytes + ? <= ?
+        AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?))
       ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING`)
-      .bind(data.id, proof.publicKey, data.recipientPubKey, data.encryptedData, now, now + 7 * 86400_000, proof.publicKey, packetBytes, MAX_PENDING_BYTES).run()
+      .bind(data.id, proof.publicKey, data.recipientPubKey, data.encryptedData, now, now + 7 * 86400_000, proof.publicKey, packetBytes, MAX_PENDING_BYTES, proof.publicKey, data.recipientPubKey).run()
     if (inserted.meta.changes !== 1) {
+      await requireActiveParticipants(db, proof.publicKey, data.recipientPubKey)
       // Another request may have saved this same stable message ID while we waited.
       const duplicate = await db.prepare("SELECT id FROM RelayMessage WHERE recipientPubKey = ? AND senderPubKey = ? AND id = ?")
         .bind(data.recipientPubKey, proof.publicKey, data.id).first()
@@ -108,9 +139,11 @@ export async function getMyMessages(data: InboxRequest, proof: RequestProof): Pr
     const after = data.after
     const { results } = await db.prepare(`SELECT id, senderPubKey, recipientPubKey, encryptedData, createdAt FROM RelayMessage
       WHERE recipientPubKey = ? AND senderPubKey = ? AND expiresAt > ?
+        AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey = ?)
       ${after ? "AND (createdAt > ? OR (createdAt = ? AND id > ?))" : ""}
       ORDER BY createdAt ASC, id ASC LIMIT ?`)
-      .bind(proof.publicKey, data.senderPubKey, Date.now(), ...(after ? [after.createdAt, after.createdAt, after.id] : []), MESSAGE_PAGE_SIZE).all<RelayMessage>()
+      .bind(proof.publicKey, data.senderPubKey, Date.now(), proof.publicKey, ...(after ? [after.createdAt, after.createdAt, after.id] : []), MESSAGE_PAGE_SIZE).all<RelayMessage>()
+    if (results.length === 0) await requireActiveIdentity(db, proof.publicKey)
     const last = results.at(-1)
     return { success: true, messages: results, nextCursor: results.length === MESSAGE_PAGE_SIZE && last ? { createdAt: last.createdAt, id: last.id } : null }
   } catch (error) { return failure(error) }
@@ -128,9 +161,11 @@ export async function getLegacyInbox(data: LegacyInboxRequest, proof: RequestPro
     const db = await authorize("message:inbox", data, proof)
     const { results } = await db.prepare(`SELECT id, senderPubKey, recipientPubKey, encryptedData, createdAt FROM RelayMessage
       WHERE recipientPubKey = ? AND expiresAt > ?
+        AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey = ?)
       ${after ? "AND (createdAt > ? OR (createdAt = ? AND id > ?) OR (createdAt = ? AND id = ? AND senderPubKey > ?))" : ""}
       ORDER BY createdAt ASC, id ASC, senderPubKey ASC LIMIT ?`)
-      .bind(proof.publicKey, Date.now(), ...(after ? [after.createdAt, after.createdAt, after.id, after.createdAt, after.id, after.senderPubKey] : []), MESSAGE_PAGE_SIZE).all<RelayMessage>()
+      .bind(proof.publicKey, Date.now(), proof.publicKey, ...(after ? [after.createdAt, after.createdAt, after.id, after.createdAt, after.id, after.senderPubKey] : []), MESSAGE_PAGE_SIZE).all<RelayMessage>()
+    if (results.length === 0) await requireActiveIdentity(db, proof.publicKey)
     const last = results.at(-1)
     return { success: true, messages: results, nextCursor: results.length === MESSAGE_PAGE_SIZE && last ? { createdAt: last.createdAt, id: last.id, senderPubKey: last.senderPubKey } : null }
   } catch (error) { return failure(error) }
@@ -147,6 +182,7 @@ export async function storeEncryptedEvent(data: { id: string; recipientPubKey: s
     const payloadBytes = new TextEncoder().encode(data.encryptedData).byteLength
     if (payloadBytes > MAX_EVENT_PACKET_LENGTH) throw new RequestError("Invalid encrypted event.")
     const db = await authorize("event:send", data, proof)
+    await requireActiveIdentity(db, data.recipientPubKey, true)
     // Larger group transfers pause and resume when this rolling window resets.
     await limitWrites(db, proof, "event:send", MAX_EVENT_SENDS_PER_MINUTE)
     await ensureEventRelaySchema(db)
@@ -161,10 +197,12 @@ export async function storeEncryptedEvent(data: { id: string; recipientPubKey: s
       SELECT ?, ?, ?, ?, ?, ?, ?
       WHERE COALESCE((SELECT eventCount FROM RelayEventUsage WHERE senderPubKey = ?), 0) < ?
         AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= ?
+        AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?))
       ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING`)
       .bind(data.id, proof.publicKey, data.recipientPubKey, data.encryptedData, payloadBytes, now, now + 7 * 86400_000,
-        proof.publicKey, MAX_RETAINED_EVENT_COUNT, proof.publicKey, payloadBytes, MAX_RETAINED_EVENT_BYTES).run()
+        proof.publicKey, MAX_RETAINED_EVENT_COUNT, proof.publicKey, payloadBytes, MAX_RETAINED_EVENT_BYTES, proof.publicKey, data.recipientPubKey).run()
     if (result.meta.changes === 0) {
+      await requireActiveParticipants(db, proof.publicKey, data.recipientPubKey)
       const duplicate = await db.prepare("SELECT id FROM RelayEvent WHERE recipientPubKey = ? AND senderPubKey = ? AND id = ?")
         .bind(data.recipientPubKey, proof.publicKey, data.id).first()
       if (!duplicate) throw new RequestError("Your seven-day relay storage is full. Wait for older messages to expire before sending more files.")
@@ -181,8 +219,10 @@ export async function getEventFeed(data: EventFeedRequest, proof: RequestProof):
     const after = data.after ?? 0
     const { results } = await db.prepare(`SELECT sequence, id, senderPubKey, recipientPubKey, encryptedData, createdAt FROM RelayEvent
       WHERE (recipientPubKey = ? OR senderPubKey = ?) AND sequence > ? AND expiresAt > ?
+        AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey = ?)
       ORDER BY sequence ASC LIMIT ${EVENT_FEED_PAGE_SIZE + 1}`)
-      .bind(proof.publicKey, proof.publicKey, after, Date.now()).all<RelayEvent>()
+      .bind(proof.publicKey, proof.publicKey, after, Date.now(), proof.publicKey).all<RelayEvent>()
+    if (results.length === 0) await requireActiveIdentity(db, proof.publicKey)
     const messages = results.slice(0, EVENT_FEED_PAGE_SIZE)
     return { success: true, messages, nextCursor: messages.at(-1)?.sequence ?? after, hasMore: results.length > EVENT_FEED_PAGE_SIZE }
   } catch (error) { return failure(error) }
@@ -193,8 +233,10 @@ export async function deleteMessage(data: { id: string; senderPubKey: string }, 
     checkPeer(data.senderPubKey)
     if (!ID_PATTERN.test(data.id)) throw new RequestError("Invalid message.")
     const db = await authorize("message:ack", data, proof)
-    await db.prepare("DELETE FROM RelayMessage WHERE id = ? AND senderPubKey = ? AND recipientPubKey = ?")
-      .bind(data.id, data.senderPubKey, proof.publicKey).run()
+    const deleted = await db.prepare(`DELETE FROM RelayMessage WHERE id = ? AND senderPubKey = ? AND recipientPubKey = ?
+      AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey = ?)`)
+      .bind(data.id, data.senderPubKey, proof.publicKey, proof.publicKey).run()
+    if (deleted.meta.changes === 0) await requireActiveIdentity(db, proof.publicKey)
     return { success: true }
   } catch (error) { return failure(error) }
 }
@@ -203,11 +245,14 @@ export async function storeSignal(data: { recipientPubKey: string; encryptedData
   try {
     checkPeer(data.recipientPubKey); checkPacket(data.encryptedData, MAX_SIGNAL_PACKET_LENGTH)
     const db = await authorize("signal:send", data, proof)
+    await requireActiveIdentity(db, data.recipientPubKey, true)
     await limitWrites(db, proof, "signal:send", 20)
     await db.prepare("DELETE FROM RelaySignal WHERE expiresAt <= ?").bind(Date.now()).run()
-    await db.prepare(`INSERT INTO RelaySignal (senderPubKey, recipientPubKey, encryptedData, expiresAt) VALUES (?, ?, ?, ?)
+    const inserted = await db.prepare(`INSERT INTO RelaySignal (senderPubKey, recipientPubKey, encryptedData, expiresAt)
+      SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?))
       ON CONFLICT(senderPubKey, recipientPubKey) DO UPDATE SET encryptedData = excluded.encryptedData, expiresAt = excluded.expiresAt`)
-      .bind(proof.publicKey, data.recipientPubKey, data.encryptedData, Date.now() + 60_000).run()
+      .bind(proof.publicKey, data.recipientPubKey, data.encryptedData, Date.now() + 60_000, proof.publicKey, data.recipientPubKey).run()
+    if (inserted.meta.changes !== 1) await requireActiveParticipants(db, proof.publicKey, data.recipientPubKey)
     return { success: true }
   } catch (error) { return failure(error) }
 }
@@ -216,8 +261,10 @@ export async function getSignal(data: { senderPubKey: string }, proof: RequestPr
   try {
     checkPeer(data.senderPubKey)
     const db = await authorize("signal:read", data, proof)
-    const signal = await db.prepare("SELECT encryptedData FROM RelaySignal WHERE senderPubKey = ? AND recipientPubKey = ? AND expiresAt > ?")
-      .bind(data.senderPubKey, proof.publicKey, Date.now()).first<{ encryptedData: string }>()
+    const signal = await db.prepare(`SELECT encryptedData FROM RelaySignal WHERE senderPubKey = ? AND recipientPubKey = ? AND expiresAt > ?
+      AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey = ?)`)
+      .bind(data.senderPubKey, proof.publicKey, Date.now(), proof.publicKey).first<{ encryptedData: string }>()
+    if (signal === null) await requireActiveIdentity(db, proof.publicKey)
     return { success: true, signal }
   } catch (error) { return failure(error) }
 }

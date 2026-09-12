@@ -133,6 +133,41 @@ test('another identity cannot be replaced by a full backup', async () => {
   assert.deepEqual(await identity.loadIdentity(), bob)
 })
 
+test('confirmed desktop-to-mobile restore preserves the phone identity and its isolated history', async () => {
+  local.set('serotine_identity_v2', JSON.stringify(bob))
+  const phoneMessage = { id: crypto.randomUUID(), peerPubKey: charlie.publicKey, senderPubKey: bob.publicKey, content: 'Only on the phone identity', timestamp: Date.now() }
+  await storage.importMessagesToStorage(bob.publicKey, [phoneMessage])
+  identity.saveContacts(bob.publicKey, [{ pub: charlie.publicKey, alias: 'Phone contact' }])
+  await backup.restoreBackup(encrypted, password, { replaceIdentity: bob.publicKey })
+  assert.deepEqual(await identity.loadIdentity(), alice)
+  assert.equal((await identity.loadArchivedIdentities())[0].publicKey, bob.publicKey)
+  assert.deepEqual(await storage.exportAllMessagesFromStorage(bob.publicKey), [phoneMessage])
+  assert.deepEqual(await storage.exportAllMessagesFromStorage(alice.publicKey), expectedMessages)
+  assert.deepEqual(identity.loadContacts(bob.publicKey), [{ pub: charlie.publicKey, alias: 'Phone contact' }])
+  assert.deepEqual(identity.loadContacts(alice.publicKey), [{ pub: bob.publicKey, alias: 'Bob' }])
+})
+
+test('confirmation never bypasses backup ownership validation', async () => {
+  local.set('serotine_identity_v2', JSON.stringify(bob))
+  const invalid = snapshot(); invalid.messaging.owner = charlie.publicKey
+  await assert.rejects(backup.restoreBackup(await encryptPayload(invalid), password, { replaceIdentity: bob.publicKey }), /different identity|invalid/i)
+  assert.equal(writes, 0)
+  assert.deepEqual(await identity.loadIdentity(), bob)
+})
+
+test('chat storage failure during a switch leaves the old identity active for retry', async () => {
+  local.set('serotine_identity_v2', JSON.stringify(bob))
+  const original = events.importMessagingSnapshot
+  events.importMessagingSnapshot = async () => { throw new Error('Quota exceeded') }
+  try {
+    await assert.rejects(backup.restoreBackup(encrypted, password, { replaceIdentity: bob.publicKey }), /active identity has not changed/i)
+    assert.deepEqual(await identity.loadIdentity(), bob)
+    assert.equal((await identity.loadArchivedIdentities())[0].publicKey, bob.publicKey)
+  } finally { events.importMessagingSnapshot = original }
+  await backup.restoreBackup(encrypted, password, { replaceIdentity: bob.publicKey })
+  assert.deepEqual(await identity.loadIdentity(), alice)
+})
+
 test('ownership and record validation happens before any storage mutation even when the encryption is valid', async () => {
   const wrongOwner = snapshot(); wrongOwner.messaging.owner = bob.publicKey
   await assert.rejects(backup.restoreBackup(await encryptPayload(wrongOwner), password), /different identity|invalid/i)

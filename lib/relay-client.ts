@@ -1,7 +1,7 @@
 import type * as Actions from "@/app/actions"
 import { EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, MESSAGE_PAGE_SIZE, PUBLIC_KEY_PATTERN, type RequestProof } from "./protocol"
 
-type RelayAction = "message:send" | "message:list" | "message:inbox" | "message:ack" | "signal:send" | "signal:read" | "event:send" | "event:sync"
+type RelayAction = "message:send" | "message:list" | "message:inbox" | "message:ack" | "signal:send" | "signal:read" | "event:send" | "event:sync" | "identity:retire"
 type JsonObject = Record<string, unknown>
 const TIMEOUT_MS = 15_000
 const UNEXPECTED = "The messaging relay returned an unexpected response. Reload Serotine and reconnect. Your saved messages are still on this browser."
@@ -114,3 +114,4 @@ export const getSignal: typeof Actions.getSignal = (data, proof) => relay("signa
 export const storeEncryptedEvent: typeof Actions.storeEncryptedEvent = (data, proof) => relay("event:send", data, proof)
 export const getEventFeed: typeof Actions.getEventFeed = (data, proof) => relay("event:sync", data, proof)
 export const getLegacyInbox: typeof Actions.getLegacyInbox = (data, proof) => relay("message:inbox", data, proof)
+export const retireIdentity: typeof Actions.retireIdentity = (data, proof) => relay("identity:retire", data, proof)

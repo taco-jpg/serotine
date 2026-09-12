@@ -338,3 +338,21 @@ test('missing relay tables and bindings report actionable setup errors without e
     assert.doesNotMatch(missingTable.error, /RequestNonce|SELECT|DELETE/)
   } finally { console.error = old }
 })
+
+test('daily database limits and nested overload errors are explained without returning provider details', async () => {
+  const old = console.error
+  const logs = []
+  console.error = (...args) => logs.push(args.join(' '))
+  try {
+    dbFailure = new Error('D1_ERROR', { cause: new Error('Daily write quota exceeded; SELECT private-packet') })
+    const quota = await inbox()
+    assert.equal(quota.success, false)
+    assert.match(quota.error, /daily database allowance/)
+    assert.doesNotMatch(quota.error, /SELECT|private-packet/)
+    dbFailure = new Error('D1_ERROR: Database is overloaded; private-address')
+    assert.match((await inbox()).error, /relay is busy/)
+    dbFailure = new Error('unknown private-packet')
+    assert.match((await inbox()).error, /temporarily unavailable/)
+    assert.doesNotMatch(logs.join('\n'), /SELECT|private-address|private-packet/)
+  } finally { console.error = old }
+})

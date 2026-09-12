@@ -55,10 +55,12 @@ async function inbound(content = 'Incoming message', id = crypto.randomUUID()) {
     encryptedData: await cryptoFunctions.encryptForPeer(JSON.stringify(envelope), bob.pair.privateKey, alice.publicKey), createdAt: Date.now() }
 }
 function harness(options = {}) {
-  const slots = [], effects = [], timers = new Map(), events = new EventTarget()
+  const slots = [], effects = [], timers = new Map(), events = new EventTarget(), documentEvents = new EventTarget()
+  Object.defineProperty(documentEvents, 'visibilityState', { get: () => options.hidden ? 'hidden' : 'visible' })
+  const navigator = { get onLine() { return options.online !== false } }
   let historyChanged
   const records = new Map((options.history || []).map(item => [`${item.senderPubKey}:${item.id}`, structuredClone(item)]))
-  const calls = { sends: [], saves: [], acknowledgments: [], lists: 0, lateUpdates: 0 }
+  const calls = { sends: [], saves: [], acknowledgments: [], lists: 0, signals: 0, lateUpdates: 0 }
   let cursor = 0, stopped = false, timerId = 0, target = bob.publicKey
   const react = {
     useState(initial) {
@@ -91,8 +93,8 @@ function harness(options = {}) {
       return options.send ? options.send(data, proof) : { success: true }
     },
     async deleteMessage(data) { calls.acknowledgments.push(data); return options.ack ? options.ack(data) : { success: true } },
-    async getSignal() { return options.signal ? options.signal() : { success: true, signal: null } },
-    async storeSignal() { return { success: true } },
+    async getSignal() { calls.signals++; return options.signal ? options.signal() : { success: true, signal: null } },
+    async storeSignal(data) { return options.publishSignal ? options.publishSignal(data) : { success: true } },
   }
   const storage = {
     async migrateLegacyHistory() {},
@@ -105,12 +107,13 @@ function harness(options = {}) {
       records.set(`${item.senderPubKey}:${item.id}`, structuredClone(item))
     },
   }
-  const hook = loader({ react, '@/app/actions': actions, '@/lib/storage': storage,
+  const hook = loader({ react, '@/lib/relay-client': actions, '@/lib/storage': storage,
     '@/lib/crypto': { ...cryptoFunctions, decryptFromPeer: (...args) => options.decrypt ? options.decrypt(...args) : cryptoFunctions.decryptFromPeer(...args) },
     '@/lib/identity': { loadIdentity: async () => options.loadIdentity ? options.loadIdentity() : alice, validateAddress: async address => address.toLowerCase() },
     '@/config/webrtc': { RTC_CONFIG: {} },
     '@/lib/history-events': { subscribeToHistory(owner, peer, refresh) { historyChanged = refresh; return () => { historyChanged = null } } },
-  }, { window: events, navigator: { onLine: true }, RTCPeerConnection: options.RTC, BroadcastChannel: undefined,
+  }, { window: events, document: documentEvents, navigator, RTCPeerConnection: options.RTC, BroadcastChannel: undefined,
+    Date: class extends Date { static now() { return options.now ?? Date.now() } },
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id },
     clearTimeout(id) { timers.delete(id) },
   })(path.join(root, 'hooks/use-p2p-chat.ts')).useP2PChat
@@ -121,7 +124,7 @@ function harness(options = {}) {
     return result
   }
   const api = {
-    options, calls, records, timers, view, events,
+    options, calls, records, timers, view, events, documentEvents,
     refreshHistory() { historyChanged?.() },
     runDelay(delay) { const entry = [...timers.entries()].find(([, timer]) => timer.delay === delay); assert.ok(entry, "timer missing: " + delay); const [id, timer] = entry; timers.delete(id); timer.callback() },
     runTimer() { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.callback() },
@@ -426,4 +429,150 @@ test('retry skips the relay when another tab already confirmed the same saved me
   assert.equal(h.calls.sends.length, 0)
   assert.equal(h.view().messages[0].delivery, 'sent')
   await assert.rejects(h.view().sendMessage('Altered text', sent), /original message/)
+})
+
+test('repeated relay failures back off to one minute and reset after recovery', async t => {
+  let peerAttempts = 0
+  const options = { list: async () => { throw new Error('Unavailable') }, RTC: class { constructor() { peerAttempts++; throw new Error('Unexpected negotiation') } } }
+  const h = harness(options)
+  t.after(() => h.unmount())
+  for (const delay of [8000, 16000, 32000, 60000, 60000]) {
+    await until(() => [...h.timers.values()].some(timer => timer.delay === delay))
+    assert.equal(h.view().status, 'offline')
+    assert.equal(peerAttempts + h.calls.signals, 0, 'failed polling must not launch signaling')
+    h.runDelay(delay)
+  }
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 60000))
+  options.list = async () => ({ success: true, messages: [] })
+  h.runDelay(60000)
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 3000))
+  assert.equal(h.view().status, 'relay')
+  options.list = async () => { throw new Error('Second outage') }
+  h.runDelay(3000)
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 8000))
+})
+
+test('hidden tabs slow polling and skip signaling; visibility restores a single immediate poll', async t => {
+  let peerAttempts = 0
+  const options = { hidden: true, RTC: class { constructor() { peerAttempts++; throw new Error('Optional direct connection') } } }
+  const h = harness(options)
+  t.after(() => h.unmount())
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 30000))
+  assert.equal(peerAttempts + h.calls.signals, 0)
+  options.hidden = false
+  h.documentEvents.dispatchEvent(new Event('visibilitychange'))
+  await until(() => h.calls.lists === 2 && [...h.timers.values()].some(timer => timer.delay === 3000))
+  await until(() => peerAttempts + h.calls.signals > 0)
+  assert.equal([...h.timers.values()].filter(timer => timer.delay === 30000).length, 0)
+  options.hidden = true
+  h.documentEvents.dispatchEvent(new Event('visibilitychange'))
+  assert.equal(h.calls.lists, 2, 'hiding a tab should reschedule without an extra request')
+  assert.equal([...h.timers.values()].filter(timer => timer.delay === 3000).length, 0)
+  assert.equal([...h.timers.values()].filter(timer => timer.delay === 30000).length, 1)
+})
+
+test('offline tabs make no relay requests and going online does not resend failed messages', async t => {
+  let peerAttempts = 0
+  const failed = { id: crypto.randomUUID(), senderPubKey: alice.publicKey, peerPubKey: bob.publicKey, content: 'Retry deliberately', timestamp: Date.now(), delivery: 'failed' }
+  const options = { online: false, history: [failed], RTC: class { constructor() { peerAttempts++; throw new Error('Optional direct connection') } } }
+  const h = harness(options)
+  t.after(() => h.unmount())
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 8000))
+  assert.equal(h.calls.lists + peerAttempts + h.calls.signals, 0)
+  h.runDelay(8000)
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 16000))
+  assert.equal(h.calls.lists + peerAttempts + h.calls.signals, 0)
+  options.online = true
+  h.events.dispatchEvent(new Event('online'))
+  await until(() => h.view().status === 'relay')
+  assert.equal(h.calls.lists, 1)
+  assert.equal(h.calls.sends.length, 0)
+  assert.equal(h.view().messages[0].delivery, 'failed')
+})
+
+test('empty inbox cadence grows to fifteen seconds and resets for activity', async t => {
+  const options = {}
+  const h = harness(options)
+  t.after(() => h.unmount())
+  for (const delay of [3000, 6000, 9000, 12000, 15000]) {
+    await until(() => [...h.timers.values()].some(timer => timer.delay === delay))
+    h.runDelay(delay)
+  }
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 15000))
+  options.incoming = [await inbound('Back to active chatting')]
+  h.runDelay(15000)
+  await until(() => h.view().messages.length === 1 && [...h.timers.values()].some(timer => timer.delay === 3000))
+  options.incoming = []
+  h.events.dispatchEvent(new Event('focus'))
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 3000))
+  h.runDelay(3000)
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 6000))
+  await h.view().sendMessage('I am active too')
+  await until(() => [...h.timers.values()].some(timer => timer.delay === 3000))
+  assert.equal([...h.timers.values()].filter(timer => timer.delay === 6000).length, 0)
+})
+
+test('sending remains independent of an unfinished inbox request', async t => {
+  const h = harness({ list: () => new Promise(() => {}) })
+  t.after(() => h.unmount())
+  await until(() => h.view().ready && h.calls.lists === 1)
+  await h.view().sendMessage('Send while polling is stalled')
+  assert.equal(h.calls.sends.length, 1)
+  assert.equal(h.view().messages[0].delivery, 'sent')
+  assert.equal(h.calls.lists, 1, 'send activity must not start a second concurrent inbox request')
+})
+
+test('signaling checks are throttled separately from active inbox polling', async t => {
+  const originalAlice = alice, originalBob = bob
+  if (alice.publicKey < bob.publicKey) [alice, bob] = [bob, alice]
+  let h
+  try {
+    const options = { now: Date.now(), RTC: class {} }
+    h = harness(options)
+    await until(() => h.calls.signals === 1 && [...h.timers.values()].some(timer => timer.delay === 3000))
+    options.now += 3000
+    h.runDelay(3000)
+    await until(() => [...h.timers.values()].some(timer => timer.delay === 6000))
+    assert.equal(h.calls.signals, 1)
+    options.now += 6000
+    h.runDelay(6000)
+    await until(() => [...h.timers.values()].some(timer => timer.delay === 9000))
+    assert.equal(h.calls.signals, 1)
+    options.now += 9000
+    h.runDelay(9000)
+    await until(() => h.calls.signals === 2)
+  } finally { h?.unmount(); alice = originalAlice; bob = originalBob }
+})
+
+test('a waiting answer is applied before an expired offer is replaced', async () => {
+  const originalAlice = alice, originalBob = bob
+  if (alice.publicKey > bob.publicKey) [alice, bob] = [bob, alice]
+  let h
+  try {
+    const peers = []
+    let packet
+    class RTC {
+      constructor() { peers.push(this); this.iceGatheringState = 'complete'; this.signalingState = 'stable' }
+      createDataChannel() { return { readyState: 'connecting', close() {} } }
+      async createOffer() { return { type: 'offer', sdp: 'test offer' } }
+      async setLocalDescription(description) { this.localDescription = { toJSON: () => description }; this.signalingState = 'have-local-offer' }
+      async setRemoteDescription(description) { this.remoteDescription = description; this.signalingState = 'stable' }
+      close() { this.closed = true }
+    }
+    const options = { now: Date.now(), RTC, publishSignal: async data => {
+      packet = JSON.parse(await cryptoFunctions.decryptFromPeer(data.encryptedData, bob.pair.privateKey, alice.publicKey))
+      return { success: true }
+    } }
+    h = harness(options)
+    await until(() => packet && h.calls.signals === 1 && [...h.timers.values()].some(timer => timer.delay === 3000))
+    const answer = { ...packet, sender: bob.publicKey, recipient: alice.publicKey, description: { type: 'answer', sdp: 'test answer' } }
+    const encryptedData = await cryptoFunctions.encryptForPeer(JSON.stringify(answer), bob.pair.privateKey, alice.publicKey)
+    options.signal = async () => ({ success: true, signal: { encryptedData } })
+    options.now += 30_000
+    h.runDelay(3000)
+    await until(() => peers[0].remoteDescription)
+    assert.equal(peers.length, 1, 'a valid waiting answer must preserve its matching offer')
+    assert.equal(peers[0].closed, undefined)
+    assert.equal(peers[0].remoteDescription.type, 'answer')
+  } finally { h?.unmount(); alice = originalAlice; bob = originalBob }
 })

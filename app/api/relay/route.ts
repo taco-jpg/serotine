@@ -2,13 +2,14 @@ import {
   deleteMessage, getMyMessages, getSignal, storeEncryptedMessage, storeSignal,
   getEventFeed, getLegacyInbox, storeEncryptedEvent,
 } from "@/app/actions"
-import { ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "@/lib/protocol"
+import { ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "@/lib/protocol"
 
 export const dynamic = "force-dynamic"
 
-// Includes the encrypted packet (up to 64,000 characters), proof, and JSON framing.
-const MAX_BODY_BYTES = 80 * 1024
+// Legacy files remain inline; event chunks and signals keep their smaller limits.
+const MAX_BODY_BYTES = MAX_PACKET_LENGTH + 16 * 1024
 const MAX_EVENT_BODY_BYTES = 144 * 1024
+const MAX_CONTROL_BODY_BYTES = 80 * 1024
 const INVALID_REQUEST = "Invalid messaging request. Reload Serotine and try again."
 
 type JsonObject = Record<string, unknown>
@@ -25,8 +26,8 @@ function peer(value: unknown): value is string {
 function id(value: unknown): value is string {
   return typeof value === "string" && ID_PATTERN.test(value)
 }
-function packet(value: unknown, maximum = MAX_PACKET_LENGTH): value is string {
-  return typeof value === "string" && value.length >= 32 && value.length <= maximum
+function packet(value: unknown, limit = MAX_PACKET_LENGTH): value is string {
+  return typeof value === "string" && value.length >= 32 && value.length <= limit
 }
 function proofShape(value: unknown): value is RequestProof {
   return object(value) && keys(value, ["publicKey", "timestamp", "nonce", "signature"])
@@ -54,31 +55,35 @@ function failure(error: string, status: number) {
 }
 
 class BodyTooLarge extends Error {}
-async function readBody(request: Request, maximum = MAX_BODY_BYTES): Promise<unknown> {
+async function readBody(request: Request, maximum: number): Promise<{ value: unknown; byteLength: number }> {
   const declaredLength = request.headers.get("content-length")
   if (declaredLength && /^\d+$/.test(declaredLength) && Number(declaredLength) > maximum) {
     throw new BodyTooLarge()
   }
   if (!request.body) throw new SyntaxError()
   const reader = request.body.getReader()
-  const chunks: Uint8Array[] = []
+  // A growing byte buffer also bounds overhead for hostile one-byte chunks.
+  let body = new Uint8Array(Math.min(16 * 1024, maximum))
   let length = 0
   try {
     while (true) {
       const { value, done } = await reader.read()
       if (done) break
-      length += value.byteLength
-      if (length > maximum) {
+      const nextLength = length + value.byteLength
+      if (nextLength > maximum) {
         void reader.cancel().catch(() => {})
         throw new BodyTooLarge()
       }
-      chunks.push(value)
+      if (nextLength > body.byteLength) {
+        const expanded = new Uint8Array(Math.min(maximum, Math.max(nextLength, body.byteLength * 2)))
+        expanded.set(body.subarray(0, length))
+        body = expanded
+      }
+      body.set(value, length)
+      length = nextLength
     }
   } finally { reader.releaseLock() }
-  const body = new Uint8Array(length)
-  let offset = 0
-  for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength }
-  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body))
+  return { value: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body.subarray(0, length))), byteLength: length }
 }
 
 /** Stable transport; the existing actions still verify signatures and consume nonces. */
@@ -93,11 +98,16 @@ export async function POST(request: Request): Promise<Response> {
     return failure(INVALID_REQUEST, 415)
   }
   let body: unknown
+  let bodyBytes: number
   const eventTransport = request.headers.get("x-serotine-events") === "1"
-  try { body = await readBody(request, eventTransport ? MAX_EVENT_BODY_BYTES : MAX_BODY_BYTES) }
+  try {
+    const parsed = await readBody(request, eventTransport ? MAX_EVENT_BODY_BYTES : MAX_BODY_BYTES)
+    body = parsed.value
+    bodyBytes = parsed.byteLength
+  }
   catch (error) {
     return error instanceof BodyTooLarge
-      ? failure("This messaging request is too large. Shorten your message and try again.", 413)
+      ? failure("This messaging request is too large. Use smaller files or shorten your message and try again.", 413)
       : failure(INVALID_REQUEST, 400)
   }
   if (!object(body)) return failure(INVALID_REQUEST, 400)
@@ -112,8 +122,11 @@ export async function POST(request: Request): Promise<Response> {
   }
   const data = body.data
   const proof = body.proof
-  // Enlarged bodies are only available to the explicitly bounded event actions.
+  // The event header selects its streamed cap; omitting it cannot expand an action's allowance.
   if (eventTransport && body.action !== "event:send" && body.action !== "event:sync") return failure(INVALID_REQUEST, 400)
+  const actionBodyLimit = body.action === "message:send" ? MAX_BODY_BYTES
+    : body.action === "event:send" || body.action === "event:sync" ? MAX_EVENT_BODY_BYTES : MAX_CONTROL_BODY_BYTES
+  if (bodyBytes > actionBodyLimit) return failure("This messaging request is too large. Use smaller files or shorten your message and try again.", 413)
   try {
     // An explicit allowlist keeps this endpoint from invoking arbitrary server exports.
     switch (body.action) {
@@ -141,7 +154,7 @@ export async function POST(request: Request): Promise<Response> {
         if (!keys(data, ["id", "senderPubKey"]) || !id(data.id) || !peer(data.senderPubKey)) break
         return json(await deleteMessage(data as unknown as Parameters<typeof deleteMessage>[0], proof))
       case "signal:send":
-        if (!keys(data, ["recipientPubKey", "encryptedData"]) || !peer(data.recipientPubKey) || !packet(data.encryptedData)) break
+        if (!keys(data, ["recipientPubKey", "encryptedData"]) || !peer(data.recipientPubKey) || !packet(data.encryptedData, MAX_SIGNAL_PACKET_LENGTH)) break
         return json(await storeSignal(data as unknown as Parameters<typeof storeSignal>[0], proof))
       case "signal:read":
         if (!keys(data, ["senderPubKey"]) || !peer(data.senderPubKey)) break

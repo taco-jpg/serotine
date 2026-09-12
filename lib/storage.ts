@@ -1,11 +1,13 @@
 import { openDB, type DBSchema } from "idb"
 import { notifyHistoryChanged } from "./history-events"
+import { validateAttachments, type MessageAttachment } from "./legacy-attachments"
 
 export interface StoredMessage {
   id: string
   peerPubKey: string
   senderPubKey: string
   content: string
+  attachments?: MessageAttachment[]
   timestamp: number
   updatedAt?: number
   delivery?: "pending" | "sent" | "failed" | "received"
@@ -30,7 +32,9 @@ export async function saveMessageToStorage(owner: string, message: StoredMessage
     const existing = await tx.store.get([message.peerPubKey, message.senderPubKey, message.id])
     // A slower retry in another tab must never erase a confirmed relay send.
     const stored = existing?.delivery === "sent" && message.senderPubKey === owner
-      ? existing : { ...message, ...(existing ? { content: existing.content, timestamp: existing.timestamp } : {}) }
+      ? existing : { ...message, ...(existing ? { content: existing.content, timestamp: existing.timestamp, attachments: existing.attachments } : {}) }
+    // Absence is part of the original packet too: a stale retry cannot add files.
+    if (stored.attachments === undefined) delete stored.attachments
     await tx.store.put(stored)
     await tx.done
     notifyHistoryChanged(owner, message.peerPubKey)
@@ -60,6 +64,7 @@ export function validateStoredMessages(value: unknown, owner: string): StoredMes
       || !address.test(item.peerPubKey) || !address.test(item.senderPubKey)
       || (item.senderPubKey !== owner && item.senderPubKey !== item.peerPubKey)
       || typeof item.content !== "string" || item.content.length > 64_000
+      || (item.attachments !== undefined && !validateAttachments(item.attachments))
       || !Number.isSafeInteger(item.timestamp) || item.timestamp <= 0
       || (item.updatedAt !== undefined && (!Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0))
       || (item.delivery !== undefined && !["pending", "sent", "failed", "received"].includes(item.delivery))) {
@@ -69,6 +74,7 @@ export function validateStoredMessages(value: unknown, owner: string): StoredMes
     if (seen.has(key)) throw new Error("The backup contains duplicate messages.")
     seen.add(key)
     return { id: item.id, peerPubKey: item.peerPubKey, senderPubKey: item.senderPubKey, content: item.content, timestamp: item.timestamp,
+      ...(item.attachments !== undefined ? { attachments: item.attachments.map(attachment => ({ ...attachment })) } : {}),
       ...(item.updatedAt !== undefined ? { updatedAt: item.updatedAt } : {}), ...(item.delivery ? { delivery: item.delivery } : {}) }
   })
 }

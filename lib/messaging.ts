@@ -6,6 +6,7 @@ import { deleteMessage, getEventFeed, getLegacyInbox, storeEncryptedEvent } from
 import { exportAllMessagesFromStorage, migrateLegacyHistory } from "./storage"
 import { defaultMessagingPreferences, eventStorageKey, getMessagingPreferences, getStoredEvents, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor } from "./messaging-store"
 import { isAttachmentMeta } from "./attachments"
+import { legacyMessageEvents } from "./legacy-messaging"
 import { notifyIncoming, requestMessagingNotifications } from "./message-notifications"
 import type { AttachmentMeta, ConversationRecord, EventKind, EventPayload, GroupState, MessageRecord, MessagingEvent, MessagingModel, MessagingPreferences, NotificationMode, StoredEvent } from "./messaging-types"
 
@@ -53,6 +54,12 @@ function validPayload(kind: EventKind, p: EventPayload) {
     case "group": case "leave": return Object.keys(p).length === 0
     default: return false
   }
+}
+export function validLegacyMessagingEvent(e: MessagingEvent): boolean {
+  if (!e || e.version !== 3 || e.group || !PUBLIC_KEY_PATTERN.test(e.author) || !PUBLIC_KEY_PATTERN.test(e.conversationId) || !validId(e.id)
+    || !Array.isArray(e.recipients) || e.recipients.length !== 1 || e.recipients[0] !== e.conversationId || !Number.isSafeInteger(e.timestamp)) return false
+  if (e.kind === "message") return typeof e.payload?.content === "string" && e.payload.content.length <= MAX_MESSAGE_LENGTH
+  return (e.kind === "attachment" || e.kind === "attachment-chunk") && validPayload(e.kind, e.payload)
 }
 export async function validateMessagingEvent(value: unknown, transport?: { senderPubKey: string; recipientPubKey: string; id: string }): Promise<boolean> {
   try {
@@ -186,7 +193,7 @@ export class MessagingEngine {
   }
   private async migrateLocalHistory() {
     const owner = this.identity.publicKey
-    const existing = new Set((await getStoredEvents(owner)).map(r => r.key))
+    const existing = new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
     for (const row of await exportAllMessagesFromStorage(owner)) {
       let id = row.id
       if (!ID_PATTERN.test(id)) {
@@ -194,12 +201,32 @@ export class MessagingEngine {
         id = `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-8${hash.slice(17,20)}-${hash.slice(20,32)}`
       }
       const cid = row.senderPubKey === owner ? row.peerPubKey : owner
-      const event: MessagingEvent = { version: 3, id, author: row.senderPubKey, conversationId: cid, recipients: [cid], timestamp: row.timestamp, kind: "message", payload: { content: row.content.slice(0, MAX_MESSAGE_LENGTH) }, signature: "" }
-      const key = eventStorageKey(event)
-      if (existing.has(key)) continue
       const pending = row.senderPubKey === owner && ["pending", "failed"].includes(row.delivery ?? "")
+      const events = await legacyMessageEvents({ id, sender: row.senderPubKey, recipient: cid, timestamp: row.timestamp, content: row.content, attachments: row.attachments })
+      await this.persistLegacyEvents(events, pending, row.timestamp, existing)
+    }
+  }
+  private async persistLegacyEvents(events: MessagingEvent[], pending: boolean, receivedAt: number, existing?: Map<string, StoredEvent>) {
+    const owner = this.identity.publicKey
+    const saved = existing ?? new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
+    for (const event of events) {
+      const key = eventStorageKey(event)
+      const prior = saved.get(key)
+      if (prior) {
+        if (eventText(prior.event) !== eventText(event)) throw new Error("Conflicting legacy message identifier.")
+        continue
+      }
       if (pending) event.signature = await signText(eventText(event), this.identity)
-      await saveStoredEvent(owner, { key, event, local: pending, delivered: pending ? [] : [cid], receivedAt: row.timestamp, legacy: !pending })
+      try {
+        const record = { key, event, local: pending, delivered: pending ? [] : [...event.recipients], receivedAt, legacy: !pending }
+        await saveStoredEvent(owner, record)
+        saved.set(key, record)
+      } catch (error) {
+        // Concurrent tabs can sign the same migration with different valid ECDSA signatures.
+        const concurrent = (await getStoredEvents(owner)).find(record => record.key === key)
+        if (!concurrent || eventText(concurrent.event) !== eventText(event)) throw error
+        saved.set(key, concurrent)
+      }
     }
   }
   private groupFor(cid: string) {
@@ -399,6 +426,7 @@ export class MessagingEngine {
   }
   private async readLegacyInbox() {
     const owner = this.identity.publicKey
+    const existing = new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
     let after: { createdAt: number; id: string; senderPubKey: string } | undefined
     for (let page = 0; page < 10 && !this.disposed; page++) {
       const data = after ? { after } : {}
@@ -409,8 +437,7 @@ export class MessagingEngine {
         try {
           const envelope = JSON.parse(await decryptFromPeer(packet.encryptedData, this.key!, packet.senderPubKey))
           if (!isEnvelope(envelope, packet.senderPubKey, owner) || envelope.id !== packet.id) continue
-          const event: MessagingEvent = { version: 3, id: envelope.id, author: envelope.sender, conversationId: owner, recipients: [owner], timestamp: envelope.timestamp, kind: "message", payload: { content: envelope.content }, signature: "" }
-          await saveStoredEvent(owner, { key: eventStorageKey(event), event, local: false, delivered: [owner], receivedAt: packet.createdAt, legacy: true })
+          await this.persistLegacyEvents(await legacyMessageEvents(envelope), false, packet.createdAt, existing)
           const ack = { id: packet.id, senderPubKey: packet.senderPubKey }
           await deleteMessage(ack, await createRequestProof("message:ack", ack, this.identity.privateKey, owner))
         } catch { /* Keep unpersisted legacy messages at the relay. */ }

@@ -112,9 +112,8 @@ export async function verifySignature(challenge: string, signatureHex: string, p
 export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   let binary = ""
   const bytes = new Uint8Array(buffer)
-  const len = bytes.byteLength
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i])
+  for (let i = 0; i < bytes.byteLength; i += 8192) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 8192))
   }
   return globalThis.btoa(binary)
 }

@@ -64,7 +64,7 @@ export async function validateMessagingSnapshot(value: unknown, owner: string): 
   const p = snapshot.preferences
   if (!p || !stringArray(p.accepted) || !p.accepted.every(validConversation) || !stringArray(p.blocked) || !p.blocked.every(x => PUBLIC_KEY_PATTERN.test(x)) || !p.notifications || !p.readAt || typeof p.readReceipts !== "boolean") throw new Error("The saved chat preferences are invalid.")
   if (!Object.entries(p.notifications).every(([key, mode]) => validConversation(key) && ["all", "mentions", "muted"].includes(mode)) || !Object.entries(p.readAt).every(([key, time]) => validConversation(key) && Number.isSafeInteger(time) && time >= 0)) throw new Error("The saved chat preferences are invalid.")
-  const { validateMessagingEvent } = await import("./messaging")
+  const { validateMessagingEvent, validLegacyMessagingEvent } = await import("./messaging")
   const seen = new Set<string>()
   for (const record of snapshot.events) {
     if (!record || typeof record !== "object" || !record.event || record.key !== eventStorageKey(record.event) || seen.has(record.key) || typeof record.local !== "boolean" || !stringArray(record.delivered) || !record.delivered.every(x => record.event.recipients?.includes(x)) || !Number.isSafeInteger(record.receivedAt) || record.receivedAt < 0 || (record.sequence !== undefined && (!Number.isSafeInteger(record.sequence) || record.sequence < 1)) || (record.legacy !== undefined && typeof record.legacy !== "boolean")) throw new Error("The backup contains an invalid message record.")
@@ -72,7 +72,7 @@ export async function validateMessagingSnapshot(value: unknown, owner: string): 
     if (e.author !== owner && !e.recipients?.includes(owner)) throw new Error("The backup contains messages for another identity.")
     if (record.local && e.author !== owner) throw new Error("The backup contains an invalid outgoing message.")
     if (record.legacy) {
-      if (e.version !== 3 || e.kind !== "message" || e.group || !PUBLIC_KEY_PATTERN.test(e.author) || !PUBLIC_KEY_PATTERN.test(e.conversationId) || !ID_PATTERN.test(e.id) || !Array.isArray(e.recipients) || e.recipients.length !== 1 || !PUBLIC_KEY_PATTERN.test(e.recipients[0]) || e.recipients[0] !== e.conversationId || typeof e.payload?.content !== "string" || e.payload.content.length > 8000 || !Number.isSafeInteger(e.timestamp)) throw new Error("The backup contains invalid legacy history.")
+      if (!validLegacyMessagingEvent(e)) throw new Error("The backup contains invalid legacy history.")
       // Legacy history is display-only and must never execute controls or resend.
       record.local = false
       record.delivered = [...e.recipients]

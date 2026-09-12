@@ -8,7 +8,7 @@ const origin='http://localhost:3100';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function makeIdentity(){const pair=await crypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits','deriveKey']);return {version:2,publicKey:Buffer.from(await crypto.subtle.exportKey('raw',pair.publicKey)).toString('hex'),privateKey:await crypto.subtle.exportKey('jwk',pair.privateKey)}}
 (async()=>{
- const bundle=(await esbuild.build({stdin:{contents:'export * from "./lib/messaging";export * from "./lib/messaging-store";export * from "./lib/identity";export * from "./lib/full-backup";export * from "./lib/attachments";',resolveDir:root},bundle:true,write:false,platform:'browser',format:'iife',globalName:'SerotineTest',tsconfig:root+'/tsconfig.json'})).outputFiles[0].text;
+ const bundle=(await esbuild.build({stdin:{contents:'export * from "./lib/messaging";export * from "./lib/messaging-store";export * from "./lib/identity";export * from "./lib/full-backup";export * from "./lib/attachments";export {encryptForPeer,importKey} from "./lib/crypto";export {createRequestProof} from "./lib/request-auth";export {storeEncryptedMessage,getLegacyInbox} from "./lib/relay-client";',resolveDir:root},bundle:true,write:false,platform:'browser',format:'iife',globalName:'SerotineTest',tsconfig:root+'/tsconfig.json'})).outputFiles[0].text;
  const log=fs.openSync('/tmp/serotine-e2e-server.log','w');
  const server=spawn(process.execPath,[root+'/node_modules/next/dist/bin/next','dev','--port','3100','--hostname','127.0.0.1'],{cwd:root,stdio:['ignore',log,log]});let browser;
  try{
@@ -53,8 +53,21 @@ async function makeIdentity(){const pair=await crypto.subtle.generateKey({name:'
   await a.evaluate(peer=>engine.sendText(peer,'Self message'),aid);
   await settle(()=>a.evaluate(()=>engine.model.messages.some(m=>m.content==='Self message')),'self chat');
   console.log('PASS chunked file delivery/integrity and ordinary self-chat');
+  await b.evaluate(async peer=>{
+    const identity=engine.identity,id=crypto.randomUUID();
+    const envelope={version:3,id,sender:identity.publicKey,recipient:peer,content:'Legacy file caption',timestamp:Date.now(),attachments:[{name:'legacy.bin',type:'application/octet-stream',size:75000,data:btoa('%'.repeat(75000))}]};
+    const encryptedData=await SerotineTest.encryptForPeer(JSON.stringify(envelope),await SerotineTest.importKey(identity.privateKey,'encryption','private'),peer);
+    const data={id,recipientPubKey:peer,encryptedData};
+    const result=await SerotineTest.storeEncryptedMessage(data,await SerotineTest.createRequestProof('message:send',data,identity.privateKey,identity.publicKey));
+    if(!result.success)throw Error(result.error);
+  },aid);
+  await settle(()=>a.evaluate(()=>engine.model.messages.some(m=>m.attachment?.name==='legacy.bin')),'legacy file migration');
+  assert.equal(await a.evaluate(async()=>{const m=engine.model.messages.find(m=>m.attachment?.name==='legacy.bin');const blob=await SerotineTest.assembleAttachment(m.attachment,engine.getAttachmentChunks(m.conversationId,m.id));return new Uint8Array(await blob.arrayBuffer()).every(byte=>byte===37)&&blob.size===75000}),true);
+  assert.equal(await a.evaluate(async()=>{const identity=engine.identity,data={};const result=await SerotineTest.getLegacyInbox(data,await SerotineTest.createRequestProof('message:inbox',data,identity.privateKey,identity.publicKey));return result.success&&result.messages.length===0}),true);
+  console.log('PASS older-client encrypted attachment receipt, byte integrity and durable acknowledgement');
   const backup=await a.evaluate(async()=>SerotineTest.exportFullBackup(engine.identity,'integration password 123'));
   const a2=await makePage();await a2.evaluate(async text=>SerotineTest.restoreBackup(text,'integration password 123'),backup);await start(a2);
+  assert.equal(await a2.evaluate(async()=>{const m=engine.model.messages.find(m=>m.attachment?.name==='legacy.bin');const blob=await SerotineTest.assembleAttachment(m.attachment,engine.getAttachmentChunks(m.conversationId,m.id));return blob.size}),75000);
   await b.evaluate(peer=>engine.sendText(peer,'Both Alice devices'),aid);
   await settle(async()=>await a.evaluate(()=>engine.model.messages.some(m=>m.content==='Both Alice devices'))&&await a2.evaluate(()=>engine.model.messages.some(m=>m.content==='Both Alice devices')),'linked incoming');
   await a2.evaluate(peer=>engine.sendText(peer,'From linked Alice'),bid);

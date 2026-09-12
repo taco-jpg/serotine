@@ -64,6 +64,8 @@ npm run deploy
 
 Both the existing relay schema and the new event tables initialize additively on authenticated requests. The new schema does not delete the old v2 queue or browser history. Reload both clients after deployment to use the new event protocol. Old clients can still send legacy messages, which the new identity-wide compatibility inbox can collect; old clients cannot display new group, file, or event messages. Upgrade both participants for normal conversations.
 
+Files sent by the earlier attachment release remain readable. The compatibility inbox accepts its v3 envelopes (up to four files totaling 1 MiB) and saves the files before acknowledging the queued message. Existing local attachments, including unconfirmed sends, migrate into the current conversation view and remain included in full backups. New sends use the 2 MiB chunked attachment format.
+
 The new retained event log is separate from the legacy acknowledged queue. It uses a monotonically increasing sequence for stable pagination, including multiple senders at the same timestamp. Sender limits bound writes, retained row counts, and retained ciphertext bytes. A large group file creates a separately encrypted copy for each recipient, so it consumes more relay storage than a direct attachment.
 
 ## Delivery and security

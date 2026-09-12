@@ -163,19 +163,42 @@ test('legacy global inbox cursor includes sender tie breaker for equal timestamp
   assert.equal(result.messages[0].senderPubKey, two)
 })
 
-test('event packet allowance supports attachments without expanding any legacy packet or body limits', async t => {
+test('legacy inline files coexist with smaller event and signal packet allowances', async t => {
   const h = harness(t)
+  const { MAX_PACKET_LENGTH, MAX_EVENT_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH } = h.load(path.join(root, 'lib/protocol.ts'))
   const [alice, bob] = await Promise.all([h.identity(), h.identity()])
-  const data = { id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(128000) }
+  const data = { id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(MAX_EVENT_PACKET_LENGTH) }
   assert.equal((await h.call('storeEncryptedEvent', 'event:send', data, alice)).success, true)
-  assert.equal((await h.feed(bob)).messages[0].encryptedData.length, 128000)
-  assert.equal((await h.call('storeEncryptedEvent', 'event:send', { ...data, id: crypto.randomUUID(), encryptedData: 'a'.repeat(128001) }, alice)).success, false)
-  assert.equal((await h.call('storeEncryptedMessage', 'message:send', { ...data, encryptedData: 'a'.repeat(64001) }, alice)).success, false)
+  assert.equal((await h.feed(bob)).messages[0].encryptedData.length, MAX_EVENT_PACKET_LENGTH)
+  assert.equal((await h.call('storeEncryptedEvent', 'event:send', { ...data, id: crypto.randomUUID(), encryptedData: 'a'.repeat(MAX_EVENT_PACKET_LENGTH + 1) }, alice)).success, false)
+  const legacy = { ...data, encryptedData: 'a'.repeat(MAX_PACKET_LENGTH) }
+  assert.equal((await h.call('storeEncryptedMessage', 'message:send', legacy, alice)).success, true)
+  assert.equal((await h.call('getLegacyInbox', 'message:inbox', {}, bob)).messages[0].encryptedData.length, MAX_PACKET_LENGTH)
+  assert.equal((await h.call('storeSignal', 'signal:send', { recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(MAX_SIGNAL_PACKET_LENGTH + 1) }, alice)).success, false)
   const request = { version: 2, action: 'message:send', data, proof: await h.proof('message:send', data, alice) }
   const response = await h.POST(new Request(`${origin}/api/relay`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-serotine-events': '1' }, body: JSON.stringify(request) }))
-  assert.equal(response.status, 400, 'large-body header cannot open legacy actions')
+  assert.equal(response.status, 400, 'event transport header cannot open legacy actions')
   const huge = await h.POST(new Request(`${origin}/api/relay`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-serotine-events': '1' }, body: 'x'.repeat(148000) }))
   assert.equal(huge.status, 413)
+})
+
+test('global legacy inbox bounds full-size file pages and preserves sender ties at the page boundary', async t => {
+  const h = harness(t)
+  const { MAX_PACKET_LENGTH, MESSAGE_PAGE_SIZE } = h.load(path.join(root, 'lib/protocol.ts'))
+  const bob = await h.identity()
+  const senders = (await Promise.all(Array.from({ length: MESSAGE_PAGE_SIZE + 1 }, () => h.identity())))
+    .map(identity => identity.publicKey).sort()
+  await h.feed(bob)
+  const now = Date.now(), id = crypto.randomUUID()
+  const insert = h.sqlite.prepare('INSERT INTO RelayMessage(id,senderPubKey,recipientPubKey,encryptedData,createdAt,expiresAt) VALUES(?,?,?,?,?,?)')
+  for (const sender of senders) insert.run(id, sender, bob.publicKey, 'a'.repeat(MAX_PACKET_LENGTH), now, now + 60000)
+  const first = await h.call('getLegacyInbox', 'message:inbox', {}, bob)
+  assert.equal(first.messages.length, MESSAGE_PAGE_SIZE)
+  assert.equal(first.messages.reduce((bytes, message) => bytes + Buffer.byteLength(message.encryptedData), 0), MESSAGE_PAGE_SIZE * MAX_PACKET_LENGTH)
+  assert.deepEqual(first.nextCursor, { createdAt: now, id, senderPubKey: senders[MESSAGE_PAGE_SIZE - 1] })
+  const second = await h.call('getLegacyInbox', 'message:inbox', { after: first.nextCursor }, bob)
+  assert.deepEqual(second.messages.map(message => message.senderPubKey), senders.slice(MESSAGE_PAGE_SIZE))
+  assert.equal(second.nextCursor, null)
 })
 
 test('expiry clears accounted bytes; storage budget is enforced atomically and duplicate retries still succeed', async t => {

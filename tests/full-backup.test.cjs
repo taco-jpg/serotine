@@ -86,7 +86,10 @@ before(async () => {
   ;[alice, bob, charlie] = await Promise.all([generate(), generate(), generate()])
   local.set('serotine_identity_v2', JSON.stringify(alice))
   identity.saveContacts(alice.publicKey, [{ pub: bob.publicKey, alias: 'Bob' }])
-  expectedMessages = [{ id: crypto.randomUUID(), peerPubKey: bob.publicKey, senderPubKey: alice.publicKey, content: 'A legacy message', timestamp: Date.now(), delivery: 'sent' }]
+  expectedMessages = [{ id: crypto.randomUUID(), peerPubKey: bob.publicKey, senderPubKey: alice.publicKey, content: 'A legacy message', timestamp: Date.now(), delivery: 'sent', attachments: [
+    { name: 'legacy.bin', type: 'application/octet-stream', size: 3, data: 'AH//' },
+    { name: 'empty.txt', type: 'text/plain', size: 0, data: '' },
+  ] }]
   await storage.importMessagesToStorage(alice.publicKey, expectedMessages)
   const event = { version: 3, id: crypto.randomUUID(), author: bob.publicKey, conversationId: alice.publicKey, recipients: [alice.publicKey], timestamp: Date.now(), kind: 'message', payload: { content: 'History from Bob' }, signature: '' }
   await events.saveStoredEvent(alice.publicKey, { key: events.eventStorageKey(event), event, local: false, delivered: [alice.publicKey], receivedAt: Date.now(), legacy: true })
@@ -141,6 +144,9 @@ test('ownership and record validation happens before any storage mutation even w
   assert.equal(writes, 0)
   const badMessage = snapshot(); badMessage.messages[0].senderPubKey = charlie.publicKey
   await assert.rejects(backup.restoreBackup(await encryptPayload(badMessage), password), /unrelated message/i)
+  assert.equal(writes, 0)
+  const badAttachment = snapshot(); badAttachment.messages[0].attachments[0].size++
+  await assert.rejects(backup.restoreBackup(await encryptPayload(badAttachment), password), /invalid or unrelated message/i)
   assert.equal(writes, 0)
   const badSignature = snapshot(); badSignature.messaging.events[1].event.signature = '0'.repeat(128)
   await assert.rejects(backup.restoreBackup(await encryptPayload(badSignature), password), /signature|invalid/i)

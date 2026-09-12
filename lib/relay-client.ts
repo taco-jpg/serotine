@@ -1,5 +1,5 @@
 import type * as Actions from "@/app/actions"
-import { EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "./protocol"
+import { EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, MESSAGE_PAGE_SIZE, PUBLIC_KEY_PATTERN, type RequestProof } from "./protocol"
 
 type RelayAction = "message:send" | "message:list" | "message:inbox" | "message:ack" | "signal:send" | "signal:read" | "event:send" | "event:sync"
 type JsonObject = Record<string, unknown>
@@ -11,8 +11,8 @@ class RelayTransportError extends Error {}
 function object(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
-function packet(value: unknown, maximum = MAX_PACKET_LENGTH): value is string {
-  return typeof value === "string" && value.length >= 32 && value.length <= maximum
+function packet(value: unknown, limit = MAX_PACKET_LENGTH): value is string {
+  return typeof value === "string" && value.length >= 32 && value.length <= limit
 }
 function cursor(value: unknown) {
   return object(value) && typeof value.createdAt === "number" && Number.isSafeInteger(value.createdAt)
@@ -27,7 +27,7 @@ function validResult(action: RelayAction, value: unknown, data: unknown, proof: 
   }
   if (value.success !== true) return false
   if (action === "signal:read") {
-    return value.signal === null || (object(value.signal) && packet(value.signal.encryptedData))
+    return value.signal === null || (object(value.signal) && packet(value.signal.encryptedData, MAX_SIGNAL_PACKET_LENGTH))
   }
   if (action === "event:sync") {
     const after = object(data) && typeof data.after === "number" ? data.after : 0
@@ -48,7 +48,7 @@ function validResult(action: RelayAction, value: unknown, data: unknown, proof: 
     return value.nextCursor === previous
   }
   if (action === "message:list" || action === "message:inbox") {
-    return Array.isArray(value.messages) && value.messages.length <= 100
+    return Array.isArray(value.messages) && value.messages.length <= MESSAGE_PAGE_SIZE
       && (value.nextCursor === null || (cursor(value.nextCursor)
         && (action !== "message:inbox" || (object(value.nextCursor)
           && typeof value.nextCursor.senderPubKey === "string" && PUBLIC_KEY_PATTERN.test(value.nextCursor.senderPubKey)))))

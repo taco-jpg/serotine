@@ -42,7 +42,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   }, [messages, searchTerm])
   const selectedIndex = matches.length ? Math.min(matchIndex, matches.length - 1) : 0
   const activeMatch = matches[selectedIndex]
-  const bottom = useRef<HTMLDivElement>(null)
+  const messagesViewport = useRef<HTMLDivElement>(null)
   const nearBottom = useRef(true)
   const input = useRef<HTMLTextAreaElement>(null)
   const sendLock = useRef(false)
@@ -71,18 +71,26 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
       }
     }
     seenIds.current = ids
-    if (nearBottom.current && !searchTerm) bottom.current?.scrollIntoView({ behavior: "instant" })
+    if (nearBottom.current && !searchTerm && messagesViewport.current) {
+      messagesViewport.current.scrollTop = messagesViewport.current.scrollHeight
+    }
   }, [messages, ready, myPub, searchTerm])
   useEffect(() => {
     if (activeMatch) {
       nearBottom.current = false
-      messageNodes.current.get(activeMatch)?.scrollIntoView({ behavior: "instant", block: "center" })
+      const viewport = messagesViewport.current
+      const message = messageNodes.current.get(activeMatch)
+      if (viewport && message) {
+        const viewportRect = viewport.getBoundingClientRect()
+        const messageRect = message.getBoundingClientRect()
+        viewport.scrollTop += messageRect.top - viewportRect.top - (viewport.clientHeight - messageRect.height) / 2
+      }
     }
   }, [activeMatch, searchTerm])
   useEffect(() => { if (searchOpen) searchInput.current?.focus() }, [searchOpen])
   const jumpToLatest = () => {
     setQuery(""); nearBottom.current = true; setAwayFromBottom(false); setUnseen(0)
-    bottom.current?.scrollIntoView({ behavior: "instant" })
+    if (messagesViewport.current) messagesViewport.current.scrollTop = messagesViewport.current.scrollHeight
   }
   const moveMatch = (direction: number) => {
     if (matches.length) setMatchIndex((selectedIndex + direction + matches.length) % matches.length)
@@ -128,7 +136,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
     }
   }
   const statusLabel = { connecting: "Connecting…", online: "Direct connection", relay: "Encrypted relay", offline: "Connection unavailable" }[status]
-  return <div className="flex h-full min-h-0 flex-col">
+  return <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
     <header className="flex min-h-20 shrink-0 items-center justify-between gap-3 border-b border-zinc-800/80 px-4 py-4 sm:px-7">
       <div className="flex min-w-0 items-center gap-3"><Link href="/chat" aria-label="Back to contacts" className="rounded-lg p-2 text-zinc-400 hover:bg-zinc-900 md:hidden"><ArrowLeft className="size-5" /></Link><IdentityIcon pubKey={params.pubkey} size={38} /><div className="min-w-0"><h1 className="truncate font-sans text-base font-medium">{alias || shortAddress(params.pubkey)}</h1><span className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500"><Lock className="size-3" /> End-to-end encrypted</span></div></div>
       <div className="flex items-center gap-2"><Button variant="ghost" size="icon" aria-label="Search conversation" aria-expanded={searchOpen} onClick={() => { setSearchOpen(!searchOpen); setQuery(""); setMatchIndex(0) }}><Search className="size-4" /></Button><span role="status" className={`max-w-32 rounded-lg border px-2.5 py-1.5 text-center text-xs sm:max-w-none ${status === "offline" ? "border-amber-400/20 text-amber-300" : "border-zinc-800 text-zinc-400"}`}>{statusLabel}</span></div>
@@ -142,7 +150,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
     </div>}
     {(error || sendError) && <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-400/10 bg-amber-400/5 px-5 py-3 text-sm leading-relaxed text-amber-200"><p role="alert" className="min-w-0 flex-1">{sendError || error}</p><Button type="button" size="sm" variant="outline" disabled={sending} onClick={() => { setSendError(""); reconnect() }}><RotateCw className="mr-2 size-4" />{ready ? "Reconnect" : "Try opening again"}</Button></div>}
     <span className="sr-only" role="status" aria-live="polite">{announcement}</span>
-    <div role="region" aria-label="Conversation messages" tabIndex={0} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-8" onScroll={event => { const node = event.currentTarget; nearBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120; setAwayFromBottom(!nearBottom.current); if (nearBottom.current) setUnseen(0) }}>
+    <div ref={messagesViewport} role="region" aria-label="Conversation messages" tabIndex={0} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-8" onScroll={event => { const node = event.currentTarget; nearBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120; setAwayFromBottom(!nearBottom.current); if (nearBottom.current) setUnseen(0) }}>
       <div className="mx-auto max-w-3xl space-y-5">
         <div className="mx-auto max-w-sm py-8 text-center"><Shield className="mx-auto mb-3 size-8 text-indigo-300/60" /><h2 className="mb-2 text-xl text-zinc-300">{messages.length ? "Your conversation" : "Start with a hello."}</h2><p className="text-sm leading-relaxed text-zinc-500">Verify this contact’s address through another trusted channel. Messages are encrypted before leaving your device.</p><details className="mt-3 text-xs text-zinc-500"><summary className="cursor-pointer">Contact address</summary><p className="mt-2 select-all break-all font-mono leading-relaxed">{params.pubkey}</p></details></div>
         {messages.map((message, index) => {
@@ -166,7 +174,6 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
             </div>
           </div>
         })}
-        <div ref={bottom} />
       </div>
     </div>
     {(awayFromBottom || unseen > 0) && <div className="flex justify-center border-t border-zinc-800/60 py-2"><Button variant="secondary" size="sm" className="rounded-full" onClick={jumpToLatest}><ArrowDown className="mr-2 size-4" /><span aria-live="polite">{unseen ? `${unseen} new message${unseen === 1 ? "" : "s"}` : "Jump to latest"}</span></Button></div>}
@@ -177,7 +184,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
       </div>}
       <form className="mx-auto max-w-3xl" onSubmit={event => { event.preventDefault(); void submit() }}>
         <div className="flex items-end gap-3 rounded-xl border border-zinc-700 bg-zinc-900 p-2 focus-within:border-indigo-300/60">
-          <Textarea ref={input} aria-label="Message" placeholder={ready ? "Write a message…" : error ? "Conversation could not open. Try again above." : "Opening conversation…"} value={content} onChange={event => setContent(event.target.value)} maxLength={MAX_MESSAGE_LENGTH} disabled={!ready || !draftReady || busy} rows={2} className="max-h-44 min-h-12 resize-none border-0 bg-transparent text-base shadow-none focus-visible:ring-0" onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit() } }} />
+          <Textarea ref={input} aria-label="Message" aria-busy={busy} placeholder={ready ? "Write a message…" : error ? "Conversation could not open. Try again above." : "Opening conversation…"} value={content} onChange={event => setContent(event.target.value)} maxLength={MAX_MESSAGE_LENGTH} disabled={!ready || !draftReady} readOnly={busy} rows={2} className="max-h-44 min-h-12 resize-none border-0 bg-transparent text-base shadow-none focus-visible:ring-0" onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit() } }} />
           <Button type="submit" aria-label="Send message" disabled={!ready || !draftReady || !content.trim() || sending} size="icon" className="mb-1 mr-1 shrink-0">{busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}</Button>
         </div>
         <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-zinc-400"><span>Enter to send · Shift + Enter for a new line</span><span className={!draftSaved ? "text-amber-300" : ""}>{!draftSaved ? draftIssue === "read" ? "Saved draft could not be loaded" : draftIssue === "clear" ? "Sent text is waiting to be cleared from storage" : "Draft is only in this tab · Do not reload or close it" : content ? "Draft saved on this browser" : "History saved on this browser"}</span></div>

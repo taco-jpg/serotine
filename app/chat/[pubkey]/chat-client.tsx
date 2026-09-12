@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, Check, Loader2, Lock, Send, Shield, RotateCw, ArrowDown, Search, X, ChevronUp, ChevronDown, Copy } from "lucide-react"
-import { useP2PChat } from "@/hooks/use-p2p-chat"
+import { useP2PChat, type ChatMessage } from "@/hooks/use-p2p-chat"
 import { IdentityIcon } from "@/components/ui/identity-icon"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -13,6 +13,7 @@ import { useChatDraft } from "@/hooks/use-chat-draft"
 import { MessageSendError } from "@/lib/message-send-error"
 import { Input } from "@/components/ui/input"
 import { MessageText, literalSearch } from "@/components/message-text"
+import { retryMessageBatch } from "@/lib/retry-messages"
 
 export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const { sendMessage, status, messages, myPub, ready, error, reconnect } = useP2PChat(params.pubkey)
@@ -21,6 +22,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const [alias, setAlias] = useState("")
   const [sendError, setSendError] = useState("")
   const [retrying, setRetrying] = useState<string | null>(null)
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null)
   const [awayFromBottom, setAwayFromBottom] = useState(false)
   const [unseen, setUnseen] = useState(0)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -44,6 +46,16 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const nearBottom = useRef(true)
   const input = useRef<HTMLTextAreaElement>(null)
   const sendLock = useRef(false)
+  const actionScope = useRef<object | null>(null)
+  useEffect(() => {
+    const scope = {}
+    actionScope.current = scope
+    sendLock.current = false
+    setBusy(false); setRetrying(null); setBatchProgress(null); setSendError("")
+    return () => { if (actionScope.current === scope) actionScope.current = null }
+  }, [myPub, params.pubkey])
+  const unconfirmed = messages.filter(message => message.senderPubKey === myPub && message.peerPubKey === params.pubkey && message.delivery === "failed")
+  const sending = busy || retrying !== null || batchProgress !== null
   useEffect(() => {
     const node = input.current
     if (node) { node.style.height = "auto"; node.style.height = Math.min(node.scrollHeight, 176) + "px" }
@@ -82,16 +94,38 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
     return () => { window.removeEventListener("serotine:contacts", refresh); window.removeEventListener("storage", fromStorage) }
   }, [myPub, params.pubkey])
   const submit = async () => {
-    if (!content.trim() || sendLock.current || !ready || !draftReady) return
+    const scope = actionScope.current
+    if (!scope || !content.trim() || sendLock.current || !ready || !draftReady) return
+    const isCurrent = () => actionScope.current === scope
     sendLock.current = true; setBusy(true); setSendError(""); jumpToLatest()
     const draft = content
     try { await sendMessage(draft); clearSubmittedDraft() }
     catch (cause) {
-      setSendError(cause instanceof Error ? cause.message : "Message was not sent.")
+      if (isCurrent()) setSendError(cause instanceof Error ? cause.message : "Message was not sent.")
       // A durable failed bubble owns its retry. Otherwise keep the only copy here.
       if (cause instanceof MessageSendError && cause.savedLocally) clearSubmittedDraft()
     }
-    finally { sendLock.current = false; setBusy(false); input.current?.focus() }
+    finally { if (isCurrent()) { sendLock.current = false; setBusy(false); input.current?.focus() } }
+  }
+  const retryFailed = async (snapshot: ChatMessage[], batch = false) => {
+    const scope = actionScope.current
+    if (!scope || sendLock.current || !ready || !snapshot.length) return
+    const isCurrent = () => actionScope.current === scope
+    sendLock.current = true; setSendError("")
+    if (batch) setBatchProgress({ current: 1, total: snapshot.length })
+    try {
+      const result = await retryMessageBatch(snapshot, sendMessage, isCurrent, (message, index) => {
+        setRetrying(message.id)
+        if (batch) setBatchProgress({ current: index + 1, total: snapshot.length })
+      })
+      if (!isCurrent()) return
+      if (result.status === "failed") {
+        const reason = result.error instanceof Error ? result.error.message : "Message delivery could not be confirmed."
+        setSendError(batch ? `Retry stopped after ${result.completed} of ${snapshot.length} messages. ${reason}` : reason)
+      } else if (result.status === "complete" && batch) setAnnouncement(`Retry complete for ${result.completed} messages.`)
+    } finally {
+      if (isCurrent()) { sendLock.current = false; setRetrying(null); setBatchProgress(null) }
+    }
   }
   const statusLabel = { connecting: "Connecting…", online: "Direct connection", relay: "Encrypted relay", offline: "Connection unavailable" }[status]
   return <div className="flex h-full min-h-0 flex-col">
@@ -106,7 +140,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
       <Button variant="ghost" size="icon" aria-label="Next match" disabled={!matches.length} onClick={() => moveMatch(1)}><ChevronDown className="size-4" /></Button>
       <Button variant="ghost" size="icon" aria-label="Close search" onClick={() => { setSearchOpen(false); setQuery(""); input.current?.focus() }}><X className="size-4" /></Button>
     </div>}
-    {(error || sendError) && <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-400/10 bg-amber-400/5 px-5 py-3 text-sm leading-relaxed text-amber-200"><p role="alert" className="min-w-0 flex-1">{error || sendError}</p><Button type="button" size="sm" variant="outline" onClick={() => { setSendError(""); reconnect() }}><RotateCw className="mr-2 size-4" />{ready ? "Reconnect" : "Try opening again"}</Button></div>}
+    {(error || sendError) && <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-400/10 bg-amber-400/5 px-5 py-3 text-sm leading-relaxed text-amber-200"><p role="alert" className="min-w-0 flex-1">{sendError || error}</p><Button type="button" size="sm" variant="outline" disabled={sending} onClick={() => { setSendError(""); reconnect() }}><RotateCw className="mr-2 size-4" />{ready ? "Reconnect" : "Try opening again"}</Button></div>}
     <span className="sr-only" role="status" aria-live="polite">{announcement}</span>
     <div role="region" aria-label="Conversation messages" tabIndex={0} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-8" onScroll={event => { const node = event.currentTarget; nearBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120; setAwayFromBottom(!nearBottom.current); if (nearBottom.current) setUnseen(0) }}>
       <div className="mx-auto max-w-3xl space-y-5">
@@ -123,7 +157,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-zinc-400"><time title={new Date(message.timestamp).toLocaleString()} dateTime={new Date(message.timestamp).toISOString()}>{new Date(message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
                 {mine && message.delivery === "pending" && <span className="flex items-center gap-1"><Loader2 className="size-3 animate-spin" /> Sending</span>}
                 {mine && message.delivery === "sent" && <span className="flex items-center gap-1" title="Accepted by the encrypted relay; this is not a read receipt."><Check className="size-3" /> Sent to relay</span>}
-                {mine && message.delivery === "failed" && <button disabled={!!retrying || busy || !ready} className="flex items-center gap-1 rounded px-1 text-red-300 hover:text-red-200 disabled:opacity-50" onClick={async () => { setRetrying(message.id); setSendError(""); try { await sendMessage(message.content, message) } catch (cause) { setSendError((cause as Error).message) } finally { setRetrying(null) } }}><RotateCw className={`size-3 ${retrying === message.id ? "animate-spin" : ""}`} /> {retrying === message.id ? "Retrying" : "Unconfirmed · Retry"}</button>}
+                {mine && message.delivery === "failed" && <button type="button" disabled={sending || !ready} className="flex items-center gap-1 rounded px-1 text-red-300 hover:text-red-200 disabled:opacity-50" onClick={() => void retryFailed([message])}><RotateCw className={`size-3 ${retrying === message.id ? "animate-spin" : ""}`} /> {retrying === message.id ? "Retrying" : "Unconfirmed · Retry"}</button>}
                 <button type="button" className="inline-flex min-h-7 items-center gap-1 rounded px-1 hover:text-zinc-200" aria-label={copiedMessage === messageKey ? "Message copied" : "Copy message"} onClick={async () => {
                   try { await navigator.clipboard.writeText(message.content); clearTimeout(copyTimer.current); setCopiedMessage(messageKey); setAnnouncement("Message copied."); copyTimer.current = setTimeout(() => setCopiedMessage(""), 2500) }
                   catch { setSendError("Clipboard access was blocked. Select the message text to copy it.") }
@@ -137,10 +171,14 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
     </div>
     {(awayFromBottom || unseen > 0) && <div className="flex justify-center border-t border-zinc-800/60 py-2"><Button variant="secondary" size="sm" className="rounded-full" onClick={jumpToLatest}><ArrowDown className="mr-2 size-4" /><span aria-live="polite">{unseen ? `${unseen} new message${unseen === 1 ? "" : "s"}` : "Jump to latest"}</span></Button></div>}
     <footer className="shrink-0 border-t border-zinc-800/80 bg-zinc-950 p-4 sm:px-8 sm:py-5">
+      {(unconfirmed.length > 1 || batchProgress) && <div className="mx-auto mb-3 flex max-w-3xl flex-wrap items-center justify-between gap-2 text-xs text-amber-200">
+        <span role="status">{batchProgress ? `Retrying ${batchProgress.current} of ${batchProgress.total}…` : `${unconfirmed.length} messages have no delivery confirmation.`}</span>
+        <Button type="button" size="sm" variant="outline" disabled={!ready || sending} onClick={() => void retryFailed(unconfirmed, true)}><RotateCw className={`mr-2 size-3 ${batchProgress ? "animate-spin" : ""}`} />{batchProgress ? "Retrying…" : `Retry ${unconfirmed.length} unconfirmed`}</Button>
+      </div>}
       <form className="mx-auto max-w-3xl" onSubmit={event => { event.preventDefault(); void submit() }}>
         <div className="flex items-end gap-3 rounded-xl border border-zinc-700 bg-zinc-900 p-2 focus-within:border-indigo-300/60">
           <Textarea ref={input} aria-label="Message" placeholder={ready ? "Write a message…" : error ? "Conversation could not open. Try again above." : "Opening conversation…"} value={content} onChange={event => setContent(event.target.value)} maxLength={MAX_MESSAGE_LENGTH} disabled={!ready || !draftReady || busy} rows={2} className="max-h-44 min-h-12 resize-none border-0 bg-transparent text-base shadow-none focus-visible:ring-0" onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit() } }} />
-          <Button type="submit" aria-label="Send message" disabled={!ready || !draftReady || !content.trim() || busy} size="icon" className="mb-1 mr-1 shrink-0">{busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}</Button>
+          <Button type="submit" aria-label="Send message" disabled={!ready || !draftReady || !content.trim() || sending} size="icon" className="mb-1 mr-1 shrink-0">{busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}</Button>
         </div>
         <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-zinc-400"><span>Enter to send · Shift + Enter for a new line</span><span className={!draftSaved ? "text-amber-300" : ""}>{!draftSaved ? draftIssue === "read" ? "Saved draft could not be loaded" : draftIssue === "clear" ? "Sent text is waiting to be cleared from storage" : "Draft is only in this tab · Do not reload or close it" : content ? "Draft saved on this browser" : "History saved on this browser"}</span></div>
         {!draftSaved && <Button type="button" size="sm" variant="ghost" onClick={retryDraftSave}>{draftIssue === "read" ? "Try loading draft again" : draftIssue === "clear" ? "Retry draft cleanup" : "Try saving draft again"}</Button>}

@@ -2,6 +2,7 @@
 
 import { getDB, RelayConfigurationError, type D1DatabaseBinding } from "@/lib/db"
 import { verifyRequestProof } from "@/lib/request-auth"
+import { relayFailureKind } from "@/lib/relay-diagnostics"
 import { AUTH_WINDOW_MS, ID_PATTERN, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof, type InboxRequest, type InboxCursor } from "@/lib/protocol"
 
 class RequestError extends Error {}
@@ -20,11 +21,20 @@ function failure(error: unknown): Failure {
     console.error("Relay configuration: missing serotine_db binding")
     return { success: false, error: "Messaging is not configured on this server. The site owner needs to connect its relay database. Your saved messages are still on this browser." }
   }
-  if (error instanceof Error && /no such (?:table|column)/i.test(error.message)) {
+  const kind = relayFailureKind(error)
+  if (kind === "quota") {
+    console.error("Relay operation failed: daily database allowance exhausted")
+    return { success: false, error: "The relay has reached its daily database allowance. Messaging can resume when it resets. Your saved messages are still on this browser; retry unconfirmed messages later." }
+  }
+  if (kind === "overloaded") {
+    console.error("Relay operation failed: database busy")
+    return { success: false, error: "The relay is busy. Connection checks will slow down and retry automatically. Retry unconfirmed messages once the connection returns." }
+  }
+  if (kind === "schema") {
     console.error("Relay configuration: database schema remains incompatible after automatic setup")
     return { success: false, error: "The messaging database could not finish automatic setup. Your saved messages are still on this browser. Try reconnecting shortly." }
   }
-  console.error("Relay operation failed", error instanceof Error ? error.name : "UnknownError")
+  console.error("Relay operation failed: unavailable")
   return { success: false, error: "The relay is temporarily unavailable. Sends are not confirmed. Keep saved messages and retry when the connection returns." }
 }
 function checkPeer(peer: string) {

@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { storeSignal, getSignal, storeEncryptedMessage, getMyMessages, deleteMessage } from "@/app/actions"
+import { storeSignal, getSignal, storeEncryptedMessage, getMyMessages, deleteMessage } from "@/lib/relay-client"
 import { encryptForPeer, decryptFromPeer, importKey } from "@/lib/crypto"
 import { loadIdentity, validateAddress, type Identity } from "@/lib/identity"
 import { createRequestProof } from "@/lib/request-auth"
@@ -48,9 +48,12 @@ export function useP2PChat(targetPubKey: string) {
     let pollTimer: ReturnType<typeof setTimeout> | undefined
     let currentSessionId = ""
     let lastAttempt = 0
+    let lastSignalCheck = 0
     let polling = false
     let negotiating = false
     let relayAvailable = false
+    let consecutiveFailures = 0
+    let emptyPolls = 0
     let cursor: InboxCursor | null = null
     let receiveWarning: string | null = null
     let unsubscribeHistory: (() => void) | undefined
@@ -66,6 +69,7 @@ export function useP2PChat(targetPubKey: string) {
     }
     const received = new Set<string>()
     const now = () => active && session?.active
+    const canSignal = () => relayAvailable && navigator.onLine && document.visibilityState !== "hidden"
     const proof = (action: string, payload: unknown) => createRequestProof(action, payload, session!.identity.privateKey, session!.identity.publicKey)
     const show = (message: ChatMessage) => {
       if (!now()) return
@@ -73,6 +77,7 @@ export function useP2PChat(targetPubKey: string) {
     }
     const closePeer = () => {
       if (session?.channel) {
+        session.channel.onopen = null
         session.channel.onclose = null
         session.channel.onmessage = null
         session.channel.close()
@@ -95,8 +100,8 @@ export function useP2PChat(targetPubKey: string) {
     const attachChannel = (channel: RTCDataChannel) => {
       if (!session || !now()) { channel.close(); return }
       session.channel = channel
-      channel.onopen = () => { if (now()) setStatus("online") }
-      channel.onclose = () => { if (now()) setStatus(relayAvailable ? "relay" : "offline") }
+      channel.onopen = () => { if (now() && session?.channel === channel) setStatus("online") }
+      channel.onclose = () => { if (now() && session?.channel === channel) setStatus(relayAvailable ? "relay" : "offline") }
       channel.onmessage = event => {
         if (typeof event.data !== "string") return
         void receive(event.data).catch(() => { if (now()) setError("A message could not be saved. Keep this tab open and check available browser storage.") })
@@ -121,53 +126,63 @@ export function useP2PChat(targetPubKey: string) {
       connection.addEventListener("icegatheringstatechange", check)
     })
     const publishSignal = async (connection: RTCPeerConnection, id: string) => {
-      if (!session || !now() || connection !== pc || !connection.localDescription) return
+      if (!session || !now() || !canSignal() || connection !== pc || !connection.localDescription) return
       const packet: SignalPacket = { version: 2, sender: session.identity.publicKey, recipient: targetPubKey, sessionId: id, timestamp: Date.now(), description: connection.localDescription.toJSON() }
       const data = { recipientPubKey: targetPubKey, encryptedData: await encryptForPeer(JSON.stringify(packet), session.privateKey, targetPubKey) }
       if (!now()) return
       const result = await withRelayTimeout(storeSignal(data, await proof("signal:send", data)))
       if (!result.success) throw new Error(result.error)
     }
+    const offerConnection = async () => {
+      lastAttempt = Date.now()
+      currentSessionId = crypto.randomUUID()
+      const connection = newPeer()
+      attachChannel(connection.createDataChannel("serotine-v2"))
+      const offer = await connection.createOffer()
+      if (!now() || pc !== connection) return
+      await connection.setLocalDescription(offer)
+      if (!now() || pc !== connection) return
+      await gatherIce(connection)
+      await publishSignal(connection, currentSessionId)
+    }
     const negotiate = async () => {
-      if (!session || !now() || negotiating || typeof RTCPeerConnection === "undefined" || session.channel?.readyState === "open") return
+      if (!session || !now() || !canSignal() || negotiating || typeof RTCPeerConnection === "undefined" || session.channel?.readyState === "open") return
+      if (Date.now() - lastSignalCheck < 15_000) return
+      lastSignalCheck = Date.now()
       negotiating = true
       try {
         const isOfferer = session.identity.publicKey < targetPubKey
-        if (isOfferer && (!pc || Date.now() - lastAttempt > 25_000)) {
-          lastAttempt = Date.now()
-          currentSessionId = crypto.randomUUID()
-          const connection = newPeer()
-          attachChannel(connection.createDataChannel("serotine-v2"))
-          const offer = await connection.createOffer()
-          if (!now() || pc !== connection) return
-          await connection.setLocalDescription(offer)
-          if (!now() || pc !== connection) return
-          await gatherIce(connection)
-          await publishSignal(connection, currentSessionId)
-        }
-        if (!now()) return
+        if (isOfferer && !pc) await offerConnection()
+        if (!now() || !canSignal()) return
         const data = { senderPubKey: targetPubKey }
         const result = await withRelayTimeout(getSignal(data, await proof("signal:read", data)))
-        if (!result.success || !result.signal || !now()) return
-        const packet = JSON.parse(await decryptFromPeer(result.signal.encryptedData, session.privateKey, targetPubKey)) as SignalPacket
-        if (!now()) return
-        if (packet.version !== 2 || packet.sender !== targetPubKey || packet.recipient !== session.identity.publicKey
-          || !ID_PATTERN.test(packet.sessionId) || !Number.isSafeInteger(packet.timestamp) || Math.abs(Date.now() - packet.timestamp) > 60_000) return
-        if (isOfferer && packet.sessionId === currentSessionId && packet.description?.type === "answer" && pc?.signalingState === "have-local-offer") {
-          await pc.setRemoteDescription(packet.description)
-        } else if (!isOfferer && packet.description?.type === "offer" && packet.sessionId !== currentSessionId) {
-          currentSessionId = packet.sessionId
-          lastAttempt = Date.now()
-          const connection = newPeer()
-          await connection.setRemoteDescription(packet.description)
-          if (!now() || pc !== connection) return
-          const answer = await connection.createAnswer()
-          if (!now() || pc !== connection) return
-          await connection.setLocalDescription(answer)
-          if (!now() || pc !== connection) return
-          await gatherIce(connection)
-          await publishSignal(connection, currentSessionId)
+        if (!result.success || !now()) return
+        if (result.signal) {
+          const packet = JSON.parse(await decryptFromPeer(result.signal.encryptedData, session.privateKey, targetPubKey)) as SignalPacket
+          if (!now()) return
+          if (packet.version === 2 && packet.sender === targetPubKey && packet.recipient === session.identity.publicKey
+            && ID_PATTERN.test(packet.sessionId) && Number.isSafeInteger(packet.timestamp) && Math.abs(Date.now() - packet.timestamp) <= 60_000) {
+            if (isOfferer && packet.sessionId === currentSessionId && packet.description?.type === "answer" && pc?.signalingState === "have-local-offer") {
+              await pc.setRemoteDescription(packet.description)
+              return
+            } else if (!isOfferer && packet.description?.type === "offer" && packet.sessionId !== currentSessionId) {
+              currentSessionId = packet.sessionId
+              lastAttempt = Date.now()
+              const connection = newPeer()
+              await connection.setRemoteDescription(packet.description)
+              if (!now() || pc !== connection) return
+              const answer = await connection.createAnswer()
+              if (!now() || pc !== connection) return
+              await connection.setLocalDescription(answer)
+              if (!now() || pc !== connection) return
+              await gatherIce(connection)
+              await publishSignal(connection, currentSessionId)
+            }
+          }
         }
+        // Check for a waiting answer before replacing an old offer; a slower
+        // polling cadence must not continually discard the peer's response.
+        if (isOfferer && now() && Date.now() - lastAttempt > 25_000) await offerConnection()
       } catch {
         // Direct connections are optional; the independent relay stays active.
         if (now()) setStatus(sessionRef.current?.channel?.readyState === "open" ? "online" : relayAvailable ? "relay" : "offline")
@@ -183,6 +198,8 @@ export function useP2PChat(targetPubKey: string) {
         if (!result.success) throw new Error(result.error)
         if (!now()) return
         relayAvailable = true
+        consecutiveFailures = 0
+        emptyPolls = result.messages.length ? 0 : Math.min(emptyPolls + 1, 5)
         if (!cursor) receiveWarning = null
         setStatus(session.channel?.readyState === "open" ? "online" : "relay")
         let canAcknowledge = true
@@ -209,6 +226,7 @@ export function useP2PChat(targetPubKey: string) {
         if (now()) setError(receiveWarning)
       } catch (cause) {
         relayAvailable = false
+        consecutiveFailures = Math.min(consecutiveFailures + 1, 4)
         if (now()) {
           setStatus(session.channel?.readyState === "open" ? "online" : "offline")
           setError(cause instanceof Error ? cause.message : "Could not reach the relay. Retrying…")
@@ -216,8 +234,12 @@ export function useP2PChat(targetPubKey: string) {
       } finally {
         polling = false
         if (now()) {
-          void negotiate()
-          pollTimer = setTimeout(() => void poll(), relayAvailable ? cursor ? 100 : 3000 : 8000)
+          const hidden = document.visibilityState === "hidden"
+          // Signaling cannot repair an unavailable relay. Avoid competing requests
+          // during outages, and spare idle tabs repeated connection attempts.
+          if (canSignal()) void negotiate()
+          const delay = relayAvailable ? cursor ? 100 : 3000 * Math.max(1, emptyPolls) : Math.min(8000 * 2 ** (consecutiveFailures - 1), 60_000)
+          pollTimer = setTimeout(() => void poll(), hidden ? Math.max(delay, 30_000) : delay)
         }
       }
     }
@@ -247,7 +269,15 @@ export function useP2PChat(targetPubKey: string) {
       } catch { if (now()) setError("Could not refresh saved history. Check browser storage and try reconnecting.") }
       finally { refreshing = false }
     }
-    const wake = () => { clearTimeout(pollTimer); void refreshHistory(); void poll() }
+    const wake = () => { emptyPolls = 0; clearTimeout(pollTimer); void refreshHistory(); void poll() }
+    const visibilityChanged = () => {
+      if (document.visibilityState === "visible") wake()
+      else if (now() && !polling) {
+        clearTimeout(pollTimer)
+        const delay = relayAvailable ? 30_000 : Math.max(30_000, Math.min(8000 * 2 ** Math.max(0, consecutiveFailures - 1), 60_000))
+        pollTimer = setTimeout(() => void poll(), delay)
+      }
+    }
     const offline = () => {
       relayAvailable = false
       if (now()) { setStatus("offline"); setError("You are offline. Reconnect to send and receive messages.") }
@@ -282,6 +312,7 @@ export function useP2PChat(targetPubKey: string) {
     window.addEventListener("online", wake)
     window.addEventListener("offline", offline)
     window.addEventListener("focus", wake)
+    document.addEventListener("visibilitychange", visibilityChanged)
     return () => {
       active = false
       if (session) session.active = false
@@ -294,6 +325,7 @@ export function useP2PChat(targetPubKey: string) {
       window.removeEventListener("online", wake)
       window.removeEventListener("offline", offline)
       window.removeEventListener("focus", wake)
+      document.removeEventListener("visibilitychange", visibilityChanged)
     }
   }, [targetPubKey, attempt])
 
@@ -328,6 +360,7 @@ export function useP2PChat(targetPubKey: string) {
       const result = await withRelayTimeout(storeEncryptedMessage(data, await createRequestProof("message:send", data, session.identity.privateKey, session.identity.publicKey)))
       if (!result.success) throw new Error(result.error)
       accepted = true
+      if (session.active) reconnectRef.current?.()
       message.delivery = "sent"
       await saveMessageToStorage(session.identity.publicKey, message)
       update(message)

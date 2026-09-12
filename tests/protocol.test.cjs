@@ -225,8 +225,8 @@ test('idempotent retry remains successful at the pending message cap', async () 
   assert.equal((await send(await packet())).success, false)
 })
 
-test('messages from other contacts cannot starve a conversation behind the 100-row limit', async () => {
-  for (let index = 0; index < 101; index++) seedMessage(mallory, bob, { createdAt: Date.now() - 10_000 })
+test('messages from other contacts cannot starve a conversation behind the page limit', async () => {
+  for (let index = 0; index < protocol.MESSAGE_PAGE_SIZE + 1; index++) seedMessage(mallory, bob, { createdAt: Date.now() - 10_000 })
   const data = await packet()
   await send(data)
   const result = await inbox()
@@ -298,18 +298,61 @@ test('D1 failures return a recoverable result; fresh-proof retry can succeed', a
 
 test('signed cursor reaches rows after an unacknowledged full page, including equal timestamps', async () => {
   const createdAt = Date.now() - 1000
-  for (let index = 0; index < 105; index++) seedMessage(alice, bob, { createdAt })
+  const total = protocol.MESSAGE_PAGE_SIZE + 3
+  for (let index = 0; index < total; index++) seedMessage(alice, bob, { createdAt })
   seedMessage(mallory, bob, { createdAt })
   seedMessage(alice, mallory, { createdAt })
   const first = await inbox()
-  assert.equal(first.messages.length, 100)
+  assert.equal(first.messages.length, protocol.MESSAGE_PAGE_SIZE)
   assert.ok(first.nextCursor)
   const data = { senderPubKey: alice.publicKey, after: first.nextCursor }
   const second = await actions.getMyMessages(data, await proof('message:list', data, bob))
-  assert.equal(second.messages.length, 5)
+  assert.equal(second.messages.length, 3)
   assert.equal(second.nextCursor, null)
-  assert.equal(new Set([...first.messages, ...second.messages].map(row => row.id)).size, 105)
-  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM RelayMessage').get().count, 107, 'pagination never acknowledges or deletes')
+  assert.equal(new Set([...first.messages, ...second.messages].map(row => row.id)).size, total)
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM RelayMessage').get().count, total + 2, 'pagination never acknowledges or deletes')
+})
+
+test('packet limits count UTF-8 bytes and keep signals small before authorization', async () => {
+  const before = sqlite.prepare('SELECT COUNT(*) AS count FROM RequestNonce').get().count
+  for (const encryptedData of ['a'.repeat(protocol.MAX_PACKET_LENGTH + 1), '界'.repeat(Math.floor(protocol.MAX_PACKET_LENGTH / 3) + 1)]) {
+    assert.equal((await send({ id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData })).success, false)
+  }
+  const data = { recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(protocol.MAX_SIGNAL_PACKET_LENGTH + 1) }
+  assert.equal((await actions.storeSignal(data, await proof('signal:send', data, alice))).success, false)
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM RequestNonce').get().count, before)
+})
+
+function fillPendingBytes(bytes) {
+  while (bytes > 0) {
+    const length = Math.min(bytes, protocol.MAX_PACKET_LENGTH)
+    seedMessage(alice, bob, { encryptedData: 'a'.repeat(length) })
+    bytes -= length
+  }
+}
+
+test('pending file quota counts bytes, preserves retries, and releases space on acknowledgment', async () => {
+  const quota = 20 * 1024 * 1024
+  const data = { id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData: 'b'.repeat(100) }
+  fillPendingBytes(quota - 400)
+  seedMessage(alice, bob, { encryptedData: '界'.repeat(100) })
+  assert.deepEqual(await send(data), { success: true })
+  assert.equal(sqlite.prepare('SELECT SUM(LENGTH(CAST(encryptedData AS BLOB))) AS bytes FROM RelayMessage').get().bytes, quota)
+  assert.deepEqual(await send(data), { success: true }, 'a stable retry still succeeds at the byte cap')
+  const next = { ...data, id: crypto.randomUUID() }
+  assert.match((await send(next)).error, /pending message or file storage limit/)
+  const ack = { id: data.id, senderPubKey: alice.publicKey }
+  assert.deepEqual(await actions.deleteMessage(ack, await proof('message:ack', ack, bob)), { success: true })
+  assert.deepEqual(await send(next), { success: true })
+})
+
+test('concurrent signed sends cannot exceed pending ciphertext quota', async () => {
+  const quota = 20 * 1024 * 1024
+  fillPendingBytes(quota - 100)
+  const requests = Array.from({ length: 2 }, () => ({ id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(100) }))
+  const results = await Promise.all(requests.map(data => send(data)))
+  assert.equal(results.filter(result => result.success).length, 1)
+  assert.equal(sqlite.prepare('SELECT SUM(LENGTH(CAST(encryptedData AS BLOB))) AS bytes FROM RelayMessage').get().bytes, quota)
 })
 
 test('cursor tampering and malformed cursor fields are rejected', async () => {

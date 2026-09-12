@@ -1,11 +1,13 @@
 import { openDB, type DBSchema } from "idb"
 import { notifyHistoryChanged } from "./history-events"
+import type { MessageAttachment } from "./attachments"
 
 export interface StoredMessage {
   id: string
   peerPubKey: string
   senderPubKey: string
   content: string
+  attachments?: MessageAttachment[]
   timestamp: number
   updatedAt?: number
   delivery?: "pending" | "sent" | "failed" | "received"
@@ -30,7 +32,9 @@ export async function saveMessageToStorage(owner: string, message: StoredMessage
     const existing = await tx.store.get([message.peerPubKey, message.senderPubKey, message.id])
     // A slower retry in another tab must never erase a confirmed relay send.
     const stored = existing?.delivery === "sent" && message.senderPubKey === owner
-      ? existing : { ...message, ...(existing ? { content: existing.content, timestamp: existing.timestamp } : {}) }
+      ? existing : { ...message, ...(existing ? { content: existing.content, timestamp: existing.timestamp, attachments: existing.attachments } : {}) }
+    // Absence is part of the original packet too: a stale retry cannot add files.
+    if (stored.attachments === undefined) delete stored.attachments
     await tx.store.put(stored)
     await tx.done
     notifyHistoryChanged(owner, message.peerPubKey)

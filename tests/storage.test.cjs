@@ -64,3 +64,40 @@ test('commit failure never reports history changes or leaves a partial row', asy
   await assert.rejects(h.saveMessageToStorage(owner, message('pending')), /aborted/)
   assert.equal(h.notifications.length, 0); assert.equal(h.rows.size, 0)
 })
+
+test('retries retain the original file bytes, names, types and order', async () => {
+  const h = harness()
+  const original = { ...message('failed'), attachments: [
+    { name: 'homework.pdf', type: 'application/pdf', size: 3, data: 'AAEC' },
+    { name: 'notes.txt', type: 'text/plain', size: 1, data: 'YQ==' },
+  ] }
+  await h.saveMessageToStorage(owner, original)
+  const pending = await h.saveMessageToStorage(owner, { ...original, content: 'Edited', timestamp: original.timestamp + 1,
+    attachments: [{ name: 'replacement.txt', type: 'text/plain', size: 1, data: 'Yg==' }], delivery: 'pending' })
+  assert.deepEqual(pending.attachments, original.attachments)
+  assert.equal(pending.content, original.content)
+  assert.equal(pending.timestamp, original.timestamp)
+  const sent = await h.saveMessageToStorage(owner, { ...pending, attachments: undefined, delivery: 'sent' })
+  assert.deepEqual(sent.attachments, original.attachments)
+  assert.equal(sent.delivery, 'sent')
+})
+
+test('a text-only stable ID cannot acquire files from a later retry', async () => {
+  const h = harness(), original = message('failed')
+  await h.saveMessageToStorage(owner, original)
+  const retry = await h.saveMessageToStorage(owner, { ...original, delivery: 'pending',
+    attachments: [{ name: 'late.txt', type: 'text/plain', size: 1, data: 'YQ==' }] })
+  assert.equal(retry.attachments, undefined)
+  assert.equal([...h.rows.values()][0].attachments, undefined)
+})
+
+test('duplicate receives racing across tabs cannot replace the first saved attachment', async () => {
+  const h = harness(), original = { ...message('received'), senderPubKey: peer,
+    attachments: [{ name: 'original.txt', type: 'text/plain', size: 1, data: 'YQ==' }] }
+  const [, duplicate] = await Promise.all([
+    h.saveMessageToStorage(owner, original),
+    h.saveMessageToStorage(owner, { ...original, attachments: [{ name: 'altered.txt', type: 'text/plain', size: 1, data: 'Yg==' }] }),
+  ])
+  assert.deepEqual(duplicate.attachments, original.attachments)
+  assert.equal(h.rows.size, 1)
+})

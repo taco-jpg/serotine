@@ -5,7 +5,8 @@ import { storeSignal, getSignal, storeEncryptedMessage, getMyMessages, deleteMes
 import { encryptForPeer, decryptFromPeer, importKey } from "@/lib/crypto"
 import { loadIdentity, validateAddress, type Identity } from "@/lib/identity"
 import { createRequestProof } from "@/lib/request-auth"
-import { isEnvelope, ID_PATTERN, MAX_MESSAGE_LENGTH, MAX_PACKET_LENGTH, type Envelope, type InboxCursor, type InboxRequest } from "@/lib/protocol"
+import { isEnvelope, ID_PATTERN, MAX_MESSAGE_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, type Envelope, type InboxCursor, type InboxRequest } from "@/lib/protocol"
+import { validateAttachments, type MessageAttachment } from "@/lib/attachments"
 import { saveMessageToStorage, getMessagesFromStorage, migrateLegacyHistory, type StoredMessage } from "@/lib/storage"
 import { RTC_CONFIG } from "@/config/webrtc"
 import { MessageSendError } from "@/lib/message-send-error"
@@ -20,6 +21,7 @@ interface Session {
   privateKey: CryptoKey
   peer: string
   channel: RTCDataChannel | null
+  connection: RTCPeerConnection | null
 }
 interface SignalPacket {
   version: 2
@@ -84,17 +86,18 @@ export function useP2PChat(targetPubKey: string) {
         session.channel = null
       }
       if (pc) { pc.onconnectionstatechange = null; pc.ondatachannel = null; pc.close(); pc = null }
+      if (session) session.connection = null
     }
     const receive = async (encrypted: string, expectedId?: string) => {
       if (!session || !now() || encrypted.length > MAX_PACKET_LENGTH) return false
       const envelope: unknown = JSON.parse(await decryptFromPeer(encrypted, session.privateKey, targetPubKey))
       if (!isEnvelope(envelope, targetPubKey, session.identity.publicKey) || (expectedId && envelope.id !== expectedId)) return false
       if (received.has(envelope.id)) return true
-      const message: ChatMessage = { id: envelope.id, peerPubKey: targetPubKey, senderPubKey: targetPubKey, content: envelope.content, timestamp: envelope.timestamp, delivery: "received" }
+      const message: ChatMessage = { id: envelope.id, peerPubKey: targetPubKey, senderPubKey: targetPubKey, content: envelope.content, ...(envelope.attachments ? { attachments: envelope.attachments } : {}), timestamp: envelope.timestamp, delivery: "received" }
       // Acknowledge only AFTER durable local storage succeeds.
-      await saveMessageToStorage(session.identity.publicKey, message)
+      const stored = await saveMessageToStorage(session.identity.publicKey, message)
       received.add(message.id)
-      show(message)
+      show(stored)
       return true
     }
     const attachChannel = (channel: RTCDataChannel) => {
@@ -111,6 +114,7 @@ export function useP2PChat(targetPubKey: string) {
       closePeer()
       const connection = new RTCPeerConnection(RTC_CONFIG)
       pc = connection
+      if (session) session.connection = connection
       connection.ondatachannel = event => attachChannel(event.channel)
       connection.onconnectionstatechange = () => {
         if (!now() || pc !== connection) return
@@ -129,6 +133,7 @@ export function useP2PChat(targetPubKey: string) {
       if (!session || !now() || !canSignal() || connection !== pc || !connection.localDescription) return
       const packet: SignalPacket = { version: 2, sender: session.identity.publicKey, recipient: targetPubKey, sessionId: id, timestamp: Date.now(), description: connection.localDescription.toJSON() }
       const data = { recipientPubKey: targetPubKey, encryptedData: await encryptForPeer(JSON.stringify(packet), session.privateKey, targetPubKey) }
+      if (data.encryptedData.length > MAX_SIGNAL_PACKET_LENGTH) throw new Error("Connection signal is too large.")
       if (!now()) return
       const result = await withRelayTimeout(storeSignal(data, await proof("signal:send", data)))
       if (!result.success) throw new Error(result.error)
@@ -158,7 +163,10 @@ export function useP2PChat(targetPubKey: string) {
         const result = await withRelayTimeout(getSignal(data, await proof("signal:read", data)))
         if (!result.success || !now()) return
         if (result.signal) {
-          const packet = JSON.parse(await decryptFromPeer(result.signal.encryptedData, session.privateKey, targetPubKey)) as SignalPacket
+          if (result.signal.encryptedData.length > MAX_SIGNAL_PACKET_LENGTH) return
+          const plaintext = await decryptFromPeer(result.signal.encryptedData, session.privateKey, targetPubKey)
+          if (plaintext.length > MAX_SIGNAL_PACKET_LENGTH) return
+          const packet = JSON.parse(plaintext) as SignalPacket
           if (!now()) return
           if (packet.version === 2 && packet.sender === targetPubKey && packet.recipient === session.identity.publicKey
             && ID_PATTERN.test(packet.sessionId) && Number.isSafeInteger(packet.timestamp) && Math.abs(Date.now() - packet.timestamp) <= 60_000) {
@@ -291,7 +299,7 @@ export function useP2PChat(targetPubKey: string) {
         if (identity.publicKey === targetPubKey) throw new Error("Choose a contact address other than your own.")
         const privateKey = await importKey(identity.privateKey, "encryption", "private")
         if (!active) return
-        session = { active: true, identity, privateKey, peer: targetPubKey, channel: null }
+        session = { active: true, identity, privateKey, peer: targetPubKey, channel: null, connection: null }
         sessionRef.current = session
         setMyPub(identity.publicKey)
         await migrateLegacyHistory(identity.publicKey)
@@ -329,18 +337,23 @@ export function useP2PChat(targetPubKey: string) {
     }
   }, [targetPubKey, attempt])
 
-  const sendMessage = async (content: string, retry?: ChatMessage) => {
+  const sendMessage = async (content: string, retry?: ChatMessage, attachments?: MessageAttachment[]) => {
     const session = sessionRef.current
     if (!session?.active || session.peer !== targetPubKey || !ready) throw new Error("Your identity is still loading. Please wait.")
     const text = content.trim()
     if (retry && (retry.peerPubKey !== targetPubKey || retry.senderPubKey !== session.identity.publicKey || retry.content !== text)) {
       throw new Error("Retry the original message from this conversation.")
     }
-    if (!text || text.length > MAX_MESSAGE_LENGTH) throw new Error(`Messages must contain 1–${MAX_MESSAGE_LENGTH.toLocaleString()} characters.`)
+    if (text.length > MAX_MESSAGE_LENGTH) throw new Error(`Messages may contain up to ${MAX_MESSAGE_LENGTH.toLocaleString()} characters.`)
     const id = retry?.id ?? crypto.randomUUID()
+    const originalAttachments = retry ? retry.attachments : attachments
+    if (originalAttachments !== undefined && !validateAttachments(originalAttachments)) throw new Error("Choose valid files within the attachment limit.")
+    const candidate: Envelope = { version: originalAttachments?.length ? 3 : 2, id, sender: session.identity.publicKey, recipient: targetPubKey, content: text, timestamp: retry?.timestamp ?? Date.now(), ...(originalAttachments?.length ? { attachments: originalAttachments } : {}) }
+    if (!isEnvelope(candidate, session.identity.publicKey, targetPubKey)) throw new Error("Add a message or valid files within the attachment limit.")
     if (sending.current.has(id)) return
     sending.current.add(id)
-    const message: ChatMessage = { id, peerPubKey: targetPubKey, senderPubKey: session.identity.publicKey, content: text, timestamp: retry?.timestamp ?? Date.now(), updatedAt: Date.now(), delivery: "pending" }
+    // Snapshot before awaiting storage, so editing the composer cannot change a send.
+    let message: ChatMessage = { id, peerPubKey: targetPubKey, senderPubKey: session.identity.publicKey, content: text, ...(originalAttachments?.length ? { attachments: originalAttachments.map(file => ({ ...file })) } : {}), timestamp: candidate.timestamp, updatedAt: Date.now(), delivery: "pending" }
     const update = (item: ChatMessage) => {
       if (session.active) setMessages(previous => [...previous.filter(m => m.id !== item.id || m.senderPubKey !== item.senderPubKey), item].sort((a, b) => a.timestamp - b.timestamp))
     }
@@ -349,11 +362,13 @@ export function useP2PChat(targetPubKey: string) {
     try {
       const stored = await saveMessageToStorage(session.identity.publicKey, message)
       savedLocally = true
-      Object.assign(message, stored)
+      message = stored
       update(message)
       if ((message as ChatMessage).delivery === "sent") { if (session.active) setError(null); return }
-      const envelope: Envelope = { version: 2, id, sender: session.identity.publicKey, recipient: targetPubKey, content: message.content, timestamp: message.timestamp }
+      const envelope: Envelope = { version: message.attachments?.length ? 3 : 2, id, sender: session.identity.publicKey, recipient: targetPubKey, content: message.content, ...(message.attachments?.length ? { attachments: message.attachments } : {}), timestamp: message.timestamp }
+      if (!isEnvelope(envelope, session.identity.publicKey, targetPubKey)) throw new Error("The saved message contains invalid files or content.")
       const encryptedData = await encryptForPeer(JSON.stringify(envelope), session.privateKey, targetPubKey)
+      if (encryptedData.length > MAX_PACKET_LENGTH) throw new Error("This message is too large to send. Remove a file and try again.")
       const data = { id, recipientPubKey: targetPubKey, encryptedData }
       // Queue durably even when direct is available. Both paths use the same ID;
       // a peer that closes mid-send can still collect the queued copy later.
@@ -362,9 +377,12 @@ export function useP2PChat(targetPubKey: string) {
       accepted = true
       if (session.active) reconnectRef.current?.()
       message.delivery = "sent"
-      await saveMessageToStorage(session.identity.publicKey, message)
+      message = await saveMessageToStorage(session.identity.publicKey, message)
       update(message)
-      if (session.channel?.readyState === "open") {
+      // Large encrypted files travel via relay; avoid exceeding SCTP's negotiated
+      // packet size or the conservative browser interoperability limit.
+      const directLimit = Math.min(64_000, session.connection?.sctp?.maxMessageSize || 64_000)
+      if (session.channel?.readyState === "open" && encryptedData.length <= directLimit) {
         try { session.channel.send(encryptedData) } catch { /* The durable relay already has the message. */ }
       }
       if (session.active) setError(null)
@@ -376,7 +394,7 @@ export function useP2PChat(targetPubKey: string) {
         return
       }
       message.delivery = "failed"
-      await saveMessageToStorage(session.identity.publicKey, message).then(stored => { savedLocally = true; Object.assign(message, stored) }).catch(() => {})
+      await saveMessageToStorage(session.identity.publicKey, message).then(stored => { savedLocally = true; message = stored }).catch(() => {})
       if (savedLocally) update(message)
       if ((message as ChatMessage).delivery === "sent") { if (session.active) setError(null); return }
       const failure = new MessageSendError(cause instanceof Error ? cause.message : "Message was not sent. Please retry.", savedLocally)

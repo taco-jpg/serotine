@@ -22,7 +22,7 @@ Browser-based, end-to-end encrypted messaging with device-local identities and a
 - **File bank:** upload frequently used files and GIFs once, then search, rename, remove, or queue them from any conversation under the same identity. You can also save a selected attachment to the bank before sending. The bank holds up to 100 files and 50 MiB per identity, with the normal 10 MiB per-file limit. Files stay in this browser, survive reloads, and are sent through the normal encrypted attachment flow. Bank files are not included in backups or synchronized to linked devices; keep original copies. Clearing site data removes them.
 - **Adding files:** drop files anywhere in the open chat, paste files into the message box, or use Attach. Up to eight files can wait in the preview queue; each requires an explicit Send. Pending file selections stay in memory and do not survive navigation or reload.
 - **Auto compact files:** an optional browser-local setting losslessly compresses supported files to `.gz` when it saves at least 5% and 1 KiB. Recipients extract the downloaded archive. Photos, audio, video, and common compressed formats keep their original format. Source files up to 50 MiB can be compacted if the result fits the 10 MiB send limit.
-- **Invites:** copy an invitation link containing only your public address. The recipient explicitly adds you; opening a link does not automatically trust an identity.
+- **Contact QR codes:** open **Invite a friend** to show or save a QR image containing your exact full public address. In **Add contact** or a group's **Invite a member**, choose **Scan QR code**, then **Use camera** or **Upload QR image**. Review the scanned address and press Add; scanning never automatically saves a contact or joins a group. Existing public addresses and invitation links still work, and conversation settings show each contact's QR code.
 - **Search:** search all locally saved messages, filenames, and links, then jump to the matching conversation. Conversation search remains available.
 - **Polls:** create a question with options and let each participant choose or change their vote.
 - **Voice messages:** record, preview, send, or cancel an audio message. Microphone access is requested only when recording. Voice messages use the same attachment size limit.
@@ -45,6 +45,10 @@ npm run dev
 ```
 
 Open `http://localhost:3000`. Development uses OpenNext's local Cloudflare context and the `serotine_db` binding in `wrangler.toml`; production credentials are not required. Use separate browser profiles to test different identities. To test linked devices, restore the same full backup into another profile.
+
+## Contact QR codes
+
+Contact QR codes contain public addresses only, not private keys, passwords, or backup files. QR generation and image decoding run locally without a QR service. Camera access is requested only after choosing **Use camera**, requires HTTPS (or localhost), and stops when scanning finishes, is cancelled, the scanner closes, or the page is hidden. PNG, JPEG, WebP, GIF, and BMP images up to 10 MiB are supported. Copy/paste remains available when a camera or readable image is unavailable.
 
 ## Backups and synchronization
 
@@ -74,6 +78,8 @@ npm run build
 For browser integration, run `npx playwright install chromium` once, then `npm run test:browser`. The smoke test starts a local server and uses synthetic identities to exercise actual D1 traffic, groups, attachments, voice recording, backups, linked browsers, and the mobile layout. `SEROTINE_CHROMIUM_PATH` can point to an existing Chromium executable.
 
 `npm run test:private` checks two-participant private messaging, exact access-key reveal/copy/hiding, expiry and destruction, draft/search/backup exclusions, narrow mobile layouts, and native clipboard behavior in the backup password fields.
+
+`npm run test:qr` checks exact-address QR display/download, image import, explicit contact/group confirmation, invalid code handling, camera cleanup, and narrow mobile dialogs with synthetic identities. To test the production bundle without starting Cloudflare's development runtime, first run `npm run build:next -- --webpack`, then `SEROTINE_QR_PRODUCTION=1 npm run test:qr`. Camera tests use a controlled video stream; check physical-camera focus and permissions on your target phones before release.
 
 Run `npm run test:appearance` for theme selection, system-theme changes, sidebar collapse, desktop/mobile layout, message actions, and individual-message deletion.
 

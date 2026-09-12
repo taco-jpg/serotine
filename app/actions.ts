@@ -3,9 +3,10 @@
 import { getDB, RelayConfigurationError, type D1DatabaseBinding } from "@/lib/db"
 import { verifyRequestProof } from "@/lib/request-auth"
 import { relayFailureKind } from "@/lib/relay-diagnostics"
-import { AUTH_WINDOW_MS, ID_PATTERN, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof, type InboxRequest, type InboxCursor } from "@/lib/protocol"
+import { AUTH_WINDOW_MS, ID_PATTERN, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, MESSAGE_PAGE_SIZE, PUBLIC_KEY_PATTERN, type RequestProof, type InboxRequest, type InboxCursor } from "@/lib/protocol"
 
 class RequestError extends Error {}
+const MAX_PENDING_BYTES = 20 * 1024 * 1024
 type Failure = { success: false; error: string }
 export interface RelayMessage {
   id: string
@@ -40,8 +41,11 @@ function failure(error: unknown): Failure {
 function checkPeer(peer: string) {
   if (typeof peer !== "string" || !PUBLIC_KEY_PATTERN.test(peer)) throw new RequestError("Invalid contact address.")
 }
-function checkPacket(packet: string) {
-  if (typeof packet !== "string" || packet.length < 32 || packet.length > MAX_PACKET_LENGTH) throw new RequestError("Invalid encrypted packet.")
+function checkPacket(packet: string, limit = MAX_PACKET_LENGTH) {
+  if (typeof packet !== "string" || packet.length < 32 || packet.length > limit) throw new RequestError("Invalid encrypted packet.")
+  const bytes = new TextEncoder().encode(packet).byteLength
+  if (bytes > limit) throw new RequestError("Invalid encrypted packet.")
+  return bytes
 }
 async function authorize(action: string, payload: unknown, proof: RequestProof): Promise<D1DatabaseBinding> {
   if (!await verifyRequestProof(action, payload, proof)) throw new RequestError("Identity verification failed. Check your device clock and reopen the app.")
@@ -62,7 +66,8 @@ async function limitWrites(db: D1DatabaseBinding, proof: RequestProof, action: s
 
 export async function storeEncryptedMessage(data: { id: string; recipientPubKey: string; encryptedData: string }, proof: RequestProof): Promise<{ success: true } | Failure> {
   try {
-    checkPeer(data.recipientPubKey); checkPacket(data.encryptedData)
+    checkPeer(data.recipientPubKey)
+    const packetBytes = checkPacket(data.encryptedData)
     if (!ID_PATTERN.test(data.id) || data.recipientPubKey === proof.publicKey) throw new RequestError("Invalid message.")
     const db = await authorize("message:send", data, proof)
     await limitWrites(db, proof, "message:send", 60)
@@ -71,11 +76,20 @@ export async function storeEncryptedMessage(data: { id: string; recipientPubKey:
     const existing = await db.prepare("SELECT id FROM RelayMessage WHERE recipientPubKey = ? AND senderPubKey = ? AND id = ?")
       .bind(data.recipientPubKey, proof.publicKey, data.id).first()
     if (existing) return { success: true }
-    const pending = await db.prepare("SELECT COUNT(*) AS count FROM RelayMessage WHERE senderPubKey = ?").bind(proof.publicKey).first<{ count: number }>()
-    if ((pending?.count ?? 0) >= 500) throw new RequestError("Your pending message limit is reached. Wait for your contacts to collect messages.")
-    await db.prepare(`INSERT INTO RelayMessage (id, senderPubKey, recipientPubKey, encryptedData, createdAt, expiresAt)
-      VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING`)
-      .bind(data.id, proof.publicKey, data.recipientPubKey, data.encryptedData, now, now + 7 * 86400_000).run()
+    // Keep both quotas in the insert: concurrent sends cannot overfill a sender's inboxes.
+    const inserted = await db.prepare(`INSERT INTO RelayMessage (id, senderPubKey, recipientPubKey, encryptedData, createdAt, expiresAt)
+      SELECT ?, ?, ?, ?, ?, ? FROM (
+        SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(CAST(encryptedData AS BLOB))), 0) AS bytes
+        FROM RelayMessage WHERE senderPubKey = ?
+      ) AS pending WHERE pending.count < 500 AND pending.bytes + ? <= ?
+      ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING`)
+      .bind(data.id, proof.publicKey, data.recipientPubKey, data.encryptedData, now, now + 7 * 86400_000, proof.publicKey, packetBytes, MAX_PENDING_BYTES).run()
+    if (inserted.meta.changes !== 1) {
+      // Another request may have saved this same stable message ID while we waited.
+      const duplicate = await db.prepare("SELECT id FROM RelayMessage WHERE recipientPubKey = ? AND senderPubKey = ? AND id = ?")
+        .bind(data.recipientPubKey, proof.publicKey, data.id).first()
+      if (!duplicate) throw new RequestError("Your pending message or file storage limit is reached. Wait for your contacts to collect messages, then retry.")
+    }
     return { success: true }
   } catch (error) { return failure(error) }
 }
@@ -91,10 +105,10 @@ export async function getMyMessages(data: InboxRequest, proof: RequestProof): Pr
     const { results } = await db.prepare(`SELECT id, senderPubKey, recipientPubKey, encryptedData, createdAt FROM RelayMessage
       WHERE recipientPubKey = ? AND senderPubKey = ? AND expiresAt > ?
       ${after ? "AND (createdAt > ? OR (createdAt = ? AND id > ?))" : ""}
-      ORDER BY createdAt ASC, id ASC LIMIT 100`)
-      .bind(proof.publicKey, data.senderPubKey, Date.now(), ...(after ? [after.createdAt, after.createdAt, after.id] : [])).all<RelayMessage>()
+      ORDER BY createdAt ASC, id ASC LIMIT ?`)
+      .bind(proof.publicKey, data.senderPubKey, Date.now(), ...(after ? [after.createdAt, after.createdAt, after.id] : []), MESSAGE_PAGE_SIZE).all<RelayMessage>()
     const last = results.at(-1)
-    return { success: true, messages: results, nextCursor: results.length === 100 && last ? { createdAt: last.createdAt, id: last.id } : null }
+    return { success: true, messages: results, nextCursor: results.length === MESSAGE_PAGE_SIZE && last ? { createdAt: last.createdAt, id: last.id } : null }
   } catch (error) { return failure(error) }
 }
 
@@ -111,7 +125,7 @@ export async function deleteMessage(data: { id: string; senderPubKey: string }, 
 
 export async function storeSignal(data: { recipientPubKey: string; encryptedData: string }, proof: RequestProof): Promise<{ success: true } | Failure> {
   try {
-    checkPeer(data.recipientPubKey); checkPacket(data.encryptedData)
+    checkPeer(data.recipientPubKey); checkPacket(data.encryptedData, MAX_SIGNAL_PACKET_LENGTH)
     const db = await authorize("signal:send", data, proof)
     await limitWrites(db, proof, "signal:send", 20)
     await db.prepare("DELETE FROM RelaySignal WHERE expiresAt <= ?").bind(Date.now()).run()

@@ -146,8 +146,9 @@ test('cross-origin and same-site browser calls are refused; nonbrowser signed re
   assert.deepEqual(await response.json(), { success: true, messages: [], nextCursor: null })
 })
 
-test('body limit counts actual streamed bytes even with missing or false Content-Length; 64k packets fit', async t => {
+test('body limit counts streamed bytes despite missing or false Content-Length; full ciphertext packets fit', async t => {
   const h = harness(t)
+  const { MAX_PACKET_LENGTH } = h.load(path.join(root, 'lib/protocol.ts'))
   for (const declared of [undefined, '1']) {
     let cancelled = false
     const stream = new ReadableStream({
@@ -160,11 +161,76 @@ test('body limit counts actual streamed bytes even with missing or false Content
     assert.equal(response.status, 413)
     assert.equal(cancelled, true)
   }
-  assert.equal((await h.POST(new Request(`${origin}/api/relay`, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': '90000' }, body: '{}' }))).status, 413)
+  assert.equal((await h.POST(new Request(`${origin}/api/relay`, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': String(MAX_PACKET_LENGTH + 16 * 1024 + 1) }, body: '{}' }))).status, 413)
   assert.equal(h.calls.length, 0)
   const [alice, bob] = await Promise.all([h.identity(), h.identity()])
-  const data = { id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(64000) }
+  const data = { id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(MAX_PACKET_LENGTH) }
   assert.equal((await (await h.post(await h.signed('message:send', data, alice))).json()).success, true)
+})
+
+test('route rejects oversized packets and signals before database access', async t => {
+  const h = harness(t)
+  const { MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH } = h.load(path.join(root, 'lib/protocol.ts'))
+  const [alice, bob] = await Promise.all([h.identity(), h.identity()])
+  const packet = { id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(MAX_PACKET_LENGTH + 1) }
+  assert.equal((await h.post(await h.signed('message:send', packet, alice))).status, 400)
+  const signal = { recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(MAX_SIGNAL_PACKET_LENGTH + 1) }
+  assert.equal((await h.post(await h.signed('signal:send', signal, alice))).status, 400)
+  const unicode = { ...packet, encryptedData: '界'.repeat(MAX_PACKET_LENGTH / 2) }
+  assert.equal((await h.post(await h.signed('message:send', unicode, alice))).status, 413)
+  assert.equal(h.calls.length, 0)
+  const allowedSignal = { ...signal, encryptedData: 'a'.repeat(MAX_SIGNAL_PACKET_LENGTH) }
+  assert.deepEqual(await (await h.post(await h.signed('signal:send', allowedSignal, alice))).json(), { success: true })
+})
+
+test('one MiB of four files and a caption survives client, signed HTTP, SQLite, and decryption', async t => {
+  const h = harness(t)
+  const protocol = h.load(path.join(root, 'lib/protocol.ts'))
+  const { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS } = h.load(path.join(root, 'lib/attachments.ts'))
+  const [alice, bob] = await Promise.all([h.identity(), h.identity()])
+  const relay = client(async (url, init) => h.POST(new Request(`${origin}${url}`, init)))
+  const attachments = Array.from({ length: MAX_ATTACHMENTS }, (_, index) => {
+    const file = Buffer.alloc(MAX_ATTACHMENT_BYTES / MAX_ATTACHMENTS, index)
+    return { name: `file-${index}.bin`, type: 'application/octet-stream', size: file.length, data: file.toString('base64') }
+  })
+  const envelope = { version: 3, id: crypto.randomUUID(), sender: alice.publicKey, recipient: bob.publicKey,
+    content: '界'.repeat(protocol.MAX_MESSAGE_LENGTH), attachments, timestamp: Date.now() }
+  assert.equal(protocol.isEnvelope(envelope, alice.publicKey, bob.publicKey), true)
+  const ciphertext = await h.cryptography.encryptForPeer(JSON.stringify(envelope), alice.pair.privateKey, bob.publicKey)
+  assert.ok(ciphertext.length > 1024 * 1024 && ciphertext.length <= protocol.MAX_PACKET_LENGTH)
+  const data = { id: envelope.id, recipientPubKey: bob.publicKey, encryptedData: ciphertext }
+  const request = await h.signed('message:send', data, alice)
+  assert.deepEqual(await relay.storeEncryptedMessage(data, request.proof), { success: true })
+  const stored = h.sqlite.prepare('SELECT encryptedData FROM RelayMessage').get().encryptedData
+  assert.equal(stored, ciphertext)
+  assert.equal(stored.includes('file-0.bin'), false, 'file names are encrypted too')
+  const list = await h.signed('message:list', { senderPubKey: alice.publicKey }, bob)
+  const inbox = await relay.getMyMessages(list.data, list.proof)
+  const decrypted = JSON.parse(await h.cryptography.decryptFromPeer(inbox.messages[0].encryptedData, bob.pair.privateKey, alice.publicKey))
+  assert.deepEqual(decrypted, envelope)
+  const ack = await h.signed('message:ack', { id: envelope.id, senderPubKey: alice.publicKey }, bob)
+  assert.deepEqual(await relay.deleteMessage(ack.data, ack.proof), { success: true })
+  assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS count FROM RelayMessage').get().count, 0)
+})
+
+test('full-size encrypted packets stay within bounded inbox pages and retain a continuation cursor', async t => {
+  const h = harness(t)
+  const { MAX_PACKET_LENGTH, MESSAGE_PAGE_SIZE } = h.load(path.join(root, 'lib/protocol.ts'))
+  const [alice, bob] = await Promise.all([h.identity(), h.identity()])
+  for (let index = 0; index < MESSAGE_PAGE_SIZE + 1; index++) {
+    const data = { id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(MAX_PACKET_LENGTH) }
+    assert.deepEqual(await (await h.post(await h.signed('message:send', data, alice))).json(), { success: true })
+  }
+  const relay = client(async (url, init) => h.POST(new Request(`${origin}${url}`, init)))
+  const request = await h.signed('message:list', { senderPubKey: alice.publicKey }, bob)
+  const first = await relay.getMyMessages(request.data, request.proof)
+  assert.equal(first.messages.length, MESSAGE_PAGE_SIZE)
+  assert.ok(first.nextCursor)
+  assert.equal(first.messages.reduce((total, row) => total + row.encryptedData.length, 0), MAX_PACKET_LENGTH * MESSAGE_PAGE_SIZE)
+  const nextRequest = await h.signed('message:list', { senderPubKey: alice.publicKey, after: first.nextCursor }, bob)
+  const next = await relay.getMyMessages(nextRequest.data, nextRequest.proof)
+  assert.equal(next.messages.length, 1)
+  assert.equal(next.nextCursor, null)
 })
 
 function client(fetch, timers = {}) {

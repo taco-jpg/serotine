@@ -38,7 +38,12 @@ function harness(storage = new Map(), options = {}) {
     if (cache.has(file)) return cache.get(file)
     const output = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
     const module = { exports: {} }
-    new Function('require', 'module', 'exports', 'localStorage', output)(specifier => specifier === 'react' ? react : load(path.join(__dirname, '..', specifier.slice(2) + '.ts')), module, module.exports, localStorage)
+    new Function('require', 'module', 'exports', 'localStorage', output)(specifier => {
+      if (specifier === 'react') return react
+      return load(specifier.startsWith('@/')
+        ? path.join(__dirname, '..', specifier.slice(2) + '.ts')
+        : path.resolve(path.dirname(file), specifier + '.ts'))
+    }, module, module.exports, localStorage)
     cache.set(file, module.exports)
     return module.exports
   }

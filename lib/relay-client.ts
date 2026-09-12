@@ -1,5 +1,5 @@
 import type * as Actions from "@/app/actions"
-import { ID_PATTERN, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "./protocol"
+import { ID_PATTERN, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "./protocol"
 
 type RelayAction = "message:send" | "message:list" | "message:ack" | "signal:send" | "signal:read"
 type JsonObject = Record<string, unknown>
@@ -11,8 +11,8 @@ class RelayTransportError extends Error {}
 function object(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
-function packet(value: unknown): value is string {
-  return typeof value === "string" && value.length >= 32 && value.length <= MAX_PACKET_LENGTH
+function packet(value: unknown, limit = MAX_PACKET_LENGTH): value is string {
+  return typeof value === "string" && value.length >= 32 && value.length <= limit
 }
 function cursor(value: unknown) {
   return object(value) && typeof value.createdAt === "number" && Number.isSafeInteger(value.createdAt)
@@ -27,7 +27,7 @@ function validResult(action: RelayAction, value: unknown): boolean {
   }
   if (value.success !== true) return false
   if (action === "signal:read") {
-    return value.signal === null || (object(value.signal) && packet(value.signal.encryptedData))
+    return value.signal === null || (object(value.signal) && packet(value.signal.encryptedData, MAX_SIGNAL_PACKET_LENGTH))
   }
   if (action === "message:list") {
     return Array.isArray(value.messages) && value.messages.length <= 100

@@ -49,10 +49,13 @@ async function until(predicate, message = 'condition did not settle') {
     await tick()
   }
 }
-async function inbound(content = 'Incoming message', id = crypto.randomUUID()) {
-  const envelope = { version: 2, id, sender: bob.publicKey, recipient: alice.publicKey, content, timestamp: Date.now() }
+async function inbound(content = 'Incoming message', id = crypto.randomUUID(), attachments) {
+  const envelope = { version: attachments !== undefined ? 3 : 2, id, sender: bob.publicKey, recipient: alice.publicKey, content, timestamp: Date.now(), ...(attachments !== undefined ? { attachments } : {}) }
   return { id, senderPubKey: bob.publicKey, recipientPubKey: alice.publicKey,
     encryptedData: await cryptoFunctions.encryptForPeer(JSON.stringify(envelope), bob.pair.privateKey, alice.publicKey), createdAt: Date.now() }
+}
+function attachment(bytes = Buffer.from([0, 1, 127, 128, 255]), name = 'homework.pdf', type = 'application/pdf') {
+  return { name, type, size: bytes.length, data: bytes.toString('base64') }
 }
 function harness(options = {}) {
   const slots = [], effects = [], timers = new Map(), events = new EventTarget(), documentEvents = new EventTarget()
@@ -105,6 +108,7 @@ function harness(options = {}) {
       assert.equal(owner, alice.publicKey)
       calls.saves.push(structuredClone(item))
       records.set(`${item.senderPubKey}:${item.id}`, structuredClone(item))
+      return structuredClone(item)
     },
   }
   const hook = loader({ react, '@/lib/relay-client': actions, '@/lib/storage': storage,
@@ -574,5 +578,154 @@ test('a waiting answer is applied before an expired offer is replaced', async ()
     assert.equal(peers.length, 1, 'a valid waiting answer must preserve its matching offer')
     assert.equal(peers[0].closed, undefined)
     assert.equal(peers[0].remoteDescription.type, 'answer')
+  } finally { h?.unmount(); alice = originalAlice; bob = originalBob }
+})
+
+test('captioned and attachment-only messages preserve binary files through encryption and receipt', async t => {
+  for (const content of ['Here are my notes', '']) {
+    await t.test(content || 'No caption', async t => {
+      const files = [attachment(), attachment(Buffer.from('Limits → derivatives'), 'notes.txt', 'text/plain')]
+      const h = harness()
+      t.after(() => h.unmount())
+      await until(() => h.view().ready)
+      await h.view().sendMessage(content, undefined, files)
+      const encrypted = h.calls.sends[0].encryptedData
+      const envelope = JSON.parse(await cryptoFunctions.decryptFromPeer(encrypted, bob.pair.privateKey, alice.publicKey))
+      assert.equal(envelope.version, 3, 'old clients must leave unsupported attachments queued')
+      assert.equal(envelope.content, content)
+      assert.deepEqual(envelope.attachments, files)
+      assert.equal(encrypted.includes('homework.pdf'), false)
+      assert.equal(protocol.isEnvelope(envelope, alice.publicKey, bob.publicKey), true)
+      const received = await inbound(content, crypto.randomUUID(), envelope.attachments)
+      h.options.incoming = [received]
+      h.events.dispatchEvent(new Event('focus'))
+      await until(() => h.calls.acknowledgments.length === 1)
+      const stored = h.records.get(`${bob.publicKey}:${received.id}`)
+      assert.deepEqual(stored.attachments, files)
+      assert.equal(stored.content, content)
+      assert.deepEqual(Buffer.from(stored.attachments[0].data, 'base64'), Buffer.from([0, 1, 127, 128, 255]))
+    })
+  }
+})
+
+test('invalid attachment sends never persist or reach the relay; invalid receives remain unacknowledged', async t => {
+  const h = harness()
+  t.after(() => h.unmount())
+  await until(() => h.view().ready)
+  for (const files of [[{ ...attachment(), data: 'not base64' }], [{ ...attachment(), size: 999 }], Array.from({ length: 5 }, () => attachment())]) {
+    await assert.rejects(h.view().sendMessage('Bad file', undefined, files), /valid files/)
+  }
+  await assert.rejects(h.view().sendMessage('', undefined, []), /Add a message/)
+  assert.equal(h.calls.sends.length, 0)
+  assert.equal(h.calls.saves.length, 0)
+  h.options.incoming = [await inbound('Bad file', crypto.randomUUID(), [{ ...attachment(), size: 999 }])]
+  h.events.dispatchEvent(new Event('focus'))
+  await until(() => /invalid encrypted/.test(h.view().error))
+  assert.equal(h.calls.acknowledgments.length, 0)
+  assert.equal(h.view().messages.length, 0)
+})
+
+test('attachment retries and composer edits preserve the original plaintext packet', async t => {
+  const options = { send: async () => ({ success: false, error: 'Temporary outage' }) }
+  const h = harness(options)
+  t.after(() => h.unmount())
+  await until(() => h.view().ready)
+  const files = [attachment()], original = structuredClone(files)
+  const firstSend = h.view().sendMessage('', undefined, files)
+  files[0].name = 'edited.pdf'
+  files[0].data = 'ZmFrZQ=='
+  files.length = 0
+  await assert.rejects(firstSend, /Temporary outage/)
+  const failed = h.view().messages[0]
+  assert.deepEqual(failed.attachments, original)
+  options.send = async () => ({ success: true })
+  await h.view().sendMessage('', failed, [attachment(Buffer.from('replacement'))])
+  const plaintexts = await Promise.all(h.calls.sends.map(packet => cryptoFunctions.decryptFromPeer(packet.encryptedData, bob.pair.privateKey, alice.publicKey)))
+  assert.equal(plaintexts[0], plaintexts[1], 'retry must preserve ID, timestamp, caption and attachment bytes')
+  assert.equal(h.view().messages.length, 1)
+  assert.equal(h.view().messages[0].delivery, 'sent')
+})
+
+test('cross-tab saved originals override stale attachment retry objects before encryption', async t => {
+  for (const originalFiles of [undefined, [attachment()]]) {
+    await t.test(originalFiles ? 'Existing files' : 'Originally text only', async t => {
+      const original = { id: crypto.randomUUID(), peerPubKey: bob.publicKey, senderPubKey: alice.publicKey, content: 'Original', timestamp: Date.now() - 1000, delivery: 'failed', ...(originalFiles ? { attachments: originalFiles } : {}) }
+      const h = harness({ save: async (owner, item) => ({ ...original, delivery: item.delivery }) })
+      t.after(() => h.unmount())
+      await until(() => h.view().ready)
+      const stale = { ...original, content: 'Stale copy', timestamp: Date.now(), attachments: [attachment(Buffer.from('replacement'))] }
+      await h.view().sendMessage(stale.content, stale)
+      const envelope = JSON.parse(await cryptoFunctions.decryptFromPeer(h.calls.sends[0].encryptedData, bob.pair.privateKey, alice.publicKey))
+      assert.equal(envelope.content, original.content)
+      assert.equal(envelope.timestamp, original.timestamp)
+      assert.deepEqual(envelope.attachments, original.attachments)
+      assert.equal(envelope.version, originalFiles ? 3 : 2)
+      assert.deepEqual(h.view().messages[0].attachments, originalFiles)
+    })
+  }
+})
+
+test('attachment storage failures preserve unsent drafts and prevent premature receive acknowledgment', async t => {
+  const files = [attachment()], row = await inbound('', crypto.randomUUID(), files)
+  const h = harness({ storageFailure: true, incoming: [row] })
+  t.after(() => h.unmount())
+  await until(() => h.view().ready && /decrypted or saved/.test(h.view().error))
+  await assert.rejects(h.view().sendMessage('', undefined, files), cause => {
+    assert.equal(cause.savedLocally, false)
+    return /storage full/.test(cause.message)
+  })
+  assert.equal(h.calls.sends.length, 0)
+  assert.equal(h.calls.acknowledgments.length, 0)
+  assert.equal(h.view().messages.length, 0)
+  h.options.storageFailure = false
+  h.events.dispatchEvent(new Event('focus'))
+  await until(() => h.calls.acknowledgments.length === 1)
+  assert.deepEqual(h.view().messages[0].attachments, files)
+})
+
+test('large files bypass direct transport, small packets respect SCTP, and both receive paths deduplicate', async () => {
+  const originalAlice = alice, originalBob = bob
+  if (alice.publicKey > bob.publicKey) [alice, bob] = [bob, alice]
+  let h
+  try {
+    const direct = [], channel = { readyState: 'open', send(data) { direct.push(data) }, close() {} }
+    const sctp = { maxMessageSize: 64_000 }
+    class RTC {
+      constructor() { this.iceGatheringState = 'complete'; this.sctp = sctp }
+      createDataChannel() { return channel }
+      async createOffer() { return { type: 'offer', sdp: 'test' } }
+      async setLocalDescription(description) { this.localDescription = { toJSON: () => description } }
+      close() {}
+    }
+    h = harness({ RTC })
+    await until(() => h.view().ready && channel.onmessage)
+    await h.view().sendMessage('Small file', undefined, [attachment()])
+    assert.equal(direct.length, 1)
+    assert.equal(direct[0], h.calls.sends[0].encryptedData)
+    await h.view().sendMessage('', undefined, [attachment(Buffer.alloc(64_000, 9))])
+    assert.equal(h.calls.sends.length, 2)
+    assert.equal(direct.length, 1, 'large encrypted files should remain on the durable relay')
+    sctp.maxMessageSize = 512
+    await h.view().sendMessage('Negotiated transport limit')
+    assert.equal(h.calls.sends.length, 3)
+    assert.equal(direct.length, 1, 'small negotiated limits must also be honored')
+    const row = await inbound('', crypto.randomUUID(), [attachment()])
+    channel.onmessage({ data: row.encryptedData })
+    await until(() => h.view().messages.some(message => message.id === row.id))
+    const saves = h.calls.saves.length
+    h.options.incoming = [row]
+    h.events.dispatchEvent(new Event('focus'))
+    await until(() => h.calls.acknowledgments.length === 1)
+    assert.equal(h.calls.saves.length, saves)
+    assert.equal(h.view().messages.filter(message => message.id === row.id).length, 1)
+    const relayFirst = await inbound('Relay first', crypto.randomUUID(), [attachment()])
+    h.options.incoming = [relayFirst]
+    h.events.dispatchEvent(new Event('focus'))
+    await until(() => h.calls.acknowledgments.length === 2)
+    const relaySaves = h.calls.saves.length
+    channel.onmessage({ data: relayFirst.encryptedData })
+    for (let i = 0; i < 10; i++) await tick()
+    assert.equal(h.calls.saves.length, relaySaves)
+    assert.equal(h.view().messages.filter(message => message.id === relayFirst.id).length, 1)
   } finally { h?.unmount(); alice = originalAlice; bob = originalBob }
 })

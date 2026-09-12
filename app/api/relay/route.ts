@@ -1,12 +1,12 @@
 import {
   deleteMessage, getMyMessages, getSignal, storeEncryptedMessage, storeSignal,
 } from "@/app/actions"
-import { ID_PATTERN, MAX_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "@/lib/protocol"
+import { ID_PATTERN, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "@/lib/protocol"
 
 export const dynamic = "force-dynamic"
 
-// Includes the encrypted packet (up to 64,000 characters), proof, and JSON framing.
-const MAX_BODY_BYTES = 80 * 1024
+// Ciphertext remains inline; leave bounded space for its JSON wrapper and proof.
+const MAX_BODY_BYTES = MAX_PACKET_LENGTH + 16 * 1024
 const INVALID_REQUEST = "Invalid messaging request. Reload Serotine and try again."
 
 type JsonObject = Record<string, unknown>
@@ -23,8 +23,8 @@ function peer(value: unknown): value is string {
 function id(value: unknown): value is string {
   return typeof value === "string" && ID_PATTERN.test(value)
 }
-function packet(value: unknown): value is string {
-  return typeof value === "string" && value.length >= 32 && value.length <= MAX_PACKET_LENGTH
+function packet(value: unknown, limit = MAX_PACKET_LENGTH): value is string {
+  return typeof value === "string" && value.length >= 32 && value.length <= limit
 }
 function proofShape(value: unknown): value is RequestProof {
   return object(value) && keys(value, ["publicKey", "timestamp", "nonce", "signature"])
@@ -54,24 +54,28 @@ async function readBody(request: Request): Promise<unknown> {
   }
   if (!request.body) throw new SyntaxError()
   const reader = request.body.getReader()
-  const chunks: Uint8Array[] = []
+  // A growing byte buffer also bounds overhead for hostile one-byte chunks.
+  let body = new Uint8Array(Math.min(16 * 1024, MAX_BODY_BYTES))
   let length = 0
   try {
     while (true) {
       const { value, done } = await reader.read()
       if (done) break
-      length += value.byteLength
-      if (length > MAX_BODY_BYTES) {
+      const nextLength = length + value.byteLength
+      if (nextLength > MAX_BODY_BYTES) {
         void reader.cancel().catch(() => {})
         throw new BodyTooLarge()
       }
-      chunks.push(value)
+      if (nextLength > body.byteLength) {
+        const expanded = new Uint8Array(Math.min(MAX_BODY_BYTES, Math.max(nextLength, body.byteLength * 2)))
+        expanded.set(body.subarray(0, length))
+        body = expanded
+      }
+      body.set(value, length)
+      length = nextLength
     }
   } finally { reader.releaseLock() }
-  const body = new Uint8Array(length)
-  let offset = 0
-  for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength }
-  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body))
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body.subarray(0, length)))
 }
 
 /** Stable transport; the existing actions still verify signatures and consume nonces. */
@@ -89,7 +93,7 @@ export async function POST(request: Request): Promise<Response> {
   try { body = await readBody(request) }
   catch (error) {
     return error instanceof BodyTooLarge
-      ? failure("This messaging request is too large. Shorten your message and try again.", 413)
+      ? failure("This messaging request is too large. Use smaller files or shorten your message and try again.", 413)
       : failure(INVALID_REQUEST, 400)
   }
   if (!object(body)) return failure(INVALID_REQUEST, 400)
@@ -120,7 +124,7 @@ export async function POST(request: Request): Promise<Response> {
         if (!keys(data, ["id", "senderPubKey"]) || !id(data.id) || !peer(data.senderPubKey)) break
         return json(await deleteMessage(data as unknown as Parameters<typeof deleteMessage>[0], proof))
       case "signal:send":
-        if (!keys(data, ["recipientPubKey", "encryptedData"]) || !peer(data.recipientPubKey) || !packet(data.encryptedData)) break
+        if (!keys(data, ["recipientPubKey", "encryptedData"]) || !peer(data.recipientPubKey) || !packet(data.encryptedData, MAX_SIGNAL_PACKET_LENGTH)) break
         return json(await storeSignal(data as unknown as Parameters<typeof storeSignal>[0], proof))
       case "signal:read":
         if (!keys(data, ["senderPubKey"]) || !peer(data.senderPubKey)) break

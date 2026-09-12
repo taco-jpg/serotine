@@ -1,6 +1,6 @@
 import {
   deleteMessage, getMyMessages, getSignal, storeEncryptedMessage, storeSignal,
-  getEventFeed, getLegacyInbox, storeEncryptedEvent,
+  getEventFeed, getLegacyInbox, storeEncryptedEvent, retireIdentity,
 } from "@/app/actions"
 import { ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "@/lib/protocol"
 
@@ -130,6 +130,9 @@ export async function POST(request: Request): Promise<Response> {
   try {
     // An explicit allowlist keeps this endpoint from invoking arbitrary server exports.
     switch (body.action) {
+      case "identity:retire":
+        if (!keys(data, [])) break
+        return json(await retireIdentity(data as Record<string, never>, proof))
       case "event:send":
         if (!keys(data, ["id", "recipientPubKey", "encryptedData"])
           || !id(data.id) || !peer(data.recipientPubKey) || !packet(data.encryptedData, MAX_EVENT_PACKET_LENGTH)) break

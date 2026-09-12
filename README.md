@@ -19,6 +19,7 @@ Browser-based, end-to-end encrypted messaging with device-local identities and a
 - **Voice messages:** record, preview, send, or cancel an audio message. Microphone access is requested only when recording. Voice messages use the same attachment size limit.
 - **Message yourself:** your own address opens a normal conversation. Send yourself text, files, links, and voice messages using the normal composer.
 - **Backups and linked devices:** export a password-encrypted full backup containing identity, contacts, legacy history, message events, attachment chunks, and preferences. Restore it on another device to link that device and synchronize retained incoming and outgoing events.
+- **Phones and tablets:** inbox and conversation views fit narrow screens, dialogs scroll within the visible viewport, and the composer adjusts for the on-screen keyboard and device safe areas. Touch controls remain accessible without hover.
 - **Message requests and blocking:** accept unfamiliar senders, block them, or unblock them later. Muted and unaccepted conversations do not generate notifications.
 - **Math and code:** render inline/display math and fenced code without interpreting raw HTML. Math rendering disables trusted commands.
 
@@ -40,9 +41,15 @@ Open `http://localhost:3000`. Development uses OpenNext's local Cloudflare conte
 
 Open **Backups and linked devices** to download an encrypted snapshot, or **Link another device** for transfer instructions. Use a password of at least twelve characters and keep it separate from the backup file. The password cannot be recovered. Existing identity-only backups remain importable, but naturally contain no chat history.
 
+On a phone that already has a different identity, open **Restore**, select the desktop backup, and enter its password. Serotine validates the backup and asks you to confirm **Switch identity and restore**. The previous identity and its chats remain saved separately in this browser; they are not merged into the desktop identity. Previous identities are available in the backup controls. Do not clear site data to get past an identity conflict.
+
 The relay retains new encrypted events for seven days. Each browser tracks its own position in a non-destructive feed that includes both received and sent events. Reading on one device does not remove another device's copy. A new device obtains older history from the full backup and then catches up from the retained feed. A device offline beyond the retention window may need a newer full backup. Contact aliases, notification preferences, and drafts are device-local after the initial transfer.
 
-Linked devices share the same identity private key. This release does not support revoking only one linked device. A lost or compromised identity requires creating a new identity and sharing its new address. Browser storage and exported snapshots contain sensitive information; clearing site data without a usable backup can lose local history.
+Linked devices share the same identity private key. Revoking only one linked device is not supported. If a backup password or identity key leaks, use **Backups and linked devices → Security → Retire old identity and create new address** on the trusted device holding the affected identity. Confirming permanently retires that address on this relay, blocking old keys from authenticated relay operations and rejecting new messages addressed to it. Retirement is signed by the affected identity; no administrator can infer the right identity from a backup password.
+
+Serotine saves the replacement key and the old identity locally before requesting retirement. After the server confirms, it activates the new address and copies contacts. Old chats stay under the old identity for recovery. Existing group membership does not transfer: contacts need your new address, and group administrators must add it. Make a new backup with a fresh password and restore it on your other devices. If the server response is lost, retry on the same browser; the staged replacement key is reused.
+
+Retirement cannot erase downloaded files, prevent offline decryption of an old backup, recall delivered messages, cancel requests already in flight, or revoke access through another server or an established legacy peer connection. Re-encrypting a new backup alone does not invalidate an older one. The retired-address records are permanent security state: retain them when migrating the relay database. Browser storage and exported snapshots contain sensitive information; clearing site data without a usable backup can lose local history.
 
 ## Verification
 
@@ -54,6 +61,8 @@ npm run build
 ```
 
 For browser integration, run `npx playwright install chromium` once, then `npm run test:browser`. The smoke test starts a local server and uses synthetic identities to exercise actual D1 traffic, groups, attachments, voice recording, backups, linked browsers, and the mobile layout. `SEROTINE_CHROMIUM_PATH` can point to an existing Chromium executable.
+
+Run `npm run test:recovery` separately to exercise the real mobile restore confirmation, identity archives, permanent retirement, and old-device denial with synthetic identities. Each browser suite starts its own development server; run them sequentially.
 
 Tests cover the actual Web Crypto and SQLite implementations alongside controlled browser/storage boundaries. They exercise authenticated relay access, replay protection, identity scoping, retained synchronization, group authorization, message controls, attachment integrity, and encrypted backups. Automated tests are not an independent security audit or a substitute for real-device deployment checks.
 

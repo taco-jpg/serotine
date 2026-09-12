@@ -173,8 +173,8 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
     finally { setBusyRequest(null) }
   }
   if (!identity) return <main className="flex min-h-dvh flex-col items-center justify-center gap-3 p-6 text-zinc-400" role="status"><Loader2 className="size-5 animate-spin" /><p>Opening your identity…</p>{messaging.error && <p role="alert" className="max-w-md text-center text-sm text-red-300">{messaging.error}</p>}</main>
-  return <div className="flex h-dvh min-h-0 overflow-hidden bg-zinc-950 text-zinc-200">
-    <aside aria-label="Inbox" className={`${inConversation ? "hidden md:flex" : "flex"} w-full flex-col border-r border-zinc-800/80 bg-zinc-900/25 md:w-[22rem] md:shrink-0`}>
+  return <div className="chat-shell flex min-h-0 overflow-hidden bg-zinc-950 text-zinc-200">
+    <aside aria-label="Inbox" className={`${inConversation ? "hidden md:flex" : "flex"} min-h-0 min-w-0 w-full flex-col border-r border-zinc-800/80 bg-zinc-900/25 md:w-[22rem] md:shrink-0`}>
       <div className="flex h-20 shrink-0 items-center justify-between border-b border-zinc-800/80 px-5">
         <Link href="/chat" className="flex items-center gap-3"><Shield className="size-6 text-indigo-300" /><span className="font-serif text-2xl text-zinc-100">Serotine</span></Link>
         <div className="flex items-center"><AccountTools identity={identity} /><Button variant="ghost" size="icon" aria-label="Notification and privacy settings" onClick={() => { setSettingsError(""); setSettingsOpen(true) }}><Settings2 className="size-4" /></Button></div>
@@ -192,7 +192,7 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
         {notice && <p role="status" className="mx-5 mb-4 text-sm text-indigo-200">{notice}</p>}
         <nav className="space-y-1 px-3 pb-4" aria-label="Conversations">
           {!ready && <p role="status" className="px-4 py-6 text-sm text-zinc-500">Loading conversations…</p>}
-          {ready && activeConversations.length === 0 && <div className="px-4 py-6 text-center"><Inbox className="mx-auto mb-3 size-7 text-zinc-600" /><p className="text-sm text-zinc-400">Your inbox is ready.</p><p className="mt-2 text-sm leading-relaxed text-zinc-500">Add a friend or create a group to start talking.</p><div className="mt-4 flex justify-center gap-2"><Button size="sm" onClick={() => setAddOpen(true)}><Plus className="size-3.5" /> Add contact</Button><Button size="sm" variant="outline" onClick={() => setGroupOpen(true)}><Users className="size-3.5" /> New group</Button></div></div>}
+          {ready && activeConversations.length === 0 && <div className="px-4 py-6 text-center"><Inbox className="mx-auto mb-3 size-7 text-zinc-600" /><p className="text-sm text-zinc-400">Your inbox is ready.</p><p className="mt-2 text-sm leading-relaxed text-zinc-500">Add a friend or create a group to start talking.</p><div className="mt-4 flex flex-wrap justify-center gap-2"><Button size="sm" onClick={() => setAddOpen(true)}><Plus className="size-3.5" /> Add contact</Button><Button size="sm" variant="outline" onClick={() => setGroupOpen(true)}><Users className="size-3.5" /> New group</Button></div></div>}
           {activeConversations.length > 0 && filteredConversations.length === 0 && <p role="status" className="px-4 py-6 text-center text-sm text-zinc-400">No conversations match your filter.</p>}
           {filteredConversations.map(conversation => {
             const contact = contacts.find(item => item.pub === conversation.id)
@@ -200,7 +200,7 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
           })}
         </nav>
       </div>
-      <div className="flex shrink-0 items-center gap-2 border-t border-zinc-800/80 px-5 py-3 text-xs text-zinc-500"><span className={`size-1.5 rounded-full ${status === "online" ? "bg-emerald-400" : status === "connecting" ? "animate-pulse bg-amber-300" : "bg-zinc-500"}`} /><span className="flex-1">{status === "online" ? "Inbox connected" : status === "connecting" ? "Connecting…" : "Offline · messages stay queued"}</span>{status === "offline" && <Button variant="ghost" size="icon" className="size-6" aria-label="Reconnect inbox" onClick={() => void messaging.sync().catch(cause => setError(errorMessage(cause)))}><RefreshCw className="size-3" /></Button>}<Button variant="ghost" size="icon" className="size-7" aria-label="Set up notifications" onClick={() => { setSettingsError(""); setSettingsOpen(true) }}>{permission === "granted" ? <Bell className="size-3.5" /> : <BellOff className="size-3.5" />}</Button></div>
+      <div className="chat-bottom flex shrink-0 items-center gap-2 border-t border-zinc-800/80 px-5 py-3 text-xs text-zinc-500"><span className={`size-1.5 rounded-full ${status === "online" ? "bg-emerald-400" : status === "connecting" ? "animate-pulse bg-amber-300" : "bg-zinc-500"}`} /><span className="flex-1">{status === "online" ? "Inbox connected" : status === "connecting" ? "Connecting…" : "Offline · messages stay queued"}</span>{status === "offline" && <Button variant="ghost" size="icon" className="size-6" aria-label="Reconnect inbox" onClick={() => void messaging.sync().catch(cause => setError(errorMessage(cause)))}><RefreshCw className="size-3" /></Button>}<Button variant="ghost" size="icon" className="size-7" aria-label="Set up notifications" onClick={() => { setSettingsError(""); setSettingsOpen(true) }}>{permission === "granted" ? <Bell className="size-3.5" /> : <BellOff className="size-3.5" />}</Button></div>
     </aside>
     <main className={`${inConversation ? "flex" : "hidden md:flex"} min-h-0 min-w-0 flex-1 flex-col`}>{children}</main>
 

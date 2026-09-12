@@ -3,8 +3,19 @@ import { PUBLIC_KEY_PATTERN } from "./protocol"
 import { createRequestProof, verifyRequestProof } from "./request-auth"
 
 const IDENTITY_KEY = "serotine_identity_v2"
+const ARCHIVED_IDENTITIES_KEY = "serotine_identity_archives_v1"
 export interface Identity { version: 2; publicKey: string; privateKey: JsonWebKey }
+export interface ArchivedIdentity extends Identity { retired?: boolean }
 export class IdentityAccessError extends Error {}
+export class IdentityConflictError extends Error {
+  constructor(public existingPublicKey: string, public backupPublicKey: string) {
+    super("A different identity is already saved here. Confirm switching to the backup identity to continue.")
+  }
+}
+export interface RestoreIdentityOptions {
+  /** Confirmation is tied to the exact identity shown to the user. */
+  replaceIdentity?: string
+}
 
 let identityWrites: Promise<void> = Promise.resolve()
 function mutateIdentity<T>(action: () => Promise<T>): Promise<T> {
@@ -24,6 +35,102 @@ function saveIdentity(identity: Identity, expected: (string | null)[]) {
   }
   try { localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity)) }
   catch { throw new IdentityAccessError("Your identity could not be saved. Check available browser storage and try again.") }
+}
+
+/** Switching identities keeps the previous key and its separately stored history recoverable. */
+export async function loadArchivedIdentities(): Promise<ArchivedIdentity[]> {
+  let raw: string | null
+  try { raw = localStorage.getItem(ARCHIVED_IDENTITIES_KEY) }
+  catch { throw new IdentityAccessError("Browser storage is blocked. Allow storage for this site, then check again.") }
+  if (!raw) return []
+  let values: unknown
+  try { values = JSON.parse(raw) } catch { throw new Error("Saved previous identities could not be read. They have not been changed.") }
+  if (!Array.isArray(values)) throw new Error("Saved previous identities could not be read. They have not been changed.")
+  const identities = await Promise.all(values.map(validateIdentity))
+  try { return identities.map(identity => ({ ...identity, retired: localStorage.getItem(`serotine_retired_identity:${identity.publicKey}`) === "retired" })) }
+  catch { throw new IdentityAccessError("Saved identity status could not be read. Allow browser storage and try again.") }
+}
+
+/** Persist recovery keys before permanently retiring an address at the relay. */
+export async function replaceRetiredIdentity(expectedPublicKey: string, retire: () => Promise<void>): Promise<Identity> {
+  return mutateIdentity(async () => {
+    const before = identitySnapshot()
+    const existing = await loadIdentity()
+    if (!existing || existing.publicKey !== expectedPublicKey) throw new IdentityAccessError("The identity changed. Open Security again before continuing.")
+    const pendingKey = `serotine_identity_replacement:${existing.publicKey}`
+    const retiredKey = `serotine_retired_identity:${existing.publicKey}`
+    let pending: string | null
+    try { pending = localStorage.getItem(pendingKey) }
+    catch { throw new IdentityAccessError("Browser storage is blocked. Allow storage before replacing your identity.") }
+    const archived = await loadArchivedIdentities()
+    let replacement: Identity | null = pending ? await validateIdentity(JSON.parse(pending)) : null
+    // An archived replacement has already been activated and switched away from.
+    // This also detects completed attempts if removing the staging key failed.
+    if (replacement && (archived.some(item => item.publicKey === replacement!.publicKey)
+      || localStorage.getItem(`serotine_retired_identity:${replacement.publicKey}`) === "retired")) replacement = null
+    if (!replacement) {
+      const pair = await generateEncryptionKeyPair()
+      replacement = { version: 2, publicKey: await exportPublicKeyToHex(pair.publicKey), privateKey: await exportKey(pair.privateKey) }
+    }
+    if (replacement.publicKey === existing.publicKey) throw new Error("The saved replacement identity is invalid. Nothing was retired.")
+    const contacts = new Map(loadContacts(existing.publicKey).filter(contact => contact.pub !== replacement.publicKey).map(contact => [contact.pub, contact]))
+    for (const contact of loadContacts(replacement.publicKey)) contacts.set(contact.pub, contact.alias ? contact : contacts.get(contact.pub) ?? contact)
+    if (identitySnapshot().some((entry, index) => entry !== before[index])) throw new IdentityAccessError("The identity changed in another tab. Check again before continuing.")
+    if (typeof window !== "undefined") window.dispatchEvent(new Event("serotine:identity-changing"))
+    try {
+      // All recovery material and contact copies must be durable before the
+      // irreversible request. An ambiguous network failure retries the same key.
+      try {
+        localStorage.setItem(pendingKey, JSON.stringify(replacement))
+        localStorage.setItem(ARCHIVED_IDENTITIES_KEY, JSON.stringify([...archived.filter(item => item.publicKey !== existing.publicKey), existing]))
+        saveContacts(replacement.publicKey, [...contacts.values()])
+        if (localStorage.getItem(retiredKey) !== "retired") localStorage.setItem(retiredKey, "pending")
+      } catch { throw new IdentityAccessError("Recovery keys could not be saved. Free browser storage and try again; no retirement request was sent.") }
+      await retire()
+      try { localStorage.setItem(retiredKey, "retired") }
+      catch { throw new IdentityAccessError("Your old address was retired, but the replacement could not be activated. Keep this browser data and retry; your replacement key is saved.") }
+      try { saveIdentity(replacement, before) }
+      catch { throw new IdentityAccessError("Your old address was retired, but the replacement could not be activated. Keep this browser data and retry; your replacement key is saved.") }
+      try { localStorage.removeItem(pendingKey) } catch { /* Later switches archive this replacement, so it cannot be reused. */ }
+      return replacement
+    } finally {
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("serotine:identity-changed"))
+    }
+  })
+}
+
+/** Hold the identity lock through owner-scoped data import, then activate the identity last. */
+export async function restoreValidatedIdentity(value: Identity, options: RestoreIdentityOptions = {}, importData?: (identity: Identity) => Promise<void>): Promise<Identity> {
+  const identity = await validateIdentity(value)
+  return mutateIdentity(async () => {
+    const before = identitySnapshot()
+    let existing: Identity | null = null
+    try { existing = await loadIdentity() } catch (cause) {
+      if (cause instanceof IdentityAccessError) throw cause
+      // A valid backup may repair corrupt local state, but never blocked access.
+    }
+    if (options.replaceIdentity !== undefined && existing?.publicKey !== options.replaceIdentity) {
+      throw new IdentityAccessError("The identity changed in another tab. Review this backup again before switching.")
+    }
+    const switchingFrom = existing && existing.publicKey !== identity.publicKey ? existing : null
+    if (switchingFrom && options.replaceIdentity !== switchingFrom.publicKey) throw new IdentityConflictError(switchingFrom.publicKey, identity.publicKey)
+    const archived = switchingFrom ? await loadArchivedIdentities() : []
+    if (identitySnapshot().some((entry, index) => entry !== before[index])) {
+      throw new IdentityAccessError("The identity changed in another tab. Check again before continuing.")
+    }
+    if (typeof window !== "undefined") window.dispatchEvent(new Event("serotine:identity-changing"))
+    try {
+      if (switchingFrom) {
+        try { localStorage.setItem(ARCHIVED_IDENTITIES_KEY, JSON.stringify([...archived.filter(item => item.publicKey !== switchingFrom.publicKey), switchingFrom])) }
+        catch { throw new IdentityAccessError("Your current identity could not be preserved. Free browser storage and try again; no identity was switched.") }
+      }
+      await importData?.(identity)
+      saveIdentity(identity, before)
+      return identity
+    } finally {
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("serotine:identity-changed"))
+    }
+  })
 }
 
 export async function validateIdentity(value: unknown): Promise<Identity> {
@@ -78,7 +185,7 @@ export async function exportIdentityBackup(identity: Identity, password: string)
   return JSON.stringify({ format: "serotine-backup", version: 2, salt: arrayBufferToBase64(salt.buffer), iv: arrayBufferToBase64(iv.buffer), ciphertext: arrayBufferToBase64(ciphertext) }, null, 2)
 }
 
-export async function restoreIdentityBackup(text: string, password: string): Promise<Identity> {
+export async function restoreIdentityBackup(text: string, password: string, options: RestoreIdentityOptions = {}): Promise<Identity> {
   if (text.length > 32_000) throw new Error("This backup file is too large.")
   let value
   try { value = JSON.parse(text) } catch { throw new Error("Choose a valid Serotine JSON backup.") }
@@ -95,18 +202,7 @@ export async function restoreIdentityBackup(text: string, password: string): Pro
     const publicKey = await importKey(publicJwk, "encryption", "public")
     value = { version: 2, publicKey: await exportPublicKeyToHex(publicKey), privateKey: value }
   }
-  const identity = await validateIdentity(value)
-  return mutateIdentity(async () => {
-    const before = identitySnapshot()
-    let existing: Identity | null = null
-    try { existing = await loadIdentity() } catch (cause) {
-      if (cause instanceof IdentityAccessError) throw cause
-      // A valid backup may repair corrupt local state, but never blocked access.
-    }
-    if (existing && existing.publicKey !== identity.publicKey) throw new Error("A different identity is already saved here. Use a separate browser profile to restore this one.")
-    saveIdentity(identity, before)
-    return identity
-  })
+  return restoreValidatedIdentity(value, options)
 }
 
 export interface Contact { pub: string; alias: string }

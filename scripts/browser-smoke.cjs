@@ -26,7 +26,7 @@ async function makeIdentity(){const pair=await crypto.subtle.generateKey({name:'
   assert.equal(serverReady,true,`Browser test server was not ready; see ${logPath}`);
   browser=await chromium.launch({executablePath:process.env.SEROTINE_CHROMIUM_PATH,args:['--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--no-zygote','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream'],headless:true});
   const errors=[];const identities=await Promise.all([makeIdentity(),makeIdentity(),makeIdentity()]);const pages=[];
-  async function makePage(identity){const context=await browser.newContext({viewport:{width:1280,height:900}});const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('response',async r=>{if(r.url().includes('/api/relay')&&r.status()>=400) console.log('RELAY ERROR',r.status(),await r.text());else if(r.url().includes('/api/relay')) {const j=await r.json();if(j.success===false)console.log('RELAY FAILURE',j.error)}});
+  async function makePage(identity){const context=await browser.newContext({viewport:{width:1280,height:900}});const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('response',async r=>{try{if(r.url().includes('/api/relay')&&r.status()>=400) console.log('RELAY ERROR',r.status(),await r.text());else if(r.url().includes('/api/relay')) {const j=await r.json();if(j.success===false)console.log('RELAY FAILURE',j.error)}}catch(error){if(!/No data found for resource|navigated away|Target page, context or browser has been closed/.test(error.message))errors.push(error.message)}});
    // Engine peers use a plain same-origin document so Next development reloads
    // cannot erase their test globals. UI checks below navigate to the real app.
    await page.route(origin+'/__browser-integration-peer',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><title>Serotine integration peer</title>'}));
@@ -226,6 +226,56 @@ async function makeIdentity(){const pair=await crypto.subtle.generateKey({name:'
   await a.getByRole('button',{name:'Voice',exact:true}).click();await a.getByRole('button',{name:'Stop & preview',exact:true}).waitFor();await sleep(1200);await a.getByRole('button',{name:'Stop & preview',exact:true}).click();await a.getByRole('button',{name:'Send voice message',exact:true}).click();await a.locator('audio').first().waitFor({state:'visible'});console.log('PASS microphone permission, recording preview and voice-message send');await a.screenshot({path:'/tmp/serotine-desktop.png'});await a.setViewportSize({width:390,height:844});await a.screenshot({path:'/tmp/serotine-mobile.png'});
   assert.equal(await a.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false,'mobile must not overflow');
   console.log('PASS rendered self-chat composer on desktop and mobile');
+
+  // A touch context catches oversized intrinsic controls that desktop resizing misses.
+  const phoneContext=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true,deviceScaleFactor:2,storageState:await a.context().storageState({indexedDB:true})});
+  const phone=await phoneContext.newPage();phone.on('pageerror',error=>errors.push(error.message));
+  await phone.goto(origin+'/chat');
+  await phone.getByRole('complementary',{name:'Inbox',exact:true}).waitFor({state:'visible'});
+  await phone.getByRole('complementary',{name:'Inbox',exact:true}).locator(`a[href="/chat/${aid}"]`).tap();
+  const phoneMessage=phone.getByRole('textbox',{name:'Message',exact:true});
+  await phoneMessage.waitFor({state:'visible'});
+  assert.equal(await phone.getByRole('complementary',{name:'Inbox',exact:true}).isVisible(),false,'conversation replaces the inbox on a phone');
+  await phoneMessage.fill('Sent from a touch phone');
+  await phone.getByRole('button',{name:'Send message',exact:true}).tap();
+  await phone.getByText('Sent from a touch phone',{exact:true}).last().waitFor({state:'visible'});
+  async function checkPhoneLayout(width,height){
+    await phone.setViewportSize({width,height});
+    await phone.waitForFunction(()=>Math.abs(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--app-height'))-window.visualViewport.height)<1);
+    await phone.screenshot({path:`/tmp/serotine-phone-${width}x${height}.png`});
+    const box=await phone.getByRole('button',{name:'Send message',exact:true}).boundingBox();
+    assert.ok(box&&box.x>=0&&box.x+box.width<=width+1&&box.y>=0&&box.y+box.height<=height+1,'send button stays in the visible phone viewport');
+    assert.ok(box.width>=44&&box.height>=44,'send target supports touch');
+    assert.equal(await phone.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false,'phone must not overflow horizontally');
+    assert.equal(await phone.locator('footer').evaluate(node=>node.scrollWidth>node.clientWidth+1),false,'composer content must fit instead of being clipped');
+  }
+  await checkPhoneLayout(390,844);await checkPhoneLayout(320,568);
+  // iOS can shrink only visualViewport, leaving innerHeight and dvh unchanged.
+  await phone.evaluate(()=>{Object.defineProperty(window.visualViewport,'height',{configurable:true,value:340});Object.defineProperty(window.visualViewport,'offsetTop',{configurable:true,value:24});window.visualViewport.dispatchEvent(new Event('resize'))});
+  await phone.waitForFunction(()=>getComputedStyle(document.documentElement).getPropertyValue('--app-height')==='340px');
+  const keyboardSend=await phone.getByRole('button',{name:'Send message',exact:true}).boundingBox();
+  assert.ok(keyboardSend&&keyboardSend.y>=24&&keyboardSend.y+keyboardSend.height<=364,'send button remains above an iOS-style keyboard');
+  await phone.evaluate(()=>{delete window.visualViewport.height;delete window.visualViewport.offsetTop;window.visualViewport.dispatchEvent(new Event('resize'))});
+  await phone.getByRole('link',{name:'Back to conversations',exact:true}).tap();
+  assert.equal(await phone.getByRole('complementary',{name:'Inbox',exact:true}).evaluate(node=>node.scrollWidth>node.clientWidth+1),false,'inbox content must fit a 320px phone');
+  await phone.getByRole('button',{name:'Backups and linked devices',exact:true}).tap();
+  await phone.getByRole('button',{name:'Restore',exact:true}).tap();
+  const phoneDialog=phone.getByRole('dialog');
+  await phoneDialog.evaluate(node=>Promise.all(node.getAnimations().map(animation=>animation.finished)));
+  await phoneDialog.getByLabel('Backup password',{exact:true}).fill('browser test password');
+  await phone.evaluate(()=>{Object.defineProperty(window.visualViewport,'height',{configurable:true,value:300});window.visualViewport.dispatchEvent(new Event('resize'))});
+  await phone.waitForFunction(()=>getComputedStyle(document.documentElement).getPropertyValue('--app-height')==='300px');
+  await phoneDialog.evaluate(node=>Promise.all(node.getAnimations().map(animation=>animation.finished)));
+  await phone.screenshot({path:'/tmp/serotine-phone-restore.png'});
+  const dialogBounds=await phoneDialog.boundingBox();
+  assert.ok(dialogBounds&&dialogBounds.x>=0&&dialogBounds.x+dialogBounds.width<=320&&dialogBounds.y>=0&&dialogBounds.y+dialogBounds.height<=300,`restore dialog stays within the visible viewport: ${JSON.stringify(dialogBounds)}`);
+  assert.equal(await phoneDialog.evaluate(node=>node.scrollWidth>node.clientWidth+1),false,'restore dialog must not overflow horizontally');
+  const passwordBounds=await phoneDialog.getByLabel('Backup password',{exact:true}).boundingBox();
+  assert.ok(passwordBounds&&passwordBounds.y>=dialogBounds.y&&passwordBounds.y+passwordBounds.height<=dialogBounds.y+dialogBounds.height,'focused password stays visible above the keyboard');
+  assert.ok(await phoneDialog.getByLabel('Backup password',{exact:true}).evaluate(node=>parseFloat(getComputedStyle(node).fontSize)>=16),'mobile password input avoids automatic zoom');
+  await phoneDialog.getByRole('button',{name:'Close',exact:true}).tap();
+  await phoneContext.close();
+  console.log('PASS touch phone send, 320px layout, visual keyboard resize and scrollable backup restore dialog');
   assert.deepEqual(errors,[],'browser page errors');
   console.log('ALL BROWSER INTEGRATION CHECKS PASSED');
  }finally{await browser?.close();server.kill();fs.closeSync(log)}

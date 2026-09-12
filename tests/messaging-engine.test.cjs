@@ -6,6 +6,7 @@ const ts = require('typescript')
 const root = path.join(__dirname, '..')
 const modules = new Map(), stores = new Map(), prefs = new Map(), cursors = new Map()
 const packets = [], attempts = []
+const runtimeWindow = new EventTarget()
 let rejectRecipient, rateLimitRecipient, failPersistence = false, historyReads = 0
 const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true })
 const recordsFor = owner => { if (!stores.has(owner)) stores.set(owner, new Map()); return stores.get(owner) }
@@ -54,7 +55,7 @@ function load(filename) {
     if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
     return require(specifier)
   }
-  new Function('require', 'module', 'exports', 'navigator', 'window', 'localStorage', output)(sourceRequire, module, module.exports, {}, new EventTarget(), { getItem: () => null })
+  new Function('require', 'module', 'exports', 'navigator', 'window', 'localStorage', output)(sourceRequire, module, module.exports, {}, runtimeWindow, { getItem: () => null })
   return module.exports
 }
 const cryptography = load(path.join(root, 'lib/crypto.ts'))
@@ -74,6 +75,82 @@ async function engine(identity) {
   await instance.refresh()
   return { instance, synchronize }
 }
+function deferred() {
+  let resolve
+  const promise = new Promise(done => { resolve = done })
+  return { promise, resolve }
+}
+
+test('switching identities during message signing never queues the old send and rejects stale actions', async t => {
+  const sender = await engine(alice)
+  const entered = deferred(), release = deferred()
+  const sign = crypto.subtle.sign
+  t.mock.method(crypto.subtle, 'sign', async function (...args) { entered.resolve(); await release.promise; return sign.apply(this, args) })
+  const send = sender.instance.sendText(bob.publicKey, 'Do not send after switching')
+  const rejected = assert.rejects(send, /identity changed.*Reopen/i)
+  await entered.promise
+  sender.instance.dispose()
+  release.resolve()
+  await rejected
+  await assert.rejects(sender.instance.sendText(bob.publicKey, 'Stale composer'), /identity changed.*Reopen/i)
+  await assert.rejects(sender.instance.createGroup('Stale group', [bob.publicKey]), /identity changed.*Reopen/i)
+  await assert.rejects(sender.instance.setReadReceipts(false), /identity changed.*Reopen/i)
+  await assert.rejects(sender.instance.retry(), /identity changed.*Reopen/i)
+  assert.equal(recordsFor(alice.publicKey).size, 0)
+  assert.equal(prefs.size, 0)
+  assert.equal(attempts.length, 0)
+})
+
+for (const phase of ['encryption', 'request proof']) test(`switching identities during outbox ${phase} prevents the prepared relay request`, async t => {
+  const sender = await engine(alice)
+  const id = await sender.instance.sendText(bob.publicKey, 'Keep this pending')
+  const entered = deferred(), release = deferred()
+  const target = phase === 'encryption' ? cryptography : authentication
+  const method = phase === 'encryption' ? 'encryptForPeer' : 'createRequestProof'
+  const prepare = target[method]
+  t.mock.method(target, method, async (...args) => { entered.resolve(); await release.promise; return prepare(...args) })
+  const synchronize = sender.synchronize()
+  await entered.promise
+  sender.instance.dispose()
+  release.resolve()
+  await synchronize
+  const record = [...recordsFor(alice.publicKey).values()].find(record => record.event.id === id)
+  assert.deepEqual(record.delivered, [])
+  assert.equal(record.error, undefined, 'switching identities must not mark a durable send as failed')
+  assert.equal(attempts.length, 0)
+  assert.equal(packets.length, 0)
+  assert.equal(cursors.size, 0)
+})
+
+test('disposing during asynchronous startup installs no listeners or timer and releases the imported key', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const sender = new MessagingEngine(alice)
+  const entered = deferred(), release = deferred()
+  const importKey = cryptography.importKey
+  t.mock.method(cryptography, 'importKey', async (...args) => { entered.resolve(); await release.promise; return importKey(...args) })
+  const addListener = t.mock.method(runtimeWindow, 'addEventListener')
+  const starting = sender.start()
+  await entered.promise
+  sender.dispose()
+  release.resolve()
+  await starting
+  assert.equal(sender.key, undefined)
+  assert.equal(addListener.mock.callCount(), 0)
+  assert.equal(historyReads, 0)
+  assert.equal(sender.timer, undefined)
+})
+
+test('cached attachment chunks remain readable while a disposed conversation is still visible', async () => {
+  const files = load(path.join(root, 'lib/attachments.ts'))
+  const sender = await engine(alice)
+  const id = await files.sendAttachment(sender.instance.sendEvent, bob.publicKey, new File(['Cached file'], 'cached.txt'))
+  const chunks = sender.instance.getAttachmentChunks(bob.publicKey, id)
+  assert.equal(chunks.length, 1)
+  sender.instance.dispose()
+  assert.deepEqual(sender.instance.getAttachmentChunks(bob.publicKey, id), chunks)
+  assert.deepEqual(sender.instance.getAttachmentChunks(bob.publicKey, 'missing'), [])
+  await assert.rejects(sender.instance.sendText(bob.publicKey, 'Stale composer'), /identity changed.*Reopen/i)
+})
 
 test('self messages use the owner address and survive encrypted relay sync without duplicates', async () => {
   const { instance, synchronize } = await engine(alice)

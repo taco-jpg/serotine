@@ -214,7 +214,7 @@ export function AttachmentComposer({ disabled = false, captureRef, pasteRef, onS
     <div className="flex flex-wrap items-center gap-1">
       <Button type="button" variant="ghost" size="sm" disabled={unavailable} onClick={() => input.current?.click()}><Paperclip aria-hidden="true" />Attach</Button>
       <Button type="button" variant="ghost" size="sm" disabled={unavailable || queue.length > 0} onClick={() => void startRecording()}><Mic aria-hidden="true" />Voice</Button>
-      <span className="text-xs text-muted-foreground">Up to {formatFileSize(MAX_FILE_BYTES)} each · drop files into the chat or paste into the message box</span>
+      <span className="text-xs text-muted-foreground">Up to {formatFileSize(MAX_FILE_BYTES)} each<span className="hidden sm:inline"> · drop files into the chat or paste into the message box</span></span>
     </div>
     <AutoCompactFilesSetting enabled={autoCompact} onChange={setAutoCompact} disabled={unavailable} />
     {preparing && <p role="status" className="text-xs text-muted-foreground">Preparing attachments…</p>}
@@ -231,7 +231,7 @@ export function AttachmentComposer({ disabled = false, captureRef, pasteRef, onS
       {previewUrl && attachmentPreviewKind(selected.file.type.split(";")[0]) === "image" && <img src={previewUrl} alt="Attachment preview" className="max-h-32 rounded-md object-contain" />}
       {previewUrl && attachmentPreviewKind(selected.file.type.split(";")[0]) === "audio" && <audio controls preload="metadata" src={previewUrl} aria-label="Preview voice or audio attachment" className="max-w-full" />}
       {busy && <div role="status" className="text-xs"><span>Preparing to send · {progress}%</span><progress className="h-1 w-full" value={progress} max={100} aria-label="File prepared for sending" /></div>}
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <Button type="button" size="sm" disabled={busy || preparing || disabled} onClick={() => void sendSelected()}><Send aria-hidden="true" />{busy ? "Preparing…" : selected.kind === "voice" ? "Send voice message" : "Send file"}</Button>
         <Button type="button" size="sm" variant="ghost" disabled={busy || preparing} onClick={() => { replaceQueue(queueRef.current.filter(item => item !== selected)); setError("") }}><X aria-hidden="true" />Remove</Button>
       </div>

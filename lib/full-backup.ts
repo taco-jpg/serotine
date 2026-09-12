@@ -1,5 +1,5 @@
 import { base64ToArrayBuffer } from "./crypto"
-import { type Contact, type Identity, loadContacts, restoreIdentityBackup, saveContacts, validateAddress, validateIdentity } from "./identity"
+import { type Contact, type Identity, type RestoreIdentityOptions, loadContacts, restoreIdentityBackup, restoreValidatedIdentity, saveContacts, validateAddress, validateIdentity } from "./identity"
 import { exportAllMessagesFromStorage, importMessagesToStorage, migrateLegacyHistory, type StoredMessage, validateStoredMessages } from "./storage"
 import { exportMessagingSnapshot, importMessagingSnapshot, validateMessagingSnapshot } from "./messaging-store"
 import type { MessagingSnapshot } from "./messaging-types"
@@ -78,13 +78,13 @@ export async function exportFullBackup(identity: Identity, password: string): Pr
 }
 
 /** Accept full encrypted exports as well as every previously supported identity backup. */
-export async function restoreBackup(text: string, password: string): Promise<Identity> {
+export async function restoreBackup(text: string, password: string, options: RestoreIdentityOptions = {}): Promise<Identity> {
   if (text.length > MAX_BACKUP_FILE_BYTES || new TextEncoder().encode(text).byteLength > MAX_BACKUP_FILE_BYTES) {
     throw new Error("Choose a Serotine backup no larger than 100 MiB.")
   }
   let envelope
   try { envelope = JSON.parse(text) } catch { throw new Error("Choose a valid Serotine JSON backup.") }
-  if (envelope?.format !== FORMAT) return restoreIdentityBackup(text, password)
+  if (envelope?.format !== FORMAT) return restoreIdentityBackup(text, password, options)
   if (envelope.version !== 1 || typeof envelope.salt !== "string" || envelope.salt.length !== 24
     || typeof envelope.iv !== "string" || envelope.iv.length !== 16 || typeof envelope.ciphertext !== "string"
     || envelope.ciphertext.length < 24 || !/^[A-Za-z0-9+/]+={0,2}$/.test(envelope.ciphertext)) {
@@ -101,20 +101,20 @@ export async function restoreBackup(text: string, password: string): Promise<Ide
   } catch { throw new Error("The backup password is incorrect, or the file is damaged.") }
   const snapshot = await validateFullBackupSnapshot(decrypted)
 
-  // Reuse the existing identity lock, corrupt-state recovery and mismatch guard.
-  // Every payload has already passed validation at this point.
-  const identity = await restoreIdentityBackup(JSON.stringify(snapshot.identity), "")
-  try {
-    await importMessagingSnapshot(identity.publicKey, snapshot.messaging)
-    await importMessagesToStorage(identity.publicKey, snapshot.messages)
-    let current: Contact[] = []
-    try { current = loadContacts(identity.publicKey) } catch { /* A validated backup repairs unreadable contacts. */ }
-    const merged = new Map(snapshot.contacts.map(contact => [contact.pub, contact]))
-    for (const contact of current) merged.set(contact.pub, contact.alias ? contact : merged.get(contact.pub) ?? contact)
-    saveContacts(identity.publicKey, [...merged.values()])
-  } catch (cause) {
-    const reason = cause instanceof Error ? cause.message : "Browser storage is unavailable."
-    throw new Error(`Your identity was restored, but some chat data could not be saved. Free browser storage and restore this backup again. ${reason}`, { cause })
-  }
-  return identity
+  // Validate everything before any write, and keep imports inside the identity
+  // lock. Activating last leaves the current identity usable after import failure.
+  return restoreValidatedIdentity(snapshot.identity, options, async identity => {
+    try {
+      await importMessagingSnapshot(identity.publicKey, snapshot.messaging)
+      await importMessagesToStorage(identity.publicKey, snapshot.messages)
+      let current: Contact[] = []
+      try { current = loadContacts(identity.publicKey) } catch { /* A validated backup repairs unreadable contacts. */ }
+      const merged = new Map(snapshot.contacts.map(contact => [contact.pub, contact]))
+      for (const contact of current) merged.set(contact.pub, contact.alias ? contact : merged.get(contact.pub) ?? contact)
+      saveContacts(identity.publicKey, [...merged.values()])
+    } catch (cause) {
+      const reason = cause instanceof Error ? cause.message : "Browser storage is unavailable."
+      throw new Error(`Some chat data could not be saved. Your active identity has not changed. Free browser storage and restore this backup again. ${reason}`, { cause })
+    }
+  })
 }

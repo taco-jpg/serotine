@@ -26,7 +26,7 @@ function loader(stubs = {}, globals = {}) {
   return load
 }
 
-function harness(t) {
+function harness(t, hooks = {}) {
   const sqlite = new DatabaseSync(':memory:')
   t.after(() => sqlite.close())
   const calls = []
@@ -36,9 +36,22 @@ function harness(t) {
       let args = []
       return {
         bind(...values) { args = values; return this },
-        async run() { return { meta: { changes: Number(sqlite.prepare(sql).run(...args).changes) } } },
-        async first() { return sqlite.prepare(sql).get(...args) ?? null },
-        async all() { return { results: sqlite.prepare(sql).all(...args) } },
+        async run() {
+          if (hooks.beforeRun) await hooks.beforeRun(sql, args, sqlite)
+          return { meta: { changes: Number(sqlite.prepare(sql).run(...args).changes) } }
+        },
+        async first() {
+          if (hooks.beforeRead) await hooks.beforeRead(sql, args, sqlite)
+          const result = sqlite.prepare(sql).get(...args) ?? null
+          if (hooks.afterRead) hooks.afterRead(sql, result)
+          return result
+        },
+        async all() {
+          if (hooks.beforeRead) await hooks.beforeRead(sql, args, sqlite)
+          const results = sqlite.prepare(sql).all(...args)
+          if (hooks.afterRead) hooks.afterRead(sql, results)
+          return { results }
+        },
       }
     },
   }
@@ -303,4 +316,151 @@ test('browser refuses corrupt feed cursors, ordering and identities before advan
     const relay = loader({}, { fetch: async () => Response.json(variant) })(path.join(root, 'lib/relay-client.ts'))
     await assert.rejects(relay.getEventFeed({}, { publicKey: bob.publicKey }), /unexpected response/)
   }
+})
+
+test('retirement is signed, self-only, permanent and safe to retry after a lost response', async t => {
+  const h = harness(t)
+  const [alice, bob] = await Promise.all([h.identity(), h.identity()])
+  assert.equal((await h.actions.retireIdentity({}, undefined)).success, false)
+  assert.equal(h.calls.length, 0, 'unsigned requests cannot initialize retirement tables')
+  const forged = await h.proof('identity:retire', {}, alice)
+  assert.equal((await h.relay.retireIdentity({}, { ...forged, publicKey: bob.publicKey })).success, false)
+  const badData = { publicKey: bob.publicKey }
+  const badProof = await h.proof('identity:retire', badData, alice)
+  assert.equal((await h.actions.retireIdentity(badData, badProof)).success, false, 'Server Action rejects target identities')
+  assert.equal((await h.relay.retireIdentity(badData, badProof)).success, false, 'HTTP route rejects target identities')
+  const wrongAction = await h.proof('event:sync', {}, alice)
+  assert.equal((await h.relay.retireIdentity({}, wrongAction)).success, false)
+  assert.deepEqual(await h.relay.retireIdentity({}, forged), { success: true })
+  const first = h.sqlite.prepare('SELECT * FROM RetiredIdentity').get()
+  assert.equal(first.publicKey, alice.publicKey)
+  assert.ok(first.retiredAt > 0)
+  assert.match((await h.relay.retireIdentity({}, forged)).error, /already used/)
+  assert.deepEqual(await h.call('retireIdentity', 'identity:retire', {}, alice), { success: true })
+  assert.deepEqual(h.sqlite.prepare('SELECT * FROM RetiredIdentity').get(), first, 'retry does not replace the original retirement')
+  h.sqlite.prepare('UPDATE RetiredIdentity SET retiredAt = 1').run()
+  assert.match((await h.feed(alice)).error, /permanently retired/)
+  assert.equal((await h.feed(bob)).success, true, 'other identities are unaffected')
+})
+
+test('retired backup keys lose all relay access without deleting history; recipients reject further sends', async t => {
+  const h = harness(t)
+  const [alice, bob] = await Promise.all([h.identity(), h.identity()])
+  const event = await h.send(alice, bob)
+  const legacy = { id: crypto.randomUUID(), recipientPubKey: alice.publicKey, encryptedData: 'a'.repeat(100) }
+  assert.equal((await h.call('storeEncryptedMessage', 'message:send', legacy, bob)).success, true)
+  const signal = { recipientPubKey: alice.publicKey, encryptedData: 'b'.repeat(100) }
+  assert.equal((await h.call('storeSignal', 'signal:send', signal, bob)).success, true)
+  assert.equal((await h.call('retireIdentity', 'identity:retire', {}, alice)).success, true)
+  const toBob = { id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData: 'c'.repeat(100) }
+  const requests = [
+    ['storeEncryptedMessage', 'message:send', toBob],
+    ['getMyMessages', 'message:list', { senderPubKey: bob.publicKey }],
+    ['getLegacyInbox', 'message:inbox', {}],
+    ['deleteMessage', 'message:ack', { id: legacy.id, senderPubKey: bob.publicKey }],
+    ['storeSignal', 'signal:send', { recipientPubKey: bob.publicKey, encryptedData: 'd'.repeat(100) }],
+    ['getSignal', 'signal:read', { senderPubKey: bob.publicKey }],
+    ['storeEncryptedEvent', 'event:send', toBob],
+    ['getEventFeed', 'event:sync', {}],
+  ]
+  for (const [method, action, data] of requests) {
+    assert.match((await h.call(method, action, data, alice)).error, /permanently retired/, method)
+    assert.match((await h.actions[method](data, await h.proof(action, data, alice))).error, /permanently retired/, `${method} direct Server Action`)
+  }
+  assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM RelayMessage').get().n, 1)
+  assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM RelaySignal').get().n, 1)
+  assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM RelayEvent').get().n, 1)
+  assert.deepEqual((await h.feed(bob)).messages.map(message => message.id), [event.data.id], 'other participants retain their history')
+  for (const [method, action, data] of [
+    ['storeEncryptedMessage', 'message:send', { ...legacy, id: crypto.randomUUID() }],
+    ['storeEncryptedEvent', 'event:send', { ...legacy, id: crypto.randomUUID() }],
+    ['storeSignal', 'signal:send', signal],
+  ]) assert.match((await h.call(method, action, data, bob)).error, /contact's address has been permanently retired/, method)
+})
+
+test('retirement racing a send prevents writes atomically for old senders and recipients', async t => {
+  for (const [method, action, table] of [
+    ['storeEncryptedMessage', 'message:send', 'RelayMessage'],
+    ['storeEncryptedEvent', 'event:send', 'RelayEvent'],
+    ['storeSignal', 'signal:send', 'RelaySignal'],
+  ]) {
+    for (const target of ['sender', 'recipient']) {
+      const hooks = {}
+      const h = harness(t, hooks)
+      const [alice, bob] = await Promise.all([h.identity(), h.identity()])
+      const retirePublicKey = target === 'sender' ? alice.publicKey : bob.publicKey
+      hooks.beforeRun = (sql, args, db) => {
+        if (sql.startsWith(`INSERT INTO ${table} `)) {
+          db.prepare('INSERT INTO RetiredIdentity VALUES(?, ?)').run(retirePublicKey, Date.now())
+          delete hooks.beforeRun
+        }
+      }
+      const data = { recipientPubKey: bob.publicKey, encryptedData: 'x'.repeat(100), ...(action !== 'signal:send' ? { id: crypto.randomUUID() } : {}) }
+      assert.match((await h.call(method, action, data, alice)).error, /permanently retired/, `${method} ${target}`)
+      assert.equal(h.sqlite.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0)
+    }
+  }
+})
+
+test('retirement bootstrap matches its migration and preserves preexisting revocations', async t => {
+  const h = harness(t)
+  const expected = new DatabaseSync(':memory:'); t.after(() => expected.close())
+  expected.exec(fs.readFileSync(path.join(root, 'migrations/0003_retired_identities.sql'), 'utf8'))
+  const { ensureIdentityRetirementSchema } = h.load(path.join(root, 'lib/identity-retirement-schema.ts'))
+  await ensureIdentityRetirementSchema(h.db)
+  const query = "SELECT sql FROM sqlite_master WHERE name = 'RetiredIdentity'"
+  assert.equal(h.sqlite.prepare(query).get().sql, expected.prepare(query).get().sql)
+  h.sqlite.prepare('INSERT INTO RetiredIdentity VALUES(?, 1)').run('old-address')
+  await ensureIdentityRetirementSchema(h.db)
+  assert.equal(h.sqlite.prepare('SELECT publicKey FROM RetiredIdentity').get().publicKey, 'old-address')
+})
+
+test('retirement racing inbox, feed, or signal reads prevents ciphertext from leaving SQLite', async t => {
+  for (const [method, action, table] of [
+    ['getMyMessages', 'message:list', 'RelayMessage'],
+    ['getLegacyInbox', 'message:inbox', 'RelayMessage'],
+    ['getEventFeed', 'event:sync', 'RelayEvent'],
+    ['getSignal', 'signal:read', 'RelaySignal'],
+  ]) {
+    const hooks = {}, h = harness(t, hooks)
+    const [alice, bob] = await Promise.all([h.identity(), h.identity()])
+    const message = { id: crypto.randomUUID(), recipientPubKey: alice.publicKey, encryptedData: 'a'.repeat(100) }
+    assert.equal((await h.call('storeEncryptedMessage', 'message:send', message, bob)).success, true)
+    assert.equal((await h.send(bob, alice)).result.success, true)
+    assert.equal((await h.call('storeSignal', 'signal:send', { recipientPubKey: alice.publicKey, encryptedData: 'b'.repeat(100) }, bob)).success, true)
+    let raced = false, databaseResult
+    const matches = sql => sql.startsWith('SELECT ') && sql.includes(` FROM ${table}\n`) && sql.includes('encryptedData')
+      || (table === 'RelaySignal' && sql.startsWith('SELECT encryptedData FROM RelaySignal WHERE'))
+    hooks.beforeRead = (sql, args, db) => {
+      if (matches(sql)) {
+        db.prepare('INSERT INTO RetiredIdentity VALUES(?, ?)').run(alice.publicKey, Date.now())
+        delete hooks.beforeRead
+        raced = true
+      }
+    }
+    hooks.afterRead = (sql, result) => { if (matches(sql)) databaseResult = result }
+    const data = action === 'message:list' || action === 'signal:read' ? { senderPubKey: bob.publicKey } : {}
+    assert.match((await h.call(method, action, data, alice)).error, /permanently retired/, method)
+    assert.equal(raced, true, `${method} raced immediately before the actual read`)
+    assert.deepEqual(databaseResult, action === 'signal:read' ? null : [], `${method} SQL itself refuses access`)
+    assert.equal(h.sqlite.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 1, 'history remains intact')
+  }
+})
+
+test('retirement racing legacy acknowledgement leaves the queued message untouched', async t => {
+  const hooks = {}, h = harness(t, hooks)
+  const [alice, bob] = await Promise.all([h.identity(), h.identity()])
+  const message = { id: crypto.randomUUID(), recipientPubKey: alice.publicKey, encryptedData: 'a'.repeat(100) }
+  assert.equal((await h.call('storeEncryptedMessage', 'message:send', message, bob)).success, true)
+  let raced = false
+  hooks.beforeRun = (sql, args, db) => {
+    if (sql.startsWith('DELETE FROM RelayMessage WHERE id =')) {
+      db.prepare('INSERT INTO RetiredIdentity VALUES(?, ?)').run(alice.publicKey, Date.now())
+      delete hooks.beforeRun
+      raced = true
+    }
+  }
+  assert.match((await h.call('deleteMessage', 'message:ack', { id: message.id, senderPubKey: bob.publicKey }, alice)).error, /permanently retired/)
+  assert.equal(raced, true)
+  assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM RelayMessage').get().n, 1)
 })

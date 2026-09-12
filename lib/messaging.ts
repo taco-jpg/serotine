@@ -169,23 +169,29 @@ export class MessagingEngine {
   private initializedAt = Date.now()
   private authorizedKeys = new Set<string>()
   private storeListener = () => {
+    if (this.disposed) return
     this.refreshPending = true
     clearTimeout(this.refreshTimer)
     if (this.running) return
     this.refreshTimer = setTimeout(() => {
-      if (this.running) return
+      if (this.disposed || this.running) return
       this.refreshPending = false
       void this.refresh().catch(error => this.fail(error))
     }, 40)
   }
   constructor(identity: Identity) { this.identity = identity }
-  subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
+  subscribe = (listener: () => void) => { this.assertActive(); this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
+  private assertActive() { if (this.disposed) throw new Error("Your identity changed. Reopen this conversation before continuing.") }
   private emit() { if (!this.disposed) this.listeners.forEach(listener => listener()) }
-  private fail(error: unknown) { this.error = error instanceof Error ? error.message : "Messages could not be synchronized."; this.status = "offline"; this.emit() }
+  private fail(error: unknown) { if (this.disposed) return; this.error = error instanceof Error ? error.message : "Messages could not be synchronized."; this.status = "offline"; this.emit() }
   async start() {
+    this.assertActive()
     this.key = await importKey(this.identity.privateKey, "encryption", "private")
+    if (this.disposed) { this.key = undefined; return }
     await migrateLegacyHistory(this.identity.publicKey)
+    if (this.disposed) return
     await this.migrateLocalHistory()
+    if (this.disposed) return
     await this.refresh()
     if (this.disposed) return
     window.addEventListener("serotine:events", this.storeListener)
@@ -195,9 +201,11 @@ export class MessagingEngine {
     this.timer = setInterval(() => { void this.sync() }, 5000)
     void this.sync()
   }
-  dispose() { this.disposed = true; clearInterval(this.timer); clearTimeout(this.refreshTimer); window.removeEventListener("serotine:events", this.storeListener); window.removeEventListener("serotine:contacts", this.storeListener); window.removeEventListener("storage", this.storeListener); window.removeEventListener("online", this.sync); this.listeners.clear() }
+  dispose() { this.disposed = true; this.key = undefined; clearInterval(this.timer); clearTimeout(this.refreshTimer); window.removeEventListener("serotine:events", this.storeListener); window.removeEventListener("serotine:contacts", this.storeListener); window.removeEventListener("storage", this.storeListener); window.removeEventListener("online", this.sync); this.listeners.clear() }
   refresh = async () => {
+    this.assertActive()
     const [records, preferences] = await Promise.all([getStoredEvents(this.identity.publicKey), getMessagingPreferences(this.identity.publicKey)])
+    this.assertActive()
     this.records = records; this.preferences = preferences; this.contacts = loadContacts(this.identity.publicKey)
     this.model = buildMessagingModel(records, this.identity.publicKey, this.contacts, preferences, this.authorizedKeys)
     this.emit()
@@ -206,6 +214,7 @@ export class MessagingEngine {
     const owner = this.identity.publicKey
     const existing = new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
     for (const row of await exportAllMessagesFromStorage(owner)) {
+      this.assertActive()
       let id = row.id
       if (!ID_PATTERN.test(id)) {
         const hash = arrayBufferToHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${row.peerPubKey}:${row.senderPubKey}:${id}`)))
@@ -221,6 +230,7 @@ export class MessagingEngine {
     const owner = this.identity.publicKey
     const saved = existing ?? new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
     for (const event of events) {
+      this.assertActive()
       const key = eventStorageKey(event)
       const prior = saved.get(key)
       if (prior) {
@@ -228,11 +238,13 @@ export class MessagingEngine {
         continue
       }
       if (pending) event.signature = await signText(eventText(event), this.identity)
+      this.assertActive()
       try {
         const record = { key, event, local: pending, delivered: pending ? [] : [...event.recipients], receivedAt, legacy: !pending }
         await saveStoredEvent(owner, record)
         saved.set(key, record)
       } catch (error) {
+        this.assertActive()
         // Concurrent tabs can sign the same migration with different valid ECDSA signatures.
         const concurrent = (await getStoredEvents(owner)).find(record => record.key === key)
         if (!concurrent || eventText(concurrent.event) !== eventText(event)) throw error
@@ -241,6 +253,7 @@ export class MessagingEngine {
     }
   }
   private groupFor(cid: string) {
+    this.assertActive()
     const group = this.model.groups.find(g => g.id === cid)
     const conversation = this.model.conversations.find(c => c.id === cid)
     if (!group || !conversation?.members.includes(this.identity.publicKey)) throw new Error("You are no longer a member of this group.")
@@ -248,12 +261,14 @@ export class MessagingEngine {
     return group
   }
   sendEvent = async (cid: string, kind: EventKind, payload: EventPayload): Promise<string> => {
+    this.assertActive()
     if (!this.key) throw new Error("Your identity is still loading.")
     const owner = this.identity.publicKey
     let group: GroupState | undefined
     let recipients: string[]
     if (validGroupId(cid)) { group = this.groupFor(cid); recipients = group.members.filter(x => x !== owner); if (!recipients.length) recipients = [owner] }
     else { cid = await validateAddress(cid); if (this.preferences.blocked.includes(cid)) throw new Error("Unblock this contact before sending a message."); recipients = [cid] }
+    this.assertActive()
     if (kind === "group") throw new Error("Use group management to update a group.")
     const event = await signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: owner, conversationId: cid, recipients, timestamp: Date.now(), kind, payload, ...(group ? { group } : {}) }, this.identity)
     if (!await validateMessagingEvent(event)) throw new Error("This message is invalid or too large.")
@@ -261,7 +276,9 @@ export class MessagingEngine {
     return event.id
   }
   private async queue(event: MessagingEvent) {
+    this.assertActive()
     await saveStoredEvent(this.identity.publicKey, { key: eventStorageKey(event), event, local: true, delivered: [], receivedAt: Date.now() })
+    this.assertActive()
     // Chunks are durable individually, but refreshing the full history after each
     // piece would repeatedly clone an entire large file. Its metadata refreshes
     // and starts delivery when preparation finishes; normal sync can also recover
@@ -269,10 +286,12 @@ export class MessagingEngine {
     if (event.kind === "attachment-chunk") return
     // Once durable, a view refresh failure must not make the composer resend it.
     try { await this.refresh() } catch (error) { this.fail(error) }
+    this.assertActive()
     void this.sync()
   }
   sendText = (cid: string, text: string, replyTo?: string, mentions?: string[]) => this.sendEvent(cid, "message", { content: text.trim(), ...(replyTo ? { replyTo } : {}), ...(mentions?.length ? { mentions } : {}) })
   editMessage = async (cid: string, messageId: string, text: string) => {
+    this.assertActive()
     const target = this.model.messages.find(m => m.conversationId === cid && m.id === messageId)
     if (!target || target.senderPubKey !== this.identity.publicKey || target.attachment || target.poll) throw new Error("You can edit your own text messages.")
     await this.sendEvent(cid, "edit", { targetId: messageId, content: text.trim() })
@@ -281,8 +300,10 @@ export class MessagingEngine {
   createPoll = (cid: string, question: string, options: string[]) => this.sendEvent(cid, "poll", { question: question.trim(), options: options.map(x => x.trim()) })
   vote = async (cid: string, messageId: string, option: number) => { await this.sendEvent(cid, "vote", { targetId: messageId, option }) }
   createGroup = async (name: string, members: string[]) => {
+    this.assertActive()
     const owner = this.identity.publicKey
     const normalized = [...new Set([owner, ...await Promise.all(members.map(validateAddress))])]
+    this.assertActive()
     if (normalized.length > MAX_MEMBERS) throw new Error(`Groups can have up to ${MAX_MEMBERS} members.`)
     const group = await signGroup({ id: `group:${crypto.randomUUID()}`, name: name.trim(), admin: owner, members: normalized, epoch: 1, updatedAt: Date.now() }, this.identity)
     if (!await validateGroup(group)) throw new Error("Enter a group name of 1–80 characters.")
@@ -290,6 +311,7 @@ export class MessagingEngine {
     return group.id
   }
   private async queueGroup(group: GroupState, members: string[]) {
+    this.assertActive()
     let recipients = [...new Set(members)].filter(x => x !== this.identity.publicKey)
     if (!recipients.length) recipients = [this.identity.publicKey]
     const event = await signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: this.identity.publicKey, conversationId: group.id, recipients, timestamp: Date.now(), kind: "group", payload: {}, group }, this.identity)
@@ -310,17 +332,19 @@ export class MessagingEngine {
     try { await this.setNotificationMode(cid, "muted") } catch (error) { this.fail(error) }
   }
   private async updatePreferences(change: (value: MessagingPreferences) => MessagingPreferences) {
+    this.assertActive()
     const owner = this.identity.publicKey
-    const update = async () => { const prior = await getMessagingPreferences(owner); await saveMessagingPreferences(owner, change(prior)) }
+    const update = async () => { this.assertActive(); const prior = await getMessagingPreferences(owner); this.assertActive(); await saveMessagingPreferences(owner, change(prior)) }
     if (navigator.locks) await navigator.locks.request(`serotine:preferences:${owner}`, update); else await update()
     await this.refresh()
   }
   acceptRequest = async (cid: string) => { await this.updatePreferences(p => ({ ...p, accepted: [...new Set([...p.accepted, cid])] })) }
-  blockContact = async (pub: string, blocked = true) => { await validateAddress(pub); if (pub === this.identity.publicKey) throw new Error("You cannot block yourself."); await this.updatePreferences(p => ({ ...p, blocked: blocked ? [...new Set([...p.blocked, pub])] : p.blocked.filter(x => x !== pub) })) }
+  blockContact = async (pub: string, blocked = true) => { this.assertActive(); await validateAddress(pub); if (pub === this.identity.publicKey) throw new Error("You cannot block yourself."); await this.updatePreferences(p => ({ ...p, blocked: blocked ? [...new Set([...p.blocked, pub])] : p.blocked.filter(x => x !== pub) })) }
   setNotificationMode = async (cid: string, mode: NotificationMode) => { await this.updatePreferences(p => ({ ...p, notifications: { ...p.notifications, [cid]: mode } })) }
   setReadReceipts = async (enabled: boolean) => { await this.updatePreferences(p => ({ ...p, readReceipts: enabled })) }
-  requestNotifications = requestMessagingNotifications
+  requestNotifications = () => { this.assertActive(); return requestMessagingNotifications() }
   markRead = async (cid: string) => {
+    this.assertActive()
     const messages = this.model.messages.filter(m => m.conversationId === cid && m.senderPubKey !== this.identity.publicKey)
     const latest = Math.max(0, ...messages.map(m => m.timestamp))
     if (latest <= (this.preferences.readAt[cid] ?? 0)) return
@@ -330,6 +354,8 @@ export class MessagingEngine {
     if (this.preferences.readReceipts && conversation && !conversation.request && !conversation.blocked && conversation.members.includes(this.identity.publicKey)) for (const message of unread) await this.sendEvent(cid, "receipt", { targetId: message.id, receipt: "read" })
   }
   getAttachmentChunks = (cid: string, messageId: string): Array<{ index: number; data: string }> => {
+    // The previous conversation can remain visible while an identity switch
+    // finishes. Reading its cached file pieces must remain safe during render.
     const message = this.model.messages.find(m => m.conversationId === cid && m.id === messageId)
     if (!message?.attachment) return []
     const chunks = new Map<number, string>()
@@ -337,8 +363,10 @@ export class MessagingEngine {
     return [...chunks].map(([index, data]) => ({ index, data })).sort((a, b) => a.index - b.index)
   }
   retry = async (messageId?: string) => {
+    this.assertActive()
     const message = this.model.messages.find(m => m.id === messageId)
-    for (const record of await getStoredEvents(this.identity.publicKey)) if (record.local && record.error && (!messageId || record.event.id === messageId || (message?.attachment && record.event.payload.attachmentId === message.attachment.id))) await saveStoredEvent(this.identity.publicKey, { ...record, error: undefined })
+    for (const record of await getStoredEvents(this.identity.publicKey)) if (record.local && record.error && (!messageId || record.event.id === messageId || (message?.attachment && record.event.payload.attachmentId === message.attachment.id))) { this.assertActive(); await saveStoredEvent(this.identity.publicKey, { ...record, error: undefined }) }
+    this.assertActive()
     await this.sync()
   }
   sync = async () => {
@@ -346,6 +374,7 @@ export class MessagingEngine {
     this.running = true
     try {
       const run = async () => {
+        this.assertActive()
         await this.flushOutbox()
         await this.refresh()
         await this.readFeed()
@@ -366,6 +395,7 @@ export class MessagingEngine {
     }
   }
   private async flushOutbox() {
+    this.assertActive()
     if (Date.now() < this.outboxRetryAt) return
     const owner = this.identity.publicKey
     const pending = (await getStoredEvents(owner)).filter(r => r.local && !r.legacy && !r.error && r.event.recipients.some(peer => !r.delivered.includes(peer))).sort((a, b) => a.receivedAt - b.receivedAt)
@@ -374,13 +404,16 @@ export class MessagingEngine {
       if (this.disposed) return
       await Promise.all(pending.slice(index, index + 4).map(async record => {
         for (const recipientPubKey of record.event.recipients) {
-          if (Date.now() < this.outboxRetryAt) return
+          if (this.disposed || Date.now() < this.outboxRetryAt) return
           if (record.delivered.includes(recipientPubKey)) continue
           try {
             const encryptedData = await encryptForPeer(JSON.stringify(record.event), this.key!, recipientPubKey)
+            this.assertActive()
             const data = { id: record.event.id, recipientPubKey, encryptedData }
             const proof = await createRequestProof("event:send", data, this.identity.privateKey, owner)
+            this.assertActive()
             const result = await storeEncryptedEvent(data, proof)
+            this.assertActive()
             if (!result.success && result.retryAfterMs) {
               // This authenticated refusal did not store the event. Keep the
               // durable outbox pending and retry with a fresh proof next window.
@@ -390,7 +423,7 @@ export class MessagingEngine {
             if (!result.success) throw new Error(result.error)
             record.delivered = [...new Set([...record.delivered, recipientPubKey])]; delete record.error
             await saveStoredEvent(owner, record)
-          } catch (error) { record.error = error instanceof Error ? error.message : "Sending failed. Retry when connected."; failure = new Error(record.error); await saveStoredEvent(owner, record); break }
+          } catch (error) { if (this.disposed) return; record.error = error instanceof Error ? error.message : "Sending failed. Retry when connected."; failure = new Error(record.error); await saveStoredEvent(owner, record); break }
         }
       }))
       if (failure || Date.now() < this.outboxRetryAt) break
@@ -398,16 +431,20 @@ export class MessagingEngine {
     if (failure) { this.error = failure.message; this.status = "offline" }
   }
   private async readFeed() {
+    this.assertActive()
     const owner = this.identity.publicKey
     let after = await getSyncCursor(owner)
     let hasMore = true
     while (hasMore && !this.disposed) {
       const data = { after }
       const proof = await createRequestProof("event:sync", data, this.identity.privateKey, owner)
+      this.assertActive()
       const result = await getEventFeed(data, proof)
+      this.assertActive()
       if (!result.success) throw new Error(result.error)
       const notifications: string[] = []
       for (const packet of result.messages) {
+        this.assertActive()
         let event: MessagingEvent
         try {
           const peer = packet.senderPubKey === owner ? packet.recipientPubKey : packet.senderPubKey
@@ -415,6 +452,7 @@ export class MessagingEngine {
           if (!await validateMessagingEvent(event, packet)) continue
           if (event.author !== owner && !event.recipients.includes(owner)) continue
         } catch { continue } // Invalid ciphertext must not stall unrelated messages.
+        this.assertActive()
         const key = eventStorageKey(event)
         const existing = this.records.find(r => r.key === key)
         const record: StoredEvent = { key, event, local: event.author === owner, delivered: event.author === owner ? [packet.recipientPubKey] : [], receivedAt: packet.createdAt, sequence: packet.sequence, error: existing?.error }
@@ -423,6 +461,7 @@ export class MessagingEngine {
         if (!existing && event.author !== owner && VISIBLE_KINDS.has(event.kind) && packet.createdAt >= this.initializedAt) notifications.push(event.id)
       }
       await this.refresh()
+      this.assertActive()
       for (const id of notifications) {
         const message = this.model.messages.find(m => m.id === id)
         const conversation = message && this.model.conversations.find(c => c.id === message.conversationId)
@@ -430,6 +469,7 @@ export class MessagingEngine {
       }
       await this.reconcileDepartures()
       await this.sendDeliveryReceipts()
+      this.assertActive()
       after = result.nextCursor
       await saveSyncCursor(owner, after)
       hasMore = result.hasMore
@@ -437,6 +477,7 @@ export class MessagingEngine {
   }
   private async reconcileDepartures() {
     for (const conversation of this.model.conversations) {
+      this.assertActive()
       const group = conversation.group
       if (!group || group.admin !== this.identity.publicKey || !conversation.members.includes(this.identity.publicKey) || sameSet(group.members, conversation.members)) continue
       const updated = await signGroup({ id: group.id, name: group.name, admin: group.admin, members: conversation.members, epoch: group.epoch + 1, updatedAt: Date.now() }, this.identity)
@@ -444,9 +485,11 @@ export class MessagingEngine {
     }
   }
   private async sendDeliveryReceipts() {
+    this.assertActive()
     const owner = this.identity.publicKey
     const receipted = new Set(this.records.filter(r => r.event.author === owner && r.event.kind === "receipt").map(r => `${conversationForEvent(r.event, owner)}:${r.event.payload.targetId}`))
     for (const message of this.model.messages) {
+      this.assertActive()
       if (message.senderPubKey === owner || receipted.has(`${message.conversationId}:${message.id}`)) continue
       const conversation = this.model.conversations.find(c => c.id === message.conversationId)
       if (!conversation || conversation.request || conversation.blocked || !conversation.members.includes(owner)) continue
@@ -455,22 +498,29 @@ export class MessagingEngine {
     }
   }
   private async readLegacyInbox() {
+    this.assertActive()
     const owner = this.identity.publicKey
     const existing = new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
     let after: { createdAt: number; id: string; senderPubKey: string } | undefined
     for (let page = 0; page < 10 && !this.disposed; page++) {
       const data = after ? { after } : {}
       const proof = await createRequestProof("message:inbox", data, this.identity.privateKey, owner)
+      this.assertActive()
       const result = await getLegacyInbox(data, proof)
+      this.assertActive()
       if (!result.success) throw new Error(result.error)
       for (const packet of result.messages) {
+        this.assertActive()
         try {
           const envelope = JSON.parse(await decryptFromPeer(packet.encryptedData, this.key!, packet.senderPubKey))
           if (!isEnvelope(envelope, packet.senderPubKey, owner) || envelope.id !== packet.id) continue
           await this.persistLegacyEvents(await legacyMessageEvents(envelope), false, packet.createdAt, existing)
+          this.assertActive()
           const ack = { id: packet.id, senderPubKey: packet.senderPubKey }
-          await deleteMessage(ack, await createRequestProof("message:ack", ack, this.identity.privateKey, owner))
-        } catch { /* Keep unpersisted legacy messages at the relay. */ }
+          const ackProof = await createRequestProof("message:ack", ack, this.identity.privateKey, owner)
+          this.assertActive()
+          await deleteMessage(ack, ackProof)
+        } catch { if (this.disposed) return; /* Keep unpersisted legacy messages at the relay. */ }
       }
       if (!result.nextCursor) break
       after = result.nextCursor

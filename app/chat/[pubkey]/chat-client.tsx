@@ -342,7 +342,13 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
           {!mentionCandidates.length && <p className="px-3 py-2 text-xs text-zinc-400">{mentionQuery?.query ? "No matching members." : "Everyone is already mentioned."}</p>}
         </div>}
         {mentions.length > 0 && <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">{mentions.map(pub => <button type="button" key={pub} aria-label={`Remove mention of ${displayName(pub)}`} disabled={busy} onClick={() => removeMention(pub)} className="inline-flex items-center gap-1 rounded-full bg-indigo-400/15 px-2 py-1 text-indigo-200">@{displayName(pub)}<X className="size-3" /></button>)}</div>}
-        <AttachmentComposer captureRef={chatRoot} pasteRef={input} disabled={!usable || sending} onSend={async (file, kind, onProgress) => { const scope = actionScope.current; const id = await sendAttachment(messaging.sendEvent, conversationId, file, kind, onProgress, replyTo); if (actionScope.current === scope) { setReplyTo(undefined); jumpToLatest() } return id }} />
+        <AttachmentComposer key={`${myPub}:${conversationId}`} owner={myPub} captureRef={chatRoot} pasteRef={input} disabled={!usable || sending || !draftReady} onSelectGif={url => {
+          if (!usable || sending || !draftReady) return
+          const next = content.trim() ? `${content}\n${url}` : url
+          if (next.length > MAX_MESSAGE_LENGTH) { setSendError("There is not enough room for this GIF. Send or shorten your draft first."); return }
+          changeMessage(next, next.length)
+          requestAnimationFrame(() => input.current?.focus())
+        }} onSend={async (file, kind, onProgress) => { const scope = actionScope.current; const id = await sendAttachment(messaging.sendEvent, conversationId, file, kind, onProgress, replyTo); if (actionScope.current === scope) { setReplyTo(undefined); jumpToLatest() } return id }} />
         <div className="mt-2 flex flex-wrap justify-between gap-2 text-[11px] text-zinc-500"><span className="hidden sm:inline">Enter to send · Shift + Enter for a new line</span><span className={!draftSaved ? "text-amber-300" : ""}>{!draftSaved ? draftIssue === "read" ? "Saved draft could not be loaded" : draftIssue === "clear" ? "Sent text is waiting to be cleared from storage" : "Draft is only in this tab · Do not close it" : content ? "Draft saved on this browser" : "History saved on this browser"}</span></div>{!draftSaved && <Button type="button" size="sm" variant="ghost" onClick={retryDraftSave}>{draftIssue === "read" ? "Try loading draft again" : draftIssue === "clear" ? "Retry draft cleanup" : "Try saving draft again"}</Button>}{content.length > MAX_MESSAGE_LENGTH - 1000 && <p className="mt-1 text-right text-xs text-zinc-500">{content.length.toLocaleString()} / {MAX_MESSAGE_LENGTH.toLocaleString()}</p>}
       </div>
     </footer>

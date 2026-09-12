@@ -4,6 +4,8 @@ import { Fragment, type ReactNode } from "react"
 import katex from "katex"
 import "katex/dist/katex.min.css"
 import { MessageText } from "@/components/message-text"
+import { GifMessage } from "@/components/chat/gif-message"
+import { parseGiphyUrl } from "@/lib/giphy"
 
 function linkedText(text: string, highlight: string): ReactNode[] {
   const result: ReactNode[] = []
@@ -19,7 +21,10 @@ function linkedText(text: string, highlight: string): ReactNode[] {
     })
     let safe = false
     try { const parsed = new URL(href); safe = parsed.protocol === "https:" || parsed.protocol === "http:" } catch { /* Keep malformed URLs as text. */ }
-    result.push(safe
+    const gifId = parseGiphyUrl(href)
+    result.push(gifId
+      ? <GifMessage key={`gif-${index}-${gifId}`} id={gifId} />
+      : safe
       ? <a key={`link-${index}`} href={href} target="_blank" rel="noopener noreferrer" className="break-all underline underline-offset-4"><MessageText content={href} query={highlight} /></a>
       : <MessageText key={`text-${index}`} content={href} query={highlight} />)
     result.push(<Fragment key={`tail-${index}`}>{match[0].slice(href.length)}</Fragment>)

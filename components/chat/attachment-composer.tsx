@@ -1,22 +1,27 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
-import { Mic, Paperclip, Send, Settings2, Square, X } from "lucide-react"
+import { FolderPlus, Mic, Paperclip, Send, Settings2, Square, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { MAX_FILE_BYTES, attachmentPreviewKind, formatFileSize, safeFilename, validateAttachmentFile, type AttachmentKind, type AttachmentProgress } from "@/lib/attachments"
 import { bindFileInputEvents } from "./file-input-events"
 import { compactAttachment } from "@/lib/compact-attachment"
 import { AutoCompactFilesSetting, useAutoCompactFiles } from "./use-auto-compact-files"
+import { FileBankPicker } from "./file-bank-picker"
+import { GifPicker } from "./gif-picker"
+import { saveBankFiles } from "@/lib/file-bank"
 
 const RECORDING_LIMIT_SECONDS = 300
 const MAX_QUEUED_FILES = 8
 type PendingFile = { file: File; kind: AttachmentKind; originalBytes?: number }
 
-export function AttachmentComposer({ disabled = false, captureRef, pasteRef, onSend }: {
+export function AttachmentComposer({ owner = "", disabled = false, captureRef, pasteRef, onSend, onSelectGif }: {
+  owner?: string
   disabled?: boolean
   captureRef?: RefObject<HTMLDivElement | null>
   pasteRef?: RefObject<HTMLTextAreaElement | null>
   onSend: (file: File, kind: AttachmentKind, onProgress?: AttachmentProgress) => Promise<unknown>
+  onSelectGif?: (url: string) => void
 }) {
   const input = useRef<HTMLInputElement>(null)
   const localTarget = useRef<HTMLDivElement>(null)
@@ -41,6 +46,8 @@ export function AttachmentComposer({ disabled = false, captureRef, pasteRef, onS
   const [dragging, setDragging] = useState(false)
   const [preparing, setPreparing] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [savingToBank, setSavingToBank] = useState(false)
+  const [savedToBank, setSavedToBank] = useState<File | null>(null)
   const [autoCompact, setAutoCompact] = useAutoCompactFiles()
 
   function releaseMicrophone(expectedStream = stream.current) {
@@ -85,7 +92,7 @@ export function AttachmentComposer({ disabled = false, captureRef, pasteRef, onS
   }, [])
 
   const chooseFiles = useCallback(async (files: File[]) => {
-    if (!files.length || disabled || busyRef.current || preparingRef.current || recording || requesting) return
+    if (!files.length || disabled || busyRef.current || preparingRef.current || recording || requesting) return false
     const attempt = ++preparationId.current
     preparingRef.current = true
     setPreparing(true)
@@ -96,14 +103,16 @@ export function AttachmentComposer({ disabled = false, captureRef, pasteRef, onS
       const prepared: PendingFile[] = []
       for (const original of files) {
         const result = await compactAttachment(original, autoCompact)
-        if (!mounted.current || preparationId.current !== attempt) return
+        if (!mounted.current || preparationId.current !== attempt) return false
         validateAttachmentFile(result.file)
         prepared.push({ file: result.file, kind: "file", ...(result.compacted ? { originalBytes: result.originalBytes } : {}) })
       }
       replaceQueue([...queueRef.current, ...prepared])
       setError("")
+      return true
     } catch (cause) {
       if (mounted.current && preparationId.current === attempt) setError(cause instanceof Error ? cause.message : "Unable to select this file.")
+      return false
     } finally {
       if (preparationId.current === attempt) {
         preparingRef.current = false
@@ -209,11 +218,24 @@ export function AttachmentComposer({ disabled = false, captureRef, pasteRef, onS
     } finally { busyRef.current = false; if (mounted.current) setBusy(false) }
   }
 
+  async function saveSelectedToBank() {
+    if (!owner || !selected || savingToBank) return
+    setSavingToBank(true); setError("")
+    try {
+      await saveBankFiles(owner, [selected.file])
+      if (mounted.current) setSavedToBank(selected.file)
+    } catch (cause) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : "Unable to save this file to your bank.")
+    } finally { if (mounted.current) setSavingToBank(false) }
+  }
+
   const unavailable = disabled || busy || preparing || recording || requesting
   return <div ref={localTarget} className={`min-w-0 space-y-2 rounded-lg p-1 ${dragging ? "bg-accent ring-2 ring-primary" : ""}`}>
     <input ref={input} type="file" multiple className="hidden" aria-label="Choose attachments" disabled={unavailable} onChange={event => { void chooseFiles(Array.from(event.target.files || [])); event.target.value = "" }} />
     <div className="flex flex-wrap items-center gap-1">
       <Button type="button" variant="ghost" size="icon" aria-label="Attach files" title="Attach files" disabled={unavailable} onClick={() => input.current?.click()}><Paperclip aria-hidden="true" className="size-4" /></Button>
+      {onSelectGif && <GifPicker disabled={unavailable} onSelectGif={onSelectGif} />}
+      {owner && <FileBankPicker owner={owner} disabled={unavailable} onSelectFile={async file => { if (!await chooseFiles([file])) throw new Error("Unable to queue this file. Send or remove a queued file, then try again.") }} />}
       <Button type="button" variant="ghost" size="icon" aria-label="Record voice message" title="Record voice message" disabled={unavailable || queue.length > 0} onClick={() => void startRecording()}><Mic aria-hidden="true" className="size-4" /></Button>
       <Button type="button" variant="ghost" size="icon" aria-label="Attachment settings" title="Attachment settings" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(value => !value)}><Settings2 aria-hidden="true" className="size-4" /></Button>
       {!!queue.length && <span className="ml-1 text-xs text-muted-foreground">{queue.length} queued</span>}
@@ -235,10 +257,12 @@ export function AttachmentComposer({ disabled = false, captureRef, pasteRef, onS
       {selected.originalBytes !== undefined && <p className="text-xs text-muted-foreground">Compacted from {formatFileSize(selected.originalBytes)} · recipients can extract the .gz file</p>}
       {previewUrl && attachmentPreviewKind(selected.file.type.split(";")[0]) === "image" && <img src={previewUrl} alt="Attachment preview" className="max-h-32 rounded-md object-contain" />}
       {previewUrl && attachmentPreviewKind(selected.file.type.split(";")[0]) === "audio" && <audio controls preload="metadata" src={previewUrl} aria-label="Preview voice or audio attachment" className="max-w-full" />}
+      {previewUrl && attachmentPreviewKind(selected.file.type.split(";")[0]) === "video" && <video controls playsInline preload="metadata" src={previewUrl} aria-label="Preview video attachment" className="max-h-52 w-full rounded-md object-contain" />}
       {busy && <div role="status" className="text-xs"><span>Preparing to send · {progress}%</span><progress className="h-1 w-full" value={progress} max={100} aria-label="File prepared for sending" /></div>}
       <div className="flex flex-wrap gap-2">
         <Button type="button" size="sm" disabled={busy || preparing || disabled} onClick={() => void sendSelected()}><Send aria-hidden="true" />{busy ? "Preparing…" : selected.kind === "voice" ? "Send voice message" : "Send file"}</Button>
         <Button type="button" size="sm" variant="ghost" disabled={busy || preparing} onClick={() => { replaceQueue(queueRef.current.filter(item => item !== selected)); setError("") }}><X aria-hidden="true" />Remove</Button>
+        {owner && <Button type="button" size="sm" variant="ghost" disabled={savingToBank || savedToBank === selected.file} onClick={() => void saveSelectedToBank()}><FolderPlus aria-hidden="true" />{savingToBank ? "Saving…" : savedToBank === selected.file ? "Saved to bank" : "Save to bank"}</Button>}
       </div>
       {queue.length > 1 && <ul className="space-y-1 border-t pt-2">{queue.slice(1).map((item, index) => <li key={index} className="flex items-center gap-2 text-xs"><span className="min-w-0 flex-1 truncate">{safeFilename(item.file.name)} · {formatFileSize(item.file.size)}</span><Button type="button" variant="ghost" size="sm" disabled={busy || preparing} aria-label={`Remove ${safeFilename(item.file.name)}`} onClick={() => replaceQueue(queueRef.current.filter(pending => pending !== item))}><X aria-hidden="true" /></Button></li>)}</ul>}
     </div>}

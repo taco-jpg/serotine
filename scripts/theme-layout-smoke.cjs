@@ -29,7 +29,7 @@ async function main() {
   const artifacts = process.env.SEROTINE_BROWSER_ARTIFACTS || fs.mkdtempSync('/tmp/serotine-theme-layout-')
   fs.mkdirSync(artifacts, { recursive: true })
   const logPath = path.join(artifacts, 'server.log'), log = fs.openSync(logPath, 'w')
-  const server = spawn(process.execPath, [path.join(root, 'node_modules/next/dist/bin/next'), 'dev', '--webpack', '--port', port, '--hostname', '127.0.0.1'], { cwd: root, stdio: ['ignore', log, log] })
+  const server = spawn(process.execPath, [path.join(root, 'node_modules/next/dist/bin/next'), ...(process.env.SEROTINE_SERVER_MODE === 'production' ? ['start'] : ['dev', '--webpack']), '--port', port, '--hostname', '127.0.0.1'], { cwd: root, stdio: ['ignore', log, log] })
   let browser
   try {
     let ready = false
@@ -41,9 +41,25 @@ async function main() {
       await pause(500)
     }
     assert.ok(ready, `Server did not start: ${logPath}; ${startupError}`)
-    browser = await chromium.launch({ executablePath: process.env.SEROTINE_CHROMIUM_PATH, args: ['--no-sandbox', '--disable-dev-shm-usage'], headless: true })
+    browser = await chromium.launch({ executablePath: process.env.SEROTINE_CHROMIUM_PATH, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-zygote'], headless: true })
     const [owner, bob] = await Promise.all([identity(), identity()])
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: 'dark' })
+    async function localOnly(context) {
+      await context.route('**/*', route => {
+        const request = route.request(), url = new URL(request.url())
+        if (url.origin !== origin) return route.abort()
+        if (url.pathname === '/api/relay') {
+          const body = request.postDataJSON() || {}
+          let result = { success: true }
+          if (body.action === 'event:sync') result = { success: true, messages: [], nextCursor: body.data?.after || 0, hasMore: false }
+          if (body.action === 'message:inbox' || body.action === 'message:list') result = { success: true, messages: [], nextCursor: null }
+          if (body.action === 'signal:read') result = { success: true, signal: null }
+          return route.fulfill({ contentType: 'application/json', body: JSON.stringify(result) })
+        }
+        return route.continue()
+      })
+    }
+    await localOnly(context)
     const page = await context.newPage()
     const errors = []
     page.on('pageerror', error => errors.push(error.message))
@@ -73,8 +89,9 @@ async function main() {
       const prepared = await SerotineTheme.prepareAttachment(new File([blob], 'study-shapes.png', { type: 'image/png' }))
       for (const chunk of prepared.chunks) await save(owner, owner.publicKey, [], 'attachment-chunk', { attachmentId: prepared.metadata.id, ...chunk })
       const image = await save(owner, owner.publicKey, [], 'attachment', { attachment: prepared.metadata })
-      for (let index = 1; index <= 5; index++) await save(owner, owner.publicKey, [], 'message', { content: `Quick note ${index}: keep the details easy to scan.` })
-      return { simple, rich, poll, image }
+      const quickNotes = []
+      for (let index = 1; index <= 5; index++) quickNotes.push(await save(owner, owner.publicKey, [], 'message', { content: `Quick note ${index}: keep the details easy to scan.` }))
+      return { simple, rich, poll, image, quickNotes }
     }, { owner, bob })
     await page.goto(`${origin}/chat/${owner.publicKey}`)
     const message = page.getByRole('textbox', { name: 'Message', exact: true })
@@ -89,6 +106,7 @@ async function main() {
       measurements.push({ name, ...result })
       assert.equal(result.horizontalOverflow, false, `${name}: page must fit viewport`)
       assert.equal(result.composerOverflow, false, `${name}: composer must fit viewport`)
+      if (!baseline) assert.ok(result.composer <= 75, `${name}: idle composer stays compact (${result.composer}px)`)
       await target.screenshot({ path: path.join(artifacts, `${name}.png`), fullPage: true, style: 'nextjs-portal { display: none; }' })
       console.log(name, JSON.stringify(result))
       return result
@@ -130,7 +148,60 @@ async function main() {
         for (const sample of samples) assert.ok(sample.ratio >= 4.5, `${theme} ${sample.label} should have readable text contrast: ${JSON.stringify(sample)}`)
         console.log(`PASS ${theme} message/link/code/poll contrast`, samples.map(sample => `${sample.label} ${sample.ratio}:1`).join(', '))
       }
+      async function growsAndRecovers(target, label) {
+        const draft = target.getByRole('textbox', { name: 'Message', exact: true })
+        const idleHeight = await draft.evaluate(node => node.getBoundingClientRect().height)
+        assert.ok(await target.locator('footer').evaluate(node => node.getBoundingClientRect().height) <= 75, `${label}: idle composer stays compact`)
+        await draft.fill('First line\nSecond line\nThird line\nFourth line')
+        await target.waitForFunction(height => document.querySelector('textarea[aria-label="Message"]').getBoundingClientRect().height > height + 20, idleHeight)
+        await draft.fill('')
+        await target.waitForFunction(height => document.querySelector('textarea[aria-label="Message"]').getBoundingClientRect().height <= height + 1 && document.querySelector('footer').getBoundingClientRect().height <= 75, idleHeight)
+      }
       await resolvedTheme(page, 'dark')
+      await growsAndRecovers(page, 'desktop')
+      const grouped = await page.evaluate(ids => ids.map(id => {
+        const row = document.getElementById(`message-${id}`), time = row.querySelector('time')
+        return { continuation: row.dataset.messageRun === 'continuation', timestampHidden: time.parentElement.getBoundingClientRect().height <= 1, dateTime: time.dateTime, fullTime: new Date(time.dateTime).toLocaleString() }
+      }), fixture.quickNotes)
+      assert.ok(grouped.slice(1).every(row => row.continuation), 'consecutive notes share a message run')
+      assert.deepEqual(grouped.map(row => row.timestampHidden), [true, true, true, true, false], 'only the final note repeats a visible timestamp')
+      for (const index of [0, 4]) {
+        await page.locator(`#message-${fixture.quickNotes[index]}`).getByRole('button', { name: 'Message actions', exact: true }).click()
+        const exactTime = page.getByRole('menu').locator('time')
+        await exactTime.waitFor()
+        assert.equal(await exactTime.getAttribute('datetime'), grouped[index].dateTime)
+        assert.equal(await exactTime.textContent(), grouped[index].fullTime, 'message actions retain the full timestamp')
+        await page.keyboard.press('Escape')
+      }
+      const toolsToggle = page.getByRole('button', { name: 'More message tools', exact: true })
+      assert.equal(await toolsToggle.getAttribute('aria-expanded'), 'false')
+      await toolsToggle.press('Enter')
+      await page.locator('#message-tools').waitFor({ state: 'visible' })
+      assert.equal(await toolsToggle.getAttribute('aria-expanded'), 'true')
+      for (const name of ['Attach files', 'Search GIFs', 'Open file bank', 'Record voice message', 'Poll']) {
+        const control = page.locator('#message-tools').getByRole('button', { name, exact: true })
+        assert.equal(await control.isVisible(), true, `${name} is accessible in the expanded toolbar`)
+        assert.equal(await control.isEnabled(), true, `${name} remains available`)
+      }
+      await toolsToggle.press('Enter')
+      await page.locator('#message-tools').waitFor({ state: 'hidden' })
+      assert.equal(await toolsToggle.getAttribute('aria-expanded'), 'false')
+      for (const kind of ['paste', 'drop']) {
+        const name = `compact-${kind}.txt`
+        await page.evaluate(({ kind, name }) => {
+          const data = new DataTransfer()
+          data.items.add(new File(['Synthetic compact composer check'], name, { type: 'text/plain' }))
+          const target = document.querySelector(kind === 'paste' ? 'textarea[aria-label="Message"]' : '[aria-label="Conversation messages"]')
+          const event = kind === 'paste' ? new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }) : new DragEvent('drop', { dataTransfer: data, bubbles: true, cancelable: true })
+          target.dispatchEvent(event)
+        }, { kind, name })
+        await page.locator('footer').getByText(name, { exact: false }).waitFor()
+        await page.getByRole('button', { name: 'Send file', exact: true }).waitFor()
+        assert.equal(await toolsToggle.getAttribute('aria-expanded'), 'false', `${kind} works with tools closed`)
+        await page.locator('footer').getByRole('button', { name: 'Remove', exact: true }).click()
+        await page.getByRole('button', { name: 'Send file', exact: true }).waitFor({ state: 'hidden' })
+      }
+      console.log('PASS compact composer, textarea expansion/recovery, grouped timestamps, full message time, toolbar access and closed-toolbar paste/drop')
       await chooseTheme(page, 'Light')
       await resolvedTheme(page, 'light')
       await contrastSamples('light')
@@ -164,10 +235,30 @@ async function main() {
       await inbox.getByRole('button', { name: 'Expand sidebar', exact: true }).waitFor()
       await inbox.locator(`a[href="/chat/${bob.publicKey}"]:visible`).click()
       await page.getByRole('main').getByText('Ready to review our notes?', { exact: true }).waitFor()
+      await page.getByRole('button', { name: 'More message tools', exact: true }).press('Enter')
+      const mentionButton = page.getByRole('button', { name: 'Mention', exact: true })
+      await mentionButton.press('Enter')
+      const mentionOptions = page.getByRole('listbox', { name: 'Mention suggestions', exact: true })
+      await mentionOptions.waitFor()
+      await page.waitForFunction(() => document.activeElement?.getAttribute('role') === 'option')
+      await page.keyboard.press('Escape')
+      await mentionOptions.waitFor({ state: 'hidden' })
+      await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Message')
+      await mentionButton.press('Enter')
+      await page.waitForFunction(() => document.activeElement?.getAttribute('role') === 'option')
+      await page.keyboard.press('End')
+      await page.keyboard.press('Home')
+      await page.keyboard.press('Enter')
+      await mentionOptions.waitFor({ state: 'hidden' })
+      assert.match(await message.inputValue(), /^@Study partner /, 'keyboard toolbar mention inserts the selected contact')
+      await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Message')
+      await message.fill('')
+      await page.getByRole('button', { name: 'More message tools', exact: true }).press('Enter')
+      console.log('PASS keyboard Mention activation, focus, Escape, navigation and insertion')
       await inbox.locator(`a[href="/chat/${owner.publicKey}"]:visible`).click()
       await message.waitFor()
       await inbox.getByRole('button', { name: 'Expand sidebar', exact: true }).click()
-      await page.waitForFunction(() => document.querySelector('#serotine-sidebar').getBoundingClientRect().width === 280)
+      await page.waitForFunction(() => document.querySelector('#serotine-sidebar').getBoundingClientRect().width === 248)
       console.log('PASS sidebar collapse, rail actions/navigation, persisted preference and expansion')
 
       await message.fill('Browser sent theme check')
@@ -205,6 +296,7 @@ async function main() {
 
       await inbox.getByRole('button', { name: 'Collapse sidebar', exact: true }).click()
       const phoneContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2, colorScheme: 'dark', storageState: await context.storageState({ indexedDB: true }) })
+      await localOnly(phoneContext)
       const phone = await phoneContext.newPage()
       phone.on('pageerror', error => errors.push(error.message))
       await phone.goto(`${origin}/chat`)
@@ -217,6 +309,7 @@ async function main() {
       await phoneInbox.locator(`a[href="/chat/${owner.publicKey}"]:visible`).tap()
       const phoneMessage = phone.getByRole('textbox', { name: 'Message', exact: true })
       await phoneMessage.waitFor()
+      await growsAndRecovers(phone, 'phone')
       await phoneMessage.fill('Sent from a touch screen')
       await phone.getByRole('button', { name: 'Send message', exact: true }).tap()
       await phone.getByRole('region', { name: 'Conversation messages' }).getByText('Sent from a touch screen', { exact: true }).waitFor()
@@ -240,7 +333,7 @@ async function main() {
       await phoneMessage.waitFor()
       await capture(phone, 'phone-320-dark')
       await phone.getByRole('button', { name: 'More message tools', exact: true }).tap()
-      await phone.getByRole('menuitem', { name: 'Create poll', exact: true }).tap()
+      await phone.getByRole('button', { name: 'Poll', exact: true }).tap()
       const phonePoll = phone.getByRole('dialog', { name: 'Create a poll', exact: true })
       await phonePoll.waitFor()
       assert.equal(await phonePoll.evaluate(node => node.scrollWidth > node.clientWidth + 1), false, 'mobile poll dialog fits the viewport')
@@ -248,8 +341,20 @@ async function main() {
       await phone.getByRole('link', { name: 'Back to conversations', exact: true }).tap()
       await phoneInbox.locator(`a[href="/chat/${bob.publicKey}"]:visible`).tap()
       await phoneMessage.waitFor()
+      await capture(phone, 'phone-320-direct-dark')
+      await phone.getByRole('button', { name: 'Options for Study partner', exact: true }).tap()
+      await phone.getByRole('menuitem', { name: 'Search conversation', exact: true }).tap()
+      await phone.getByRole('search', { name: 'Search saved messages', exact: true }).waitFor()
+      await phone.getByRole('button', { name: 'Close search', exact: true }).tap()
+      await phone.getByRole('button', { name: 'Options for Study partner', exact: true }).tap()
+      await phone.getByRole('menuitem', { name: 'Private chat settings', exact: true }).tap()
+      await phone.getByRole('dialog').waitFor()
+      await phone.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).tap()
+      const directHeader = await phone.getByRole('heading', { name: 'Study partner', exact: true }).evaluate(node => { const header = node.closest('header'); return { titleWidth: node.getBoundingClientRect().width, overflow: header.scrollWidth > header.clientWidth + 1 } })
+      assert.equal(directHeader.overflow, false, '320px direct-chat header fits its extra controls')
+      assert.ok(directHeader.titleWidth > 0, '320px direct-chat title remains visible')
       await phone.getByRole('button', { name: 'More message tools', exact: true }).tap()
-      await phone.getByRole('menuitem', { name: 'Mention someone', exact: true }).tap()
+      await phone.getByRole('button', { name: 'Mention', exact: true }).tap()
       await phone.getByRole('listbox', { name: 'Mention suggestions', exact: true }).getByRole('option').first().tap()
       assert.match(await phoneMessage.inputValue(), /^@Study partner /, 'mobile mention menu inserts the selected contact')
       await phoneContext.close()

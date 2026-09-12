@@ -44,12 +44,12 @@ export function ConversationRow({ conversation, selected, owner, actions, collap
     {icon}
     {conversation.unreadCount > 0 && <span aria-hidden="true" className="absolute -right-0.5 -top-0.5 flex min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-semibold leading-4 text-primary-foreground ring-2 ring-sidebar">{conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}</span>}
   </Link>
-  return <div className={`group/row flex items-center gap-0.5 rounded-xl transition-colors motion-reduce:transition-none ${rowStyle}`}>
-    <Link href={conversationHref(conversation.id)} aria-current={selected ? "page" : undefined} className="flex min-h-14 min-w-0 flex-1 items-center gap-2.5 rounded-xl px-2 py-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+  return <div className={`group/row flex items-center gap-0.5 rounded-lg transition-colors motion-reduce:transition-none ${rowStyle}`}>
+    <Link href={conversationHref(conversation.id)} aria-current={selected ? "page" : undefined} className="flex min-h-12 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
       {icon}
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5"><span className={`truncate text-[13px] text-foreground ${conversation.unreadCount ? "font-semibold" : "font-medium"}`}>{name}</span>{conversation.archived && <Archive className="size-3 shrink-0 text-muted-foreground" aria-label="Archived" />}{conversation.notificationMode === "muted" && <BellOff className="size-3 shrink-0 text-muted-foreground" aria-label="Muted" />}<span className="ml-auto shrink-0 text-[10px] text-muted-foreground">{last ? messageTime(last.timestamp) : ""}</span></span>
-        <span className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1 text-xs text-muted-foreground">
           {groupStatus && <span className="shrink-0 text-[10px] text-amber-700 dark:text-amber-300">{groupStatus} ·</span>}
           {outgoing && last?.delivery === "pending" && <Clock3 className="size-3 shrink-0" aria-label="Queued" />}
           {(conversation.sendError || (outgoing && last?.delivery === "failed")) && <CircleAlert className="size-3 shrink-0 text-amber-700 dark:text-amber-300" aria-label="Delivery issue in this conversation" />}

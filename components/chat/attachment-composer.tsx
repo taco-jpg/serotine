@@ -15,7 +15,7 @@ const RECORDING_LIMIT_SECONDS = 300
 const MAX_QUEUED_FILES = 8
 type PendingFile = { file: File; kind: AttachmentKind; originalBytes?: number }
 
-export function AttachmentComposer({ owner = "", disabled = false, captureRef, pasteRef, onSend, onSelectGif, extraActions, toolbarHint }: {
+export function AttachmentComposer({ owner = "", disabled = false, captureRef, pasteRef, onSend, onSelectGif, extraActions, toolbarHint, toolbarVisible = true, toolbarId }: {
   owner?: string
   disabled?: boolean
   captureRef?: RefObject<HTMLDivElement | null>
@@ -24,6 +24,8 @@ export function AttachmentComposer({ owner = "", disabled = false, captureRef, p
   onSelectGif?: (url: string) => void
   extraActions?: ReactNode
   toolbarHint?: ReactNode
+  toolbarVisible?: boolean
+  toolbarId?: string
 }) {
   const input = useRef<HTMLInputElement>(null)
   const localTarget = useRef<HTMLDivElement>(null)
@@ -231,9 +233,9 @@ export function AttachmentComposer({ owner = "", disabled = false, captureRef, p
   }
 
   const unavailable = disabled || busy || preparing || recording || requesting
-  return <div ref={localTarget} className={`min-w-0 space-y-2 rounded-lg ${dragging ? "bg-accent ring-2 ring-primary" : ""}`}>
+  return <div ref={localTarget} className={`flex min-w-0 flex-col gap-2 rounded-lg ${dragging ? "bg-accent ring-2 ring-primary" : ""}`}>
     <input ref={input} type="file" multiple className="hidden" aria-label="Choose attachments" disabled={unavailable} onChange={event => { void chooseFiles(Array.from(event.target.files || [])); event.target.value = "" }} />
-    <div className="flex flex-wrap items-center gap-1">
+    <div id={toolbarId} className={`${toolbarVisible ? "flex" : "hidden"} flex-wrap items-center gap-1`}>
       <Button type="button" variant="ghost" size="icon" aria-label="Attach files" title="Attach files" disabled={unavailable} onClick={() => input.current?.click()}><Paperclip aria-hidden="true" className="size-4" /></Button>
       {onSelectGif && <GifPicker disabled={unavailable} onSelectGif={onSelectGif} />}
       {owner && <FileBankPicker owner={owner} disabled={unavailable} onSelectFile={async file => { if (!await chooseFiles([file])) throw new Error("Unable to queue this file. Send or remove a queued file, then try again.") }} />}
@@ -243,7 +245,7 @@ export function AttachmentComposer({ owner = "", disabled = false, captureRef, p
       {!!queue.length && <span className="ml-1 text-xs text-muted-foreground">{queue.length} queued</span>}
       {toolbarHint && <div className="ml-auto text-xs text-muted-foreground">{toolbarHint}</div>}
     </div>
-    <div className={settingsOpen ? "space-y-2 rounded-lg border border-border bg-card p-3" : "sr-only"}>
+    <div className={settingsOpen && toolbarVisible ? "space-y-2 rounded-lg border border-border bg-card p-3" : "hidden"}>
       <p className="text-xs text-muted-foreground">Files up to {formatFileSize(MAX_FILE_BYTES)} each. You can also drop files into the chat or paste them into the message box.</p>
       <AutoCompactFilesSetting enabled={autoCompact} onChange={setAutoCompact} disabled={unavailable} />
     </div>

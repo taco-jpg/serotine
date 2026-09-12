@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { fileToAttachment, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, validateAttachments, type MessageAttachment } from "@/lib/attachments"
+import { fileToAttachment, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, validateAttachments, type MessageAttachment } from "@/lib/legacy-attachments"
 
 interface PendingFile { id: string; attachment: MessageAttachment }
 interface AttachmentDraft { key: string; files: PendingFile[] }

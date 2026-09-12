@@ -25,7 +25,7 @@ interface CloudflareEnv {
 export class RelayConfigurationError extends Error {}
 
 export async function getDB(): Promise<D1DatabaseBinding> {
-  const { env } = await getCloudflareContext()
+  const { env } = await getCloudflareContext({ async: true })
   const db = (env as unknown as CloudflareEnv).serotine_db
 
   if (!db || typeof db.prepare !== "function") {

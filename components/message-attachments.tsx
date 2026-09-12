@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { Download, File, X } from "lucide-react"
-import { attachmentToBlob, formatFileSize, isPreviewableImage, type MessageAttachment } from "@/lib/attachments"
+import { attachmentToBlob, formatFileSize, isPreviewableImage, type MessageAttachment } from "@/lib/legacy-attachments"
 import { MessageText } from "@/components/message-text"
 
 function AttachmentCard({ attachment, query, mine, onRemove, disabled }: {

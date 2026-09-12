@@ -1,10 +1,29 @@
 # Serotine
 
-Browser-based, end-to-end encrypted conversations with device-local identities, an authenticated Cloudflare D1 relay, and optional direct WebRTC delivery.
+Browser-based, end-to-end encrypted messaging with device-local identities and an authenticated Cloudflare D1 relay. No email address or phone number is required.
+
+## Conversations
+
+- **Group chats:** create a named group, add contacts, manage membership, and leave. The creator manages membership and the group name. Groups support up to twenty people.
+- **Inbox:** all conversations receive messages while Serotine is open, with unread counts and recent-message previews. Unknown people appear in message requests.
+- **Notifications:** explicitly enable browser notifications, then choose all messages, mentions only, or muted for each conversation. Notifications use a generic preview. Serotine must remain open; this release does not include closed-app push delivery.
+- **Replies and pins:** reply to a particular message, jump to the original, and keep important messages in the pinned panel.
+- **Editing and receipts:** edit your own text with an edited label. Sending, relay confirmation, delivery, and optional read receipts are separate states.
+- **Shared files and links:** browse a conversation's attachments and links together. Files are limited to 2 MiB, encrypted in chunks, and checked against a SHA-256 digest before opening or downloading. Supported images and audio have inline previews; other formats download as files.
+- **Invites:** copy an invitation link containing only your public address. The recipient explicitly adds you; opening a link does not automatically trust an identity.
+- **Search:** search all locally saved messages, filenames, and links, then jump to the matching conversation. Conversation search remains available.
+- **Polls:** create a question with options and let each participant choose or change their vote.
+- **Voice messages:** record, preview, send, or cancel an audio message. Microphone access is requested only when recording. Voice messages use the same attachment size limit.
+- **Message yourself:** your own address opens a normal conversation. Send yourself text, files, links, and voice messages using the normal composer.
+- **Backups and linked devices:** export a password-encrypted full backup containing identity, contacts, legacy history, message events, attachment chunks, and preferences. Restore it on another device to link that device and synchronize retained incoming and outgoing events.
+- **Message requests and blocking:** accept unfamiliar senders, block them, or unblock them later. Muted and unaccepted conversations do not generate notifications.
+- **Math and code:** render inline/display math and fenced code without interpreting raw HTML. Math rendering disables trusted commands.
+
+Drafts stay local to each browser and conversation. Backups do not include drafts. Keep a tab open if it warns that a draft could not be saved. Failed outgoing events remain locally available for explicit retry, retaining their original IDs and recipient lists.
 
 ## Run locally
 
-Use Node.js 22.13 or newer and npm (the maintained lockfile is `package-lock.json`).
+Use Node.js 22.13 or newer and npm:
 
 ```sh
 npm ci
@@ -12,78 +31,55 @@ npm run db:migrate:local
 npm run dev
 ```
 
-Open `http://localhost:3000`. Development uses OpenNext's local Cloudflare context and the `serotine_db` binding in `wrangler.toml`. No production credentials are needed for the local D1 database. Use two **separate browser profiles**, create an identity in each, exchange their full public addresses, and add each other as contacts.
+Open `http://localhost:3000`. Development uses OpenNext's local Cloudflare context and the `serotine_db` binding in `wrangler.toml`; production credentials are not required. Use separate browser profiles to test different identities. To test linked devices, restore the same full backup into another profile.
 
-Keep the conversation open to receive messages from that contact. History lives in IndexedDB on that browser. The download button next to Serotine creates a password-protected identity backup; the login screen restores that file. Backups restore keys and the address, **not** message history or contacts. Simultaneously using one identity on multiple devices does not synchronize history: whichever device acknowledges a queued message first collects it.
+## Backups and synchronization
 
-## Using conversations
+Open **Backups and linked devices** to download an encrypted snapshot, or **Link another device** for transfer instructions. Use a password of at least twelve characters and keep it separate from the backup file. The password cannot be recovered. Existing identity-only backups remain importable, but naturally contain no chat history.
 
-- Send documents, pictures, and other files with **Attach files**, drop files onto the composer, or paste an image. Each message supports up to **four files totaling 1 MiB (1,048,576 bytes)**, with an optional caption. Remove a selected file with its × button. Oversized selections leave your existing files in place.
-- Sent and received files have a download button; supported PNG, JPEG, GIF, and WebP files also show inline previews. Other formats, including SVG and HTML, are download-only. Conversation search finds filenames as well as message text.
-- File bytes, filenames, and types are encrypted together with the message. Both peers must reload into this version to receive attachments; older tabs leave those messages queued until updated. Text continues using the existing v2 envelope; files use a v3 envelope inside the same authenticated relay protocol. Large packets use the relay instead of exceeding direct-channel limits. No extra bucket, database migration, or service binding is required.
-- Before sending, selected files remain only in this tab's memory, scoped to your identity and contact; they survive switching conversations but not a reload or tab closure. Once locally saved for sending, attachments survive reloads with message history and **Unconfirmed · Retry** resends the original files. A local storage failure retains the selection so you can try again. Identity backups still exclude chat history and files.
-- Unsent drafts survive reloads and switching contacts. Each draft belongs to one identity and contact, stays in browser storage, and is excluded from identity backups. A storage warning means the draft is only in memory; keep the tab open. A delayed send cannot clear a newer draft revision.
-- Search a conversation with the magnifying-glass button. Previous/next controls (or Shift + Enter / Enter in the search field) move through matching messages saved on this browser; Escape closes search.
-- While reading older messages, the new-message count and **Jump to latest** button let you return without losing your place. This count concerns the open conversation, not a background inbox.
-- Filter contacts by name or address and use the pencil button to rename them. Contact changes refresh across tabs on the same browser.
-- Backup downloads require matching passwords. Use **Show passwords** to check your entry before downloading. The restore screen also supports revealing the password.
-- The **Reconnect** button retries the relay and refreshes saved history without reloading. Failed conversation initialization has its own retry control. Focusing a tab also refreshes history and the connection.
-- Open tabs on the same browser refresh committed history using identity-scoped notifications. Notification payloads contain routing addresses, never plaintext messages or keys. If cross-tab messaging is unavailable, focus refresh still works. This does not synchronize different browser profiles or devices.
-- Relay requests time out after 15 seconds so a stalled request does not leave the composer locked. **Unconfirmed · Retry** reuses the original message ID: a timeout cannot establish whether a remote write succeeded. A recent send from another tab remains pending; an abandoned pending attempt becomes retryable after 30 seconds.
-- New clients use independent, abortable requests to the stable `/api/relay` endpoint. A stuck inbox check cannot queue-block sends or reconnects, and subsequent deployments do not change the endpoint's identifiers. A tab opened before this update needs one reload to switch transports. Drafts and local history remain in the browser.
-- Empty foreground inbox checks gradually slow from 3 to 15 seconds; hidden tabs check no more often than every 30 seconds. Incoming messages, successful sends, and returning to the tab restore the faster cadence. Outages back off from 8 to 60 seconds. Direct-connection negotiation runs only with an available relay in a visible, online tab and checks at most once per 15 seconds.
-- **Retry N unconfirmed** retries the conversation's saved failed messages in order, using each original ID. It stops on the first failure or when you leave the conversation. It never automatically resends messages, and your current draft stays separate.
-- Drafts that cannot be written to browser storage remain in memory across conversation changes in the same tab. **Try saving draft again** retries persistence, and the browser may warn before closing a tab with unsaved text. Reloading or closing can still lose these memory-only drafts.
-- Search highlights matching text and respects input-method composition. Each message has a **Copy** action, and the composer grows with multiline text. Screen readers get sender labels and arrival announcements without replaying restored history.
-- Adding an address already in your contact list opens its conversation. The whole contact panel scrolls on short screens, including the add-contact form and expanded address.
+The relay retains new encrypted events for seven days. Each browser tracks its own position in a non-destructive feed that includes both received and sent events. Reading on one device does not remove another device's copy. A new device obtains older history from the full backup and then catches up from the retained feed. A device offline beyond the retention window may need a newer full backup. Contact aliases, notification preferences, and drafts are device-local after the initial transfer.
 
-- A blocked draft read can be retried with **Try loading draft again**; it does not overwrite the unread text. Failed cleanup of submitted text remains pending in this tab and deletes only the submitted revision, preserving newer edits.
-- Creating and restoring identities are serialized with a browser Web Lock where supported, with a per-tab queue and a final storage comparison as fallback. Legacy identity reads no longer write during loading. Older browsers without Web Locks cannot guarantee atomic writes across tabs; use one tab for identity creation/restoration there.
-- Browser storage/HTTPS problems on the login screen offer **Check again** instead of incorrectly requiring a backup restore.
-- Confirmed outgoing messages cannot be downgraded by a slower retry in another tab. Local storage preserves the original text and timestamp for the same message ID, and retries of already-confirmed messages avoid another relay write.
+Linked devices share the same identity private key. This release does not support revoking only one linked device. A lost or compromised identity requires creating a new identity and sharing its new address. Browser storage and exported snapshots contain sensitive information; clearing site data without a usable backup can lose local history.
 
-## Verify and deploy
+## Verification
 
 ```sh
 npm test
 npm run typecheck
+npm run lint
 npm run build
 ```
 
-Tests exercise the actual Web Crypto implementation and server actions against SQLite, with only the D1 binding substituted. They cover signed ownership, replay rejection, expired and tampered packets, recipient-scoped acknowledgments, sender-filtered inboxes, retry deduplication, rate limits, and relay failures. Draft regression tests also cover recipient/identity isolation, reloads, failed storage writes, and delayed-send races. They are not an independent security audit or a browser/network compatibility test.
+For browser integration, run `npx playwright install chromium` once, then `npm run test:browser`. The smoke test starts a local server and uses synthetic identities to exercise actual D1 traffic, groups, attachments, voice recording, backups, linked browsers, and the mobile layout. `SEROTINE_CHROMIUM_PATH` can point to an existing Chromium executable.
 
-This project deploys to **Cloudflare Workers with OpenNext**, not Pages or `next-on-pages`. `npm run build` must produce `.open-next/worker.js`; generated `.open-next` output is intentionally not committed. For Cloudflare Workers Builds, set the **Build command** to `npm run build` and the production **Deploy command** to `npm run deploy:built`. The normal deploy command uploads the Worker. The relay automatically creates any missing v2 tables and indexes on the first authenticated request through its existing D1 binding; no separate migration command or extra deployment-token database permissions are needed for this bootstrap. Keep `wrangler.toml` pointed at your intended D1 database and Worker. After authenticating Wrangler for that account:
+Tests cover the actual Web Crypto and SQLite implementations alongside controlled browser/storage boundaries. They exercise authenticated relay access, replay protection, identity scoping, retained synchronization, group authorization, message controls, attachment integrity, and encrypted backups. Automated tests are not an independent security audit or a substitute for real-device deployment checks.
+
+## Deployment
+
+Deploy to **Cloudflare Workers with OpenNext**. Keep the `serotine_db` D1 binding in `wrangler.toml` pointed at the intended database. For Workers Builds, use `npm run build` as the build command and `npm run deploy:built` as the production deploy command. After authenticating Wrangler for that account:
 
 ```sh
 npm run deploy
 ```
 
-`0002_authenticated_transport.sql` defines the v2 relay, encrypted signal, and replay-prevention tables without deleting existing tables. Automatic setup uses the same additive statements, repairs missing indexes, checks required columns, and caches only successful readiness. Concurrent requests safely initialize independently; failed setup is retried. It never creates a database binding or alters incompatible existing tables. Explicit `npm run db:migrate:remote` remains available for operators and future migrations, but is not required to recover missing v2 tables. Deploying v2 requires both peers to reload into v2. Old unsigned queued messages and signals are not accepted as authenticated v2 traffic. Already-saved browser history is imported once for its original identity; legacy database tables are preserved. Do not roll back to the old unauthenticated public actions on an internet-facing deployment.
+Both the existing relay schema and the new event tables initialize additively on authenticated requests. The new schema does not delete the old v2 queue or browser history. Reload both clients after deployment to use the new event protocol. Old clients can still send legacy messages, which the new identity-wide compatibility inbox can collect; old clients cannot display new group, file, or event messages. Upgrade both participants for normal conversations.
 
-## Troubleshooting a relay outage
+Files sent by the earlier attachment release remain readable. The compatibility inbox accepts its v3 envelopes (up to four files totaling 1 MiB) and saves the files before acknowledging the queued message. Existing local attachments, including unconfirmed sends, migrate into the current conversation view and remain included in full backups. New sends use the 2 MiB chunked attachment format.
 
-A generic relay error alone does not establish the cause. Do not clear browser data to fix a server outage: that can remove your identity and local history.
+The new retained event log is separate from the legacy acknowledged queue. It uses a monotonically increasing sequence for stable pagination, including multiple senders at the same timestamp. Sender limits bound writes, retained row counts, and retained ciphertext bytes. A large group file creates a separately encrypted copy for each recipient, so it consumes more relay storage than a direct attachment.
 
-- **Automatic database setup:** after this version is deployed, valid requests create missing v2 tables and indexes automatically. No dashboard change is needed for a missing migration when `serotine_db` already points to a writable D1 database. Incompatible schemas, a missing binding, or service outages remain explicit failures.
-- **Messaging is not configured:** check the Worker's `serotine_db` D1 binding against `wrangler.toml`.
-- **Temporarily unavailable:** inspect Worker logs and D1 availability. Requests automatically retry; use **Reconnect** after service returns and retry each unconfirmed message using its existing bubble.
-- **Daily database allowance:** the relay recognizes daily-limit errors and preserves unconfirmed messages for later retry. Even empty authenticated reads consume nonce writes; idle/background polling now slows down to reduce that load. Cloudflare's [D1 pricing documentation](https://developers.cloudflare.com/d1/platform/pricing/) explains the allowance and reset schedule. A generic outage alone does not prove this was the cause.
-- **A tab stops working after an update:** reload once to pick up the stable HTTP transport. Old Server Action clients remain supported where their deployed action identifiers still match; reconnect alone cannot repair an obsolete identifier. Do not reload while the draft warning says its only copy is in this tab.
-- For production Workers Builds, use `npm run build` followed by `npm run deploy:built`. Keep preview deployments bound to their intended database. Bootstrap runs through the configured binding, so it does not guess a database or require a separate authenticated Wrangler migration.
+## Delivery and security
 
-These diagnostics distinguish known setup failures without exposing query text or message data. Tests and local migrations do not verify the state of a deployed database.
+- Public addresses are P-256 keys. Private keys are generated and stored on the device. Relay requests require ECDSA ownership proofs tied to the action, payload, timestamp, and single-use nonce.
+- New events and group membership descriptors carry signatures. Content is encrypted per recipient using ECDH-derived AES-256-GCM keys and fresh nonces. The relay sees routing addresses, timing, and ciphertext sizes, but not message text, group names, polls, or file contents.
+- Group membership changes are authorized by the group creator. Events bind their membership version and recipient list. Removed members do not receive messages addressed to the new membership. Previously received history cannot be recalled.
+- A relay-confirmed event is not automatically a delivered or read message. Recipient receipts communicate those separate states; read receipts can be disabled.
+- Full backups use PBKDF2-SHA-256 with 600,000 iterations, a random salt, and AES-GCM. Restore validates identity ownership and message records before import.
+- The original v2 direct WebRTC transport remains available in the legacy code. The current feature-rich conversation interface uses the retained encrypted event relay for consistent device synchronization.
+- Verify addresses through a trusted independent channel. Static identity keys do not provide forward secrecy or a Signal-style ratchet. A compromised device, extension, or served application can expose local plaintext and keys. This is not an anonymity network or independently audited security product.
 
-## Delivery and security model
+## Troubleshooting
 
-- An address is a P-256 public key. Its private key is created locally and stays in browser storage. Requests use ECDSA/SHA-256 proofs of possession of that existing P-256 identity, binding action, full payload, timestamp, and single-use nonce. The same underlying key currently serves ECDH and ECDSA for compatibility; separate certified signing and encryption identities are a future protocol change.
-- The versioned HTTP transport accepts only the five existing relay operations, bounded JSON bodies, and same-origin browser requests. It uses the same signature, freshness, and single-use nonce checks as legacy actions. Aborting a client request does not establish whether a remote write committed; retries still keep the original message ID.
-- Content and signaling are encrypted with ECDH-derived AES-256-GCM keys and fresh 96-bit IVs. Encrypted message envelopes bind protocol version, sender, recipient, UUID, timestamp, and content. Both relay and direct delivery validate these fields.
-- Sends are durably queued at the relay before reporting success. The direct channel can deliver the same encrypted packet immediately; the receiver deduplicates its stable ID. “Sent to relay” is **not a delivered or read receipt**.
-- A recipient acknowledges a message only after saving it locally. Fetching alone never deletes it. Inbox queries and acknowledgments are signed and recipient-scoped. Polling continues while a direct channel is open and retries relay errors. Signed cursor pagination processes one page at a time so unreadable rows cannot block later messages; those rows remain queued for another attempt.
-- Queued messages expire after seven days. Queries exclude expired records; message writes purge expired ciphertext. Expired signaling and nonce records are also purged during their respective operations. This is logical application deletion, not a promise about provider backups or physical erasure.
-- Sender writes have per-identity request and queue limits: at most 500 queued messages and 20 MiB of queued ciphertext per sender. Ciphertext limits include encoding overhead; collecting or expiring messages frees relay space. Attachment packets stay below D1's 2,000,000-byte row limit, and inbox pages contain at most four messages to bound response memory. These limits do not stop Sybil attacks or volumetric abuse. Configure Cloudflare request/rate controls and monitor resource usage before exposing a relay publicly.
-- The relay can observe public routing addresses, message sizes, timing, and requests. WebRTC peers and STUN services can learn IP information. This is not an anonymity network.
-- Verify contact addresses through a trusted independent channel. Static identity keys do not provide forward secrecy, key rotation, or a Signal-style ratchet. Anyone controlling the served JavaScript, the browser profile, an extension with sufficient access, or the device may access local keys and plaintext history. HTTPS and a trusted deployment are required.
-- Identity backups use PBKDF2-SHA-256 (600,000 iterations, random salt) and AES-GCM. The backup password cannot be recovered. Legacy unencrypted encryption-key JSON can also be imported.
+Do not clear browser data to fix a relay outage. Use the inbox reconnect/sync control, preserve drafts, and retry failed sends after the connection returns. The relay distinguishes missing database configuration, daily database allowances, temporary overload, and incompatible schema. A generic connection error alone does not establish the cause.
 
-The interface does not promise disappearing messages, metadata secrecy, or audited security. Production rollout still requires deployment configuration, real-browser/two-device validation, operational abuse controls, and independent security review appropriate to the intended use.
+A newly deployed version may require one reload. Do not reload while the composer says its only saved copy is in the current tab. Database setup can repair missing tables and indexes, but cannot create a missing Cloudflare binding or fix provider outages.

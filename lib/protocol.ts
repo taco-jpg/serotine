@@ -1,18 +1,25 @@
-import { validateAttachments, type MessageAttachment } from "./attachments"
+import { validateAttachments, type MessageAttachment } from "./legacy-attachments"
 
 /** Shared, deterministic wire format. Never include private keys in a request. */
 export const MAX_MESSAGE_LENGTH = 8000
-// 1 MiB of files, base64 in JSON and then base64 AES-GCM, plus caption/metadata.
+// 1 MiB of legacy files, base64 in JSON and then base64 AES-GCM, plus caption/metadata.
 // Stay below D1's 2 MB row limit, including routing fields.
 export const MAX_PACKET_LENGTH = 1_950_000
 export const MAX_SIGNAL_PACKET_LENGTH = 64000
 export const MESSAGE_PAGE_SIZE = 4
+// Rich events use independent bounds and send attachments in separate chunks.
+export const MAX_EVENT_CONTENT_LENGTH = 48000
+export const MAX_EVENT_PACKET_LENGTH = 128000
+export const EVENT_FEED_PAGE_SIZE = 50
 export const AUTH_WINDOW_MS = 60_000
 export const PUBLIC_KEY_PATTERN = /^04[0-9a-f]{128}$/
 export const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 export interface InboxCursor { createdAt: number; id: string }
 export interface InboxRequest { senderPubKey: string; after?: InboxCursor }
+export interface LegacyInboxCursor extends InboxCursor { senderPubKey: string }
+export interface LegacyInboxRequest { after?: LegacyInboxCursor }
+export interface EventFeedRequest { after?: number }
 
 export interface RequestProof {
   publicKey: string

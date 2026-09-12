@@ -183,10 +183,64 @@ test('route rejects oversized packets and signals before database access', async
   assert.deepEqual(await (await h.post(await h.signed('signal:send', allowedSignal, alice))).json(), { success: true })
 })
 
+test('event streaming caps stay small with absent or false Content-Length and retain complete chunked packets', async t => {
+  const h = harness(t)
+  const { MAX_EVENT_PACKET_LENGTH } = h.load(path.join(root, 'lib/protocol.ts'))
+  for (const declared of [undefined, '1']) {
+    let cancelled = false, pulls = 0
+    const stream = new ReadableStream({
+      pull(controller) { pulls++; controller.enqueue(new Uint8Array(30000)) },
+      cancel() { cancelled = true },
+    })
+    const headers = { 'content-type': 'application/json', 'x-serotine-events': '1' }
+    if (declared) headers['content-length'] = declared
+    const response = await h.POST(new Request(`${origin}/api/relay`, { method: 'POST', headers, body: stream, duplex: 'half' }))
+    assert.equal(response.status, 413)
+    assert.equal(cancelled, true)
+    assert.ok(pulls <= 6, 'the event stream must stop near 144 KiB, before the legacy file allowance')
+  }
+  assert.equal(h.calls.length, 0)
+  const [alice, bob] = await Promise.all([h.identity(), h.identity()])
+  const data = { id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(MAX_EVENT_PACKET_LENGTH) }
+  const bytes = new TextEncoder().encode(JSON.stringify(await h.signed('event:send', data, alice)))
+  let offset = 0
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (offset === bytes.length) return controller.close()
+      const end = Math.min(offset + 4093, bytes.length)
+      controller.enqueue(bytes.subarray(offset, end)); offset = end
+    },
+  })
+  const response = await h.POST(new Request(`${origin}/api/relay`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-serotine-events': '1', 'content-length': '1' },
+    body: stream, duplex: 'half',
+  }))
+  assert.deepEqual(await response.json(), { success: true })
+  assert.equal(h.sqlite.prepare('SELECT encryptedData FROM RelayEvent').get().encryptedData, data.encryptedData)
+})
+
+test('event and signal bodies cannot borrow the legacy file allowance by omitting the event header', async t => {
+  const h = harness(t)
+  const [alice, bob] = await Promise.all([h.identity(), h.identity()])
+  const packet = { recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(100) }
+  for (const [action, data, limit] of [
+    ['event:send', { ...packet, id: crypto.randomUUID() }, 144 * 1024],
+    ['signal:send', packet, 80 * 1024],
+  ]) {
+    const serialized = JSON.stringify(await h.signed(action, data, alice))
+    const response = await h.POST(new Request(`${origin}/api/relay`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'content-length': '1' },
+      body: serialized.padEnd(limit + 1, ' '),
+    }))
+    assert.equal(response.status, 413, action)
+  }
+  assert.equal(h.calls.length, 0)
+})
+
 test('one MiB of four files and a caption survives client, signed HTTP, SQLite, and decryption', async t => {
   const h = harness(t)
   const protocol = h.load(path.join(root, 'lib/protocol.ts'))
-  const { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS } = h.load(path.join(root, 'lib/attachments.ts'))
+  const { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS } = h.load(path.join(root, 'lib/legacy-attachments.ts'))
   const [alice, bob] = await Promise.all([h.identity(), h.identity()])
   const relay = client(async (url, init) => h.POST(new Request(`${origin}${url}`, init)))
   const attachments = Array.from({ length: MAX_ATTACHMENTS }, (_, index) => {

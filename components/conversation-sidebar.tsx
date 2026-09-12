@@ -4,6 +4,7 @@ import Link from "next/link"
 import { BellOff, File, Mic, BarChart3, Users, UserRound, CheckCheck, Clock3, CircleAlert } from "lucide-react"
 import { IdentityIcon } from "@/components/ui/identity-icon"
 import type { ConversationRecord, MessageRecord } from "@/lib/messaging-types"
+import { conversationHref } from "@/lib/conversation-route"
 
 export function messagePreview(message?: MessageRecord): string {
   if (!message) return "Start a conversation"
@@ -25,7 +26,7 @@ export function ConversationRow({ conversation, selected, owner, actions }: {
   const last = conversation.lastMessage
   const outgoing = last?.senderPubKey === owner
   return <div className={`flex items-center gap-0.5 rounded-xl transition-colors ${selected ? "bg-indigo-400/10 ring-1 ring-inset ring-indigo-400/20" : "hover:bg-zinc-900"}`}>
-    <Link href={`/chat/${conversation.id}`} aria-current={selected ? "page" : undefined} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl p-3 focus-visible:outline focus-visible:outline-indigo-300">
+    <Link href={conversationHref(conversation.id)} aria-current={selected ? "page" : undefined} className="flex min-w-0 flex-1 items-center gap-3 rounded-xl p-3 focus-visible:outline focus-visible:outline-indigo-300">
       {conversation.kind === "group" ? <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-indigo-400/10 text-indigo-300"><Users className="size-5" /></span>
         : conversation.kind === "self" ? <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-indigo-400/10 text-indigo-300"><UserRound className="size-5" /></span>
           : <IdentityIcon pubKey={conversation.id} size={40} />}

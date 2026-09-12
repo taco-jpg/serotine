@@ -24,6 +24,7 @@ function validResult(action: RelayAction, value: unknown, data: unknown, proof: 
     return typeof value.error === "string" && value.error.trim().length > 0
       && value.error.length <= 1000 && !/[<>]/.test(value.error)
       && [...value.error].every(character => character.charCodeAt(0) >= 32)
+      && (value.retryAfterMs === undefined || (typeof value.retryAfterMs === "number" && Number.isSafeInteger(value.retryAfterMs) && value.retryAfterMs > 0 && value.retryAfterMs <= 120000))
   }
   if (value.success !== true) return false
   if (action === "signal:read") {

@@ -203,6 +203,7 @@ test('global legacy inbox bounds full-size file pages and preserves sender ties 
 
 test('expiry clears accounted bytes; storage budget is enforced atomically and duplicate retries still succeed', async t => {
   const h = harness(t)
+  const { MAX_RETAINED_EVENT_COUNT, MAX_RETAINED_EVENT_BYTES } = h.load(path.join(root, 'lib/protocol.ts'))
   const [alice, bob] = await Promise.all([h.identity(), h.identity()])
   const one = await h.send(alice, bob)
   let usage = h.sqlite.prepare('SELECT * FROM RelayEventUsage').get()
@@ -215,24 +216,75 @@ test('expiry clears accounted bytes; storage budget is enforced atomically and d
   assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM RelayEvent').get().n, 1)
   usage = h.sqlite.prepare('SELECT * FROM RelayEventUsage').get()
   assert.equal(usage.eventCount, 1)
-  h.sqlite.prepare('UPDATE RelayEventUsage SET eventCount = 16000').run()
+  h.sqlite.prepare('UPDATE RelayEventUsage SET eventCount = ?').run(MAX_RETAINED_EVENT_COUNT)
   assert.match((await h.send(alice, bob)).result.error, /storage is full/)
   assert.equal((await h.call('storeEncryptedEvent', 'event:send', two.data, alice)).success, true)
-  h.sqlite.prepare('UPDATE RelayEventUsage SET eventCount = 1, payloadBytes = 134217728').run()
+  h.sqlite.prepare('UPDATE RelayEventUsage SET eventCount = 1, payloadBytes = ?').run(MAX_RETAINED_EVENT_BYTES)
   assert.match((await h.send(alice, bob)).result.error, /storage is full/)
   assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM RelayEvent').get().n, 1)
 })
 
 test('event send requests are rate limited independently of legacy messages', async t => {
   const h = harness(t)
+  const { MAX_EVENT_SENDS_PER_MINUTE } = h.load(path.join(root, 'lib/protocol.ts'))
   const [alice, bob] = await Promise.all([h.identity(), h.identity()])
   await h.feed(alice)
   const insert = h.sqlite.prepare('INSERT INTO RequestNonce(publicKey,nonce,action,expiresAt) VALUES(?,?,?,?)')
-  for (let i = 0; i < 2000; i++) insert.run(alice.publicKey, crypto.randomUUID(), 'event:send', Date.now() + 60000)
-  assert.match((await h.send(alice, bob)).result.error, /Too many requests/)
+  for (let i = 0; i < MAX_EVENT_SENDS_PER_MINUTE; i++) insert.run(alice.publicKey, crypto.randomUUID(), 'event:send', Date.now() + 60000)
+  const limited = (await h.send(alice, bob)).result
+  assert.match(limited.error, /Too many requests/)
+  assert.equal(limited.retryAfterMs, 61000)
   assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM RelayEvent').get().n, 0)
   const legacy = { id: crypto.randomUUID(), recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(100) }
   assert.equal((await h.call('storeEncryptedMessage', 'message:send', legacy, alice)).success, true)
+})
+
+test('a 10 MiB file traverses signed group events, encrypted HTTP relay pages and verified assembly', async t => {
+  const h = harness(t)
+  const participants = await Promise.all(Array.from({ length: 20 }, () => h.identity()))
+  const [alice, bob] = participants
+  const signer = { version: 2, publicKey: alice.publicKey, privateKey: alice.privateJwk }
+  const files = h.load(path.join(root, 'lib/attachments.ts'))
+  const messaging = h.load(path.join(root, 'lib/messaging.ts'))
+  const { MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT, MAX_EVENT_PACKET_LENGTH } = h.load(path.join(root, 'lib/protocol.ts'))
+  const original = Uint8Array.from({ length: files.MAX_FILE_BYTES }, (_, i) => i % 251)
+  const group = await messaging.signGroup({ id: `group:${crypto.randomUUID()}`, admin: alice.publicKey,
+    members: participants.map(p => p.publicKey), name: 'A complete twenty-member group', epoch: 1, updatedAt: Date.now() }, signer)
+  let totalCiphertext = 0, count = 0
+  await files.sendAttachment(async (conversationId, kind, payload) => {
+    const event = await messaging.signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: alice.publicKey,
+      conversationId, recipients: participants.slice(1).map(p => p.publicKey), timestamp: Date.now(), kind, payload, group }, signer)
+    assert.equal(await messaging.validateMessagingEvent(event), true)
+    const sent = await h.send(alice, bob, JSON.stringify(event), event.id)
+    assert.equal(sent.result.success, true, sent.result.error)
+    assert.ok(sent.data.encryptedData.length <= MAX_EVENT_PACKET_LENGTH)
+    totalCiphertext += Buffer.byteLength(sent.data.encryptedData)
+    count++
+    return event.id
+  }, group.id, new File([original], 'large-project.zip', { type: 'application/zip' }))
+  assert.equal(count, files.MAX_ATTACHMENT_CHUNKS + 1)
+  assert.ok(totalCiphertext * 19 < MAX_RETAINED_EVENT_BYTES, 'all nineteen encrypted copies fit the sender budget')
+  assert.ok(count * 19 < MAX_RETAINED_EVENT_COUNT)
+  let after = 0, metadata, hasMore = true
+  const chunks = []
+  while (hasMore) {
+    const page = await h.feed(bob, after)
+    assert.equal(page.success, true)
+    for (const packet of page.messages) {
+      const event = JSON.parse(await h.cryptography.decryptFromPeer(packet.encryptedData, bob.pair.privateKey, alice.publicKey))
+      assert.equal(await messaging.validateMessagingEvent(event, packet), true)
+      if (event.kind === 'attachment') metadata = event.payload.attachment
+      else chunks.push({ index: event.payload.index, data: event.payload.data })
+    }
+    after = page.nextCursor
+    hasMore = page.hasMore
+  }
+  assert.equal(metadata.size, 10 * 1024 * 1024)
+  assert.deepEqual(new Uint8Array(await (await files.assembleAttachment(metadata, chunks.toReversed())).arrayBuffer()), original)
+  const invalid = await messaging.signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: alice.publicKey,
+    conversationId: bob.publicKey, recipients: [bob.publicKey], timestamp: Date.now(), kind: 'attachment-chunk',
+    payload: { attachmentId: metadata.id, index: files.MAX_ATTACHMENT_CHUNKS, data: '' } }, signer)
+  assert.equal(await messaging.validateMessagingEvent(invalid), false, 'a signed chunk beyond the file cap is refused')
 })
 
 test('browser refuses corrupt feed cursors, ordering and identities before advancing sync', async t => {

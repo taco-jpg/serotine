@@ -5,7 +5,7 @@ import { createRequestProof } from "./request-auth"
 import { deleteMessage, getEventFeed, getLegacyInbox, storeEncryptedEvent } from "./relay-client"
 import { exportAllMessagesFromStorage, migrateLegacyHistory } from "./storage"
 import { defaultMessagingPreferences, eventStorageKey, getMessagingPreferences, getStoredEvents, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor } from "./messaging-store"
-import { isAttachmentMeta } from "./attachments"
+import { ATTACHMENT_CHUNK_BYTES, MAX_ATTACHMENT_CHUNKS, isAttachmentMeta } from "./attachments"
 import { legacyMessageEvents } from "./legacy-messaging"
 import { notifyIncoming, requestMessagingNotifications } from "./message-notifications"
 import type { AttachmentMeta, ConversationRecord, EventKind, EventPayload, GroupState, MessageRecord, MessagingEvent, MessagingModel, MessagingPreferences, NotificationMode, StoredEvent } from "./messaging-types"
@@ -50,7 +50,7 @@ function validPayload(kind: EventKind, p: EventPayload) {
     case "vote": return validId(p.targetId) && Number.isInteger(p.option) && p.option! >= 0 && p.option! < 10
     case "receipt": return validId(p.targetId) && (p.receipt === "read" || p.receipt === "delivered")
     case "attachment": return validAttachment(p.attachment) && (p.content === undefined || (typeof p.content === "string" && p.content.length <= MAX_MESSAGE_LENGTH))
-    case "attachment-chunk": return validId(p.attachmentId) && Number.isInteger(p.index) && p.index! >= 0 && p.index! < 80 && typeof p.data === "string" && p.data.length <= 40960 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(p.data)
+    case "attachment-chunk": return validId(p.attachmentId) && Number.isInteger(p.index) && p.index! >= 0 && p.index! < MAX_ATTACHMENT_CHUNKS && typeof p.data === "string" && p.data.length <= ATTACHMENT_CHUNK_BYTES * 4 / 3 && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(p.data)
     case "group": case "leave": return Object.keys(p).length === 0
     default: return false
   }
@@ -159,14 +159,25 @@ export class MessagingEngine {
   status: "connecting" | "online" | "offline" = "connecting"
   error: string | null = null
   private running = false
+  private outboxRetryAt = 0
   private disposed = false
   private listeners = new Set<() => void>()
   private key?: CryptoKey
   private timer?: ReturnType<typeof setInterval>
   private refreshTimer?: ReturnType<typeof setTimeout>
+  private refreshPending = false
   private initializedAt = Date.now()
   private authorizedKeys = new Set<string>()
-  private storeListener = () => { clearTimeout(this.refreshTimer); this.refreshTimer = setTimeout(() => { void this.refresh().catch(error => this.fail(error)) }, 40) }
+  private storeListener = () => {
+    this.refreshPending = true
+    clearTimeout(this.refreshTimer)
+    if (this.running) return
+    this.refreshTimer = setTimeout(() => {
+      if (this.running) return
+      this.refreshPending = false
+      void this.refresh().catch(error => this.fail(error))
+    }, 40)
+  }
   constructor(identity: Identity) { this.identity = identity }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private emit() { if (!this.disposed) this.listeners.forEach(listener => listener()) }
@@ -251,6 +262,11 @@ export class MessagingEngine {
   }
   private async queue(event: MessagingEvent) {
     await saveStoredEvent(this.identity.publicKey, { key: eventStorageKey(event), event, local: true, delivered: [], receivedAt: Date.now() })
+    // Chunks are durable individually, but refreshing the full history after each
+    // piece would repeatedly clone an entire large file. Its metadata refreshes
+    // and starts delivery when preparation finishes; normal sync can also recover
+    // already saved pieces if preparation is interrupted.
+    if (event.kind === "attachment-chunk") return
     // Once durable, a view refresh failure must not make the composer resend it.
     try { await this.refresh() } catch (error) { this.fail(error) }
     void this.sync()
@@ -341,9 +357,16 @@ export class MessagingEngine {
       }
       if (navigator.locks) await navigator.locks.request(`serotine:sync:${this.identity.publicKey}`, { ifAvailable: true }, async lock => { if (lock) await run() })
       else await run()
-    } catch (error) { this.fail(error) } finally { this.running = false; this.emit() }
+    } catch (error) { this.fail(error) } finally {
+      this.running = false
+      // Storage notifications during a transfer are covered by its own awaited
+      // refreshes; coalesce any concurrent local changes into one final read.
+      if (this.refreshPending && !this.disposed) this.storeListener()
+      this.emit()
+    }
   }
   private async flushOutbox() {
+    if (Date.now() < this.outboxRetryAt) return
     const owner = this.identity.publicKey
     const pending = (await getStoredEvents(owner)).filter(r => r.local && !r.legacy && !r.error && r.event.recipients.some(peer => !r.delivered.includes(peer))).sort((a, b) => a.receivedAt - b.receivedAt)
     let failure: Error | undefined
@@ -351,19 +374,26 @@ export class MessagingEngine {
       if (this.disposed) return
       await Promise.all(pending.slice(index, index + 4).map(async record => {
         for (const recipientPubKey of record.event.recipients) {
+          if (Date.now() < this.outboxRetryAt) return
           if (record.delivered.includes(recipientPubKey)) continue
           try {
             const encryptedData = await encryptForPeer(JSON.stringify(record.event), this.key!, recipientPubKey)
             const data = { id: record.event.id, recipientPubKey, encryptedData }
             const proof = await createRequestProof("event:send", data, this.identity.privateKey, owner)
             const result = await storeEncryptedEvent(data, proof)
+            if (!result.success && result.retryAfterMs) {
+              // This authenticated refusal did not store the event. Keep the
+              // durable outbox pending and retry with a fresh proof next window.
+              this.outboxRetryAt = Math.max(this.outboxRetryAt, Date.now() + result.retryAfterMs)
+              return
+            }
             if (!result.success) throw new Error(result.error)
             record.delivered = [...new Set([...record.delivered, recipientPubKey])]; delete record.error
             await saveStoredEvent(owner, record)
           } catch (error) { record.error = error instanceof Error ? error.message : "Sending failed. Retry when connected."; failure = new Error(record.error); await saveStoredEvent(owner, record); break }
         }
       }))
-      if (failure) break
+      if (failure || Date.now() < this.outboxRetryAt) break
     }
     if (failure) { this.error = failure.message; this.status = "offline" }
   }

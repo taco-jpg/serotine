@@ -4,11 +4,12 @@ import { getDB, RelayConfigurationError, type D1DatabaseBinding } from "@/lib/db
 import { verifyRequestProof } from "@/lib/request-auth"
 import { relayFailureKind } from "@/lib/relay-diagnostics"
 import { ensureEventRelaySchema } from "@/lib/event-relay-schema"
-import { AUTH_WINDOW_MS, EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, MESSAGE_PAGE_SIZE, PUBLIC_KEY_PATTERN, type RequestProof, type InboxRequest, type InboxCursor, type EventFeedRequest, type LegacyInboxCursor, type LegacyInboxRequest } from "@/lib/protocol"
+import { AUTH_WINDOW_MS, EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_EVENT_SENDS_PER_MINUTE, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, MESSAGE_PAGE_SIZE, PUBLIC_KEY_PATTERN, type RequestProof, type InboxRequest, type InboxCursor, type EventFeedRequest, type LegacyInboxCursor, type LegacyInboxRequest } from "@/lib/protocol"
 
 class RequestError extends Error {}
+class RateLimitError extends RequestError {}
 const MAX_PENDING_BYTES = 20 * 1024 * 1024
-type Failure = { success: false; error: string }
+type Failure = { success: false; error: string; retryAfterMs?: number }
 export interface RelayMessage {
   id: string
   senderPubKey: string
@@ -19,6 +20,7 @@ export interface RelayMessage {
 export interface RelayEvent extends RelayMessage { sequence: number }
 
 function failure(error: unknown): Failure {
+  if (error instanceof RateLimitError) return { success: false, error: error.message, retryAfterMs: AUTH_WINDOW_MS + 1000 }
   if (error instanceof RequestError) return { success: false, error: error.message }
   if (error instanceof RelayConfigurationError) {
     console.error("Relay configuration: missing serotine_db binding")
@@ -63,7 +65,7 @@ async function authorize(action: string, payload: unknown, proof: RequestProof):
 async function limitWrites(db: D1DatabaseBinding, proof: RequestProof, action: string, limit: number) {
   const row = await db.prepare("SELECT COUNT(*) AS count FROM RequestNonce WHERE publicKey = ? AND action = ? AND expiresAt > ?")
     .bind(proof.publicKey, action, Date.now()).first<{ count: number }>()
-  if ((row?.count ?? 0) > limit) throw new RequestError("Too many requests. Wait a minute and try again.")
+  if ((row?.count ?? 0) > limit) throw new RateLimitError("Too many requests. Wait a minute and try again.")
 }
 
 export async function storeEncryptedMessage(data: { id: string; recipientPubKey: string; encryptedData: string }, proof: RequestProof): Promise<{ success: true } | Failure> {
@@ -145,8 +147,8 @@ export async function storeEncryptedEvent(data: { id: string; recipientPubKey: s
     const payloadBytes = new TextEncoder().encode(data.encryptedData).byteLength
     if (payloadBytes > MAX_EVENT_PACKET_LENGTH) throw new RequestError("Invalid encrypted event.")
     const db = await authorize("event:send", data, proof)
-    // A 2 MiB file contains 64 chunks; a group can have up to twenty members.
-    await limitWrites(db, proof, "event:send", 2000)
+    // Larger group transfers pause and resume when this rolling window resets.
+    await limitWrites(db, proof, "event:send", MAX_EVENT_SENDS_PER_MINUTE)
     await ensureEventRelaySchema(db)
     const now = Date.now()
     await db.prepare("DELETE FROM RelayEvent WHERE expiresAt <= ?").bind(now).run()
@@ -157,11 +159,11 @@ export async function storeEncryptedEvent(data: { id: string; recipientPubKey: s
     // from overshooting the per-identity row/byte budget. Triggers maintain usage.
     const result = await db.prepare(`INSERT INTO RelayEvent (id, senderPubKey, recipientPubKey, encryptedData, payloadBytes, createdAt, expiresAt)
       SELECT ?, ?, ?, ?, ?, ?, ?
-      WHERE COALESCE((SELECT eventCount FROM RelayEventUsage WHERE senderPubKey = ?), 0) < 16000
-        AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= 134217728
+      WHERE COALESCE((SELECT eventCount FROM RelayEventUsage WHERE senderPubKey = ?), 0) < ?
+        AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= ?
       ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING`)
       .bind(data.id, proof.publicKey, data.recipientPubKey, data.encryptedData, payloadBytes, now, now + 7 * 86400_000,
-        proof.publicKey, proof.publicKey, payloadBytes).run()
+        proof.publicKey, MAX_RETAINED_EVENT_COUNT, proof.publicKey, payloadBytes, MAX_RETAINED_EVENT_BYTES).run()
     if (result.meta.changes === 0) {
       const duplicate = await db.prepare("SELECT id FROM RelayEvent WHERE recipientPubKey = ? AND senderPubKey = ? AND id = ?")
         .bind(data.recipientPubKey, proof.publicKey, data.id).first()

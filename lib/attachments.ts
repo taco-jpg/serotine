@@ -1,6 +1,6 @@
 import type { AttachmentMeta, MessagingContextValue } from "./messaging-types"
 
-export const MAX_FILE_BYTES = 2 * 1024 * 1024
+export const MAX_FILE_BYTES = 10 * 1024 * 1024
 export const ATTACHMENT_CHUNK_BYTES = 30 * 1024
 export const MAX_ATTACHMENT_CHUNKS = Math.ceil(MAX_FILE_BYTES / ATTACHMENT_CHUNK_BYTES)
 export type AttachmentChunk = { index: number; data: string }
@@ -28,7 +28,7 @@ function normalizeMime(mime: string): string {
 
 export function validateAttachmentFile(file: Pick<File, "size" | "name">): void {
   if (!Number.isSafeInteger(file.size) || file.size < 0) throw new Error("This file has an invalid size.")
-  if (file.size > MAX_FILE_BYTES) throw new Error("Choose a file up to 2 MB.")
+  if (file.size > MAX_FILE_BYTES) throw new Error("Choose a file up to 10 MB.")
   if (typeof file.name !== "string") throw new Error("Choose a valid file.")
 }
 

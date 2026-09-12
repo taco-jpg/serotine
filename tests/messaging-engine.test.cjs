@@ -6,13 +6,13 @@ const ts = require('typescript')
 const root = path.join(__dirname, '..')
 const modules = new Map(), stores = new Map(), prefs = new Map(), cursors = new Map()
 const packets = [], attempts = []
-let rejectRecipient, failPersistence = false
+let rejectRecipient, rateLimitRecipient, failPersistence = false, historyReads = 0
 const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true })
 const recordsFor = owner => { if (!stores.has(owner)) stores.set(owner, new Map()); return stores.get(owner) }
 const store = {
   defaultMessagingPreferences: defaults,
   eventStorageKey: e => `${e.author}:${e.conversationId}:${e.id}`,
-  getStoredEvents: async owner => structuredClone([...recordsFor(owner).values()]),
+  getStoredEvents: async owner => { historyReads++; return structuredClone([...recordsFor(owner).values()]) },
   saveStoredEvent: async (owner, record) => {
     if (failPersistence) throw new Error('Disk full')
     const prior = recordsFor(owner).get(record.key)
@@ -28,6 +28,7 @@ const relay = {
   storeEncryptedEvent: async (data, proof) => {
     assert.equal(await authentication.verifyRequestProof('event:send', data, proof), true)
     attempts.push({ owner: proof.publicKey, ...data })
+    if (data.recipientPubKey === rateLimitRecipient) return { success: false, error: 'Too many requests. Wait a minute and try again.', retryAfterMs: 61000 }
     if (data.recipientPubKey === rejectRecipient) return { success: false, error: 'Recipient relay unavailable' }
     if (!packets.some(p => p.senderPubKey === proof.publicKey && p.recipientPubKey === data.recipientPubKey && p.id === data.id)) packets.push({ ...data, senderPubKey: proof.publicKey, sequence: packets.length + 1, createdAt: Date.now() })
     return { success: true }
@@ -64,7 +65,7 @@ before(async () => {
   async function identity() { const keys = await cryptography.generateEncryptionKeyPair(); return { version: 2, publicKey: await cryptography.exportPublicKeyToHex(keys.publicKey), privateKey: await cryptography.exportKey(keys.privateKey) } }
   ;[alice, bob, charlie] = await Promise.all([identity(), identity(), identity()])
 })
-beforeEach(() => { stores.clear(); prefs.clear(); cursors.clear(); packets.length = attempts.length = 0; rejectRecipient = undefined; failPersistence = false })
+beforeEach(() => { stores.clear(); prefs.clear(); cursors.clear(); packets.length = attempts.length = 0; rejectRecipient = rateLimitRecipient = undefined; failPersistence = false; historyReads = 0 })
 async function engine(identity) {
   const instance = new MessagingEngine(identity)
   instance.key = await cryptography.importKey(identity.privateKey, 'encryption', 'private')
@@ -129,4 +130,85 @@ test('failure to queue a new message does not publish it to the relay', async ()
   await assert.rejects(sender.instance.sendText(bob.publicKey, 'keep my draft'), /Disk full/)
   assert.equal(attempts.length, 0)
   assert.equal(packets.length, 0)
+})
+
+test('attachment pieces persist without reloading history for each piece and a storage failure keeps metadata unpublished', async () => {
+  const files = load(path.join(root, 'lib/attachments.ts'))
+  const sender = await engine(alice)
+  historyReads = 0
+  const file = new File([new Uint8Array(100 * files.ATTACHMENT_CHUNK_BYTES)], 'many-pieces.bin')
+  const id = await files.sendAttachment(sender.instance.sendEvent, bob.publicKey, file)
+  assert.equal(historyReads, 1, 'only the final metadata needs a full view refresh')
+  assert.equal(recordsFor(alice.publicKey).size, 101)
+  assert.equal(sender.instance.model.messages.find(m => m.id === id).attachment.chunks, 100)
+  assert.equal(sender.instance.model.messages.find(m => m.id === id).delivery, 'pending')
+  let queued = 0
+  await assert.rejects(files.sendAttachment(async (...args) => {
+    if (++queued === 3) failPersistence = true
+    return sender.instance.sendEvent(...args)
+  }, bob.publicKey, file), /Disk full/)
+  assert.equal(recordsFor(alice.publicKey).size, 103, 'only the successful pieces were saved')
+  assert.equal(sender.instance.model.messages.length, 1, 'no truncated attachment was published')
+  failPersistence = false
+  await sender.instance.sendText(bob.publicKey, 'The chat still works')
+  assert.equal(sender.instance.model.messages.at(-1).content, 'The chat still works')
+})
+
+test('rate-limited group sends resume automatically without resending confirmed recipients', async () => {
+  const sender = await engine(alice)
+  const cid = await sender.instance.createGroup('Team', [bob.publicKey, charlie.publicKey])
+  await sender.synchronize()
+  const id = await sender.instance.sendText(cid, 'Continue the transfer')
+  rateLimitRecipient = charlie.publicKey
+  await sender.synchronize()
+  const record = [...recordsFor(alice.publicKey).values()].find(r => r.event.id === id)
+  assert.deepEqual(record.delivered, [bob.publicKey])
+  assert.equal(record.error, undefined)
+  assert.equal(sender.instance.model.messages.find(m => m.id === id).delivery, 'pending')
+  const attempted = attempts.length
+  await sender.synchronize()
+  assert.equal(attempts.length, attempted, 'sync can receive messages while outgoing writes wait')
+  rateLimitRecipient = undefined
+  sender.instance.outboxRetryAt = Date.now() - 1
+  await sender.synchronize()
+  assert.equal(attempts.filter(a => a.id === id && a.recipientPubKey === bob.publicKey).length, 1)
+  assert.equal(sender.instance.model.messages.find(m => m.id === id).delivery, 'sent')
+})
+
+test('the regular sync timer resumes a rate-limited transfer once the retry window expires', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: Date.now() })
+  const sender = await engine(alice)
+  await sender.instance.start()
+  t.after(() => sender.instance.dispose())
+  const id = await sender.instance.sendText(bob.publicKey, 'Send after the rate window')
+  const scheduled = []
+  sender.instance.sync = () => { const run = sender.synchronize(); scheduled.push(run); return run }
+  rateLimitRecipient = bob.publicKey
+  t.mock.timers.tick(5000)
+  await Promise.all(scheduled)
+  assert.equal(sender.instance.model.messages.find(m => m.id === id).delivery, 'pending')
+  assert.equal(attempts.length, 1)
+  rateLimitRecipient = undefined
+  t.mock.timers.tick(65000)
+  await Promise.all(scheduled)
+  assert.equal(sender.instance.model.messages.find(m => m.id === id).delivery, 'sent')
+  assert.equal(packets.filter(p => p.id === id).length, 1)
+})
+
+test('retrying an attachment retries failed chunks and retains successful pieces', async () => {
+  const files = load(path.join(root, 'lib/attachments.ts'))
+  const sender = await engine(alice)
+  const id = await files.sendAttachment(sender.instance.sendEvent, bob.publicKey, new File([new Uint8Array(files.ATTACHMENT_CHUNK_BYTES * 5)], 'retry.bin'))
+  rejectRecipient = bob.publicKey
+  await sender.synchronize()
+  assert.equal(sender.instance.model.messages.find(m => m.id === id).delivery, 'failed')
+  assert.match(sender.instance.model.messages.find(m => m.id === id).error, /relay unavailable/)
+  rejectRecipient = undefined
+  await sender.instance.retry(id)
+  await sender.synchronize()
+  assert.equal(sender.instance.model.messages.find(m => m.id === id).delivery, 'sent')
+  const receiver = await engine(bob)
+  await receiver.synchronize()
+  const message = receiver.instance.model.messages.find(m => m.id === id)
+  assert.equal((await files.assembleAttachment(message.attachment, receiver.instance.getAttachmentChunks(alice.publicKey, id))).size, files.ATTACHMENT_CHUNK_BYTES * 5)
 })

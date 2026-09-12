@@ -4,18 +4,33 @@ const fs=require('fs'),assert=require('assert/strict'),{spawn}=require('child_pr
 const root=require('path').resolve(__dirname,'..');
 const {chromium}=require('playwright');
 const esbuild=require(root+'/node_modules/esbuild');
-const origin='http://localhost:3100';
+const port=process.env.SEROTINE_BROWSER_PORT||'3100';
+assert.match(port,/^\d+$/,'SEROTINE_BROWSER_PORT must be a port number');
+const origin=`http://localhost:${port}`;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function makeIdentity(){const pair=await crypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits','deriveKey']);return {version:2,publicKey:Buffer.from(await crypto.subtle.exportKey('raw',pair.publicKey)).toString('hex'),privateKey:await crypto.subtle.exportKey('jwk',pair.privateKey)}}
 (async()=>{
  const bundle=(await esbuild.build({stdin:{contents:'export * from "./lib/messaging";export * from "./lib/messaging-store";export * from "./lib/identity";export * from "./lib/full-backup";export * from "./lib/attachments";export {encryptForPeer,importKey} from "./lib/crypto";export {createRequestProof} from "./lib/request-auth";export {storeEncryptedMessage,getLegacyInbox} from "./lib/relay-client";',resolveDir:root},bundle:true,write:false,platform:'browser',format:'iife',globalName:'SerotineTest',tsconfig:root+'/tsconfig.json'})).outputFiles[0].text;
- const log=fs.openSync('/tmp/serotine-e2e-server.log','w');
- const server=spawn(process.execPath,[root+'/node_modules/next/dist/bin/next','dev','--port','3100','--hostname','127.0.0.1'],{cwd:root,stdio:['ignore',log,log]});let browser;
+ const logPath=`/tmp/serotine-e2e-server-${port}.log`;
+ const log=fs.openSync(logPath,'w');
+ const server=spawn(process.execPath,[root+'/node_modules/next/dist/bin/next','dev','--webpack','--port',port,'--hostname','127.0.0.1'],{cwd:root,stdio:['ignore',log,log]});let browser;
+ let serverError;server.on('error',error=>{serverError=error});
  try{
-  for(let i=0;i<60;i++){try{const r=await fetch(origin);if(r.ok)break}catch { /* Wait for the local server to start. */ } await sleep(500)}
+  let serverReady=false;
+  const readyUntil=Date.now()+120000;
+  while(Date.now()<readyUntil){
+   if(serverError||server.exitCode!==null)throw Error(`Browser test server failed: ${serverError?.message||server.exitCode}\n${fs.readFileSync(logPath,'utf8').slice(-5000)}`);
+   try{const response=await fetch(origin,{signal:AbortSignal.timeout(3000)});if(response.ok){serverReady=true;break}}catch { /* Wait for the local server to start. */ }
+   await sleep(500);
+  }
+  assert.equal(serverReady,true,`Browser test server was not ready; see ${logPath}`);
   browser=await chromium.launch({executablePath:process.env.SEROTINE_CHROMIUM_PATH,args:['--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--no-zygote','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream'],headless:true});
   const errors=[];const identities=await Promise.all([makeIdentity(),makeIdentity(),makeIdentity()]);const pages=[];
-  async function makePage(identity){const context=await browser.newContext({viewport:{width:1280,height:900}});const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('response',async r=>{if(r.url().includes('/api/relay')&&r.status()>=400) console.log('RELAY ERROR',r.status(),await r.text());else if(r.url().includes('/api/relay')) {const j=await r.json();if(j.success===false)console.log('RELAY FAILURE',j.error)}});await page.goto(origin);await page.addScriptTag({content:bundle});if(identity)await page.evaluate(id=>localStorage.setItem('serotine_identity_v2',JSON.stringify(id)),identity);pages.push(page);return page}
+  async function makePage(identity){const context=await browser.newContext({viewport:{width:1280,height:900}});const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));page.on('response',async r=>{if(r.url().includes('/api/relay')&&r.status()>=400) console.log('RELAY ERROR',r.status(),await r.text());else if(r.url().includes('/api/relay')) {const j=await r.json();if(j.success===false)console.log('RELAY FAILURE',j.error)}});
+   // Engine peers use a plain same-origin document so Next development reloads
+   // cannot erase their test globals. UI checks below navigate to the real app.
+   await page.route(origin+'/__browser-integration-peer',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><title>Serotine integration peer</title>'}));
+   await page.goto(origin+'/__browser-integration-peer');await page.addScriptTag({content:bundle});if(identity)await page.evaluate(id=>localStorage.setItem('serotine_identity_v2',JSON.stringify(id)),identity);pages.push(page);return page}
   async function start(page){await page.evaluate(async()=>{window.engine=new SerotineTest.MessagingEngine(await SerotineTest.loadIdentity());await engine.start()})}
   const [a,b,c]=await Promise.all(identities.map(makePage));await Promise.all([a,b,c].map(start));
   async function settle(predicate,label,timeout=35000){const end=Date.now()+timeout;while(Date.now()<end){await Promise.race([Promise.all(pages.map(p=>p.evaluate(async()=>{if(window.engine)await engine.sync()}))),sleep(20000).then(()=>{throw Error('sync timeout at '+label)})]);if(await predicate())return;await sleep(250)}const status=await Promise.all(pages.map(p=>p.evaluate(()=>({error:window.engine?.error,status:window.engine?.status,records:window.engine?.records?.length}))));throw Error(label+' '+JSON.stringify(status))}
@@ -73,11 +88,145 @@ async function makeIdentity(){const pair=await crypto.subtle.generateKey({name:'
   await a2.evaluate(peer=>engine.sendText(peer,'From linked Alice'),bid);
   await settle(async()=>await a.evaluate(()=>engine.model.messages.some(m=>m.content==='From linked Alice'))&&await b.evaluate(()=>engine.model.messages.some(m=>m.content==='From linked Alice')),'linked outgoing');
   console.log('PASS encrypted full backup and two-device incoming/outgoing synchronization');
+  // Create through the actual UI: engine-only checks cannot detect a broken route.
+  await a.evaluate(({owner,peers})=>SerotineTest.saveContacts(owner,peers),{owner:aid,peers:[{pub:bid,alias:'Bob'},{pub:cid,alias:'Carol'}]});
+  await a.goto(origin+'/chat');
+  await a.getByRole('button',{name:'Create group chat',exact:true}).click();
+  const groupDialog=a.getByRole('dialog');
+  await groupDialog.getByRole('textbox',{name:'Group name',exact:true}).fill('Browser-created group');
+  await groupDialog.getByRole('checkbox',{name:/Bob/}).check();
+  await groupDialog.getByRole('checkbox',{name:/Carol/}).check();
+  await groupDialog.getByRole('button',{name:'Create group',exact:true}).click();
+  await a.waitForURL(url=>decodeURIComponent(url.pathname).startsWith('/chat/group:'),{timeout:30000});
+  const uiGroup=decodeURIComponent(new URL(a.url()).pathname.slice('/chat/'.length));
+  const groupHref='/chat/'+encodeURIComponent(uiGroup);
+  await a.getByRole('heading',{name:'Browser-created group',level:1,exact:true}).waitFor().catch(async error=>{throw Error(`${error.message}\nGroup route ${a.url()}\n${await a.locator('body').innerText()}`)});
+  const messageBox=a.getByRole('textbox',{name:'Message',exact:true});
+  await messageBox.waitFor({state:'visible'});
+  assert.equal(await messageBox.isEnabled(),true,'new group composer must be usable');
+  await a.goto(origin+'/chat');
+  await a.getByRole('link',{name:/Browser-created group/}).click();
+  await a.getByRole('heading',{name:'Browser-created group',level:1,exact:true}).waitFor();
+  assert.equal(decodeURIComponent(new URL(a.url()).pathname),'/chat/'+uiGroup);
+  await a.reload();
+  await a.getByRole('heading',{name:'Browser-created group',level:1,exact:true}).waitFor();
+  await messageBox.waitFor({state:'visible'});
+  await settle(async()=>await b.evaluate(id=>engine.model.groups.some(g=>g.id===id),uiGroup)&&await c.evaluate(id=>engine.model.groups.some(g=>g.id===id),uiGroup),'UI group invite');
+  await Promise.all([b,c].map(page=>page.evaluate(id=>engine.acceptRequest(id),uiGroup)));
+  await messageBox.fill('Sent from the group message box');
+  await a.getByRole('button',{name:'Send message',exact:true}).click();
+  await settle(()=>c.evaluate(()=>engine.model.messages.some(m=>m.content==='Sent from the group message box')),'UI group message');
+  await a.goto(origin+groupHref);
+  await a.getByRole('heading',{name:'Browser-created group',level:1,exact:true}).waitFor();
+  console.log('PASS actual group creation, sidebar navigation, reload and encrypted UI send');
+
+  // Real DOM events exercise the conversation surface and textarea, not a hidden input alone.
+  const messageHistory=a.getByRole('region',{name:'Conversation messages',exact:true});
+  const historyText=messageHistory.getByText('Sent from the group message box',{exact:true});
+  async function dropFiles(target,files){
+    return target.evaluate((element,items)=>{
+      const transfer=new DataTransfer();
+      for(const item of items)transfer.items.add(new File([item.text],item.name,{type:item.type||'text/plain'}));
+      const entering=new DragEvent('dragenter',{bubbles:true,cancelable:true,dataTransfer:transfer});
+      element.dispatchEvent(entering);
+      const over=new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer});
+      element.dispatchEvent(over);
+      const dropped=new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer});
+      element.dispatchEvent(dropped);
+      return {overPrevented:over.defaultPrevented,dropPrevented:dropped.defaultPrevented};
+    },files);
+  }
+  async function pasteFile(name,text){
+    return messageBox.evaluate((element,item)=>{
+      const transfer=new DataTransfer();transfer.items.add(new File([item.text],item.name,{type:'text/plain'}));
+      const event=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:transfer});
+      element.dispatchEvent(event);return event.defaultPrevented;
+    },{name,text});
+  }
+  await messageBox.fill('Keep this draft');
+  const textPastePrevented=await messageBox.evaluate(element=>{
+    const transfer=new DataTransfer();transfer.setData('text/plain',' ordinary pasted text');
+    const event=new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:transfer});
+    element.dispatchEvent(event);return event.defaultPrevented;
+  });
+  assert.equal(textPastePrevented,false,'plain text paste must remain a native textarea operation');
+  assert.equal(await messageBox.inputValue(),'Keep this draft','file handlers must not change text drafts');
+  assert.equal(await pasteFile('clipboard.txt','Pasted file content'),true,'file paste must be captured');
+  await a.getByText('clipboard.txt',{exact:false}).last().waitFor();
+  assert.equal(await messageBox.inputValue(),'Keep this draft');
+  await a.getByRole('button',{name:'Remove',exact:true}).click();
+  assert.deepEqual(await dropFiles(historyText,[{name:'drop-first.txt',text:'First dropped file'},{name:'drop-second.txt',text:'Second dropped file'}]),{overPrevented:true,dropPrevented:true});
+  await a.getByText('2 files queued · send them one at a time',{exact:true}).waitFor();
+  await a.getByRole('button',{name:'Remove drop-second.txt',exact:true}).waitFor();
+  await a.getByRole('button',{name:'Send file',exact:true}).click();
+  await settle(()=>b.evaluate(()=>engine.model.messages.some(m=>m.attachment?.name==='drop-first.txt')),'dropped file send');
+  await a.getByText('drop-second.txt',{exact:false}).last().waitFor();
+  await a.getByRole('button',{name:'Send file',exact:true}).click();
+  await settle(()=>b.evaluate(()=>engine.model.messages.some(m=>m.attachment?.name==='drop-second.txt')),'second queued file send');
+  assert.equal(await messageBox.inputValue(),'Keep this draft');
+  await messageBox.fill('');
+  console.log('PASS clipboard files, unaffected text paste and multiple dropped files from nested message history');
+
+  const compact=a.getByRole('checkbox',{name:'Auto compact files',exact:true});
+  assert.equal(await compact.isChecked(),false,'auto compact is optional');
+  await compact.check();
+  await a.reload();
+  await messageBox.waitFor({state:'visible'});
+  assert.equal(await compact.isChecked(),true,'auto compact setting must survive reload');
+  const compactText='Exact content survives automatic compression.\n'.repeat(2000);
+  await pasteFile('compact-notes.txt',compactText);
+  await a.getByText('compact-notes.txt.gz',{exact:false}).last().waitFor();
+  await a.getByRole('button',{name:'Send file',exact:true}).click();
+  await settle(()=>b.evaluate(()=>{const message=engine.model.messages.find(m=>m.attachment?.name==='compact-notes.txt.gz');return !!message&&engine.getAttachmentChunks(message.conversationId,message.id).length===message.attachment.chunks}),'compacted file receive');
+  assert.equal(await b.evaluate(async()=>{
+    const message=engine.model.messages.find(m=>m.attachment?.name==='compact-notes.txt.gz');
+    const file=await SerotineTest.assembleAttachment(message.attachment,engine.getAttachmentChunks(message.conversationId,message.id));
+    return new Response(file.stream().pipeThrough(new DecompressionStream('gzip'))).text();
+  }),compactText,'auto compact must preserve the exact original file content');
+  await compact.uncheck();
+  await a.reload();
+  await messageBox.waitFor({state:'visible'});
+  assert.equal(await compact.isChecked(),false,'turning auto compact off must persist');
+  console.log('PASS auto compact persistence, .gz filename and lossless received file content');
+
+  const suggestions=a.getByRole('listbox',{name:'Mention suggestions',exact:true});
+  await messageBox.pressSequentially('Keyboard mention @');
+  await suggestions.waitFor();
+  await messageBox.press('ArrowDown');
+  await messageBox.press('ArrowUp');
+  await messageBox.press('Enter');
+  const keyboardMention=await messageBox.inputValue();
+  assert.match(keyboardMention,/^Keyboard mention @(Bob|Carol) $/,'Enter should insert a visible mention without sending');
+  const keyboardPeer=keyboardMention.includes('@Bob')?bid:cid;
+  await a.getByRole('button',{name:'Send message',exact:true}).click();
+  await settle(()=>b.evaluate(text=>engine.model.messages.some(m=>m.content===text),keyboardMention.trim()),'keyboard mention send');
+  assert.deepEqual(await b.evaluate(text=>engine.model.messages.find(m=>m.content===text)?.mentions,keyboardMention.trim()),[keyboardPeer]);
+  await messageBox.pressSequentially('Mouse mention @Car');
+  await suggestions.getByRole('option',{name:/@Carol/}).click();
+  const mouseMention=await messageBox.inputValue();
+  assert.equal(mouseMention,'Mouse mention @Carol ');
+  await a.reload();
+  await messageBox.waitFor({state:'visible'});
+  await a.getByRole('button',{name:'Remove mention of Carol',exact:true}).waitFor();
+  assert.equal(await messageBox.inputValue(),mouseMention,'a draft mention must survive reload');
+  await a.getByRole('button',{name:'Send message',exact:true}).click();
+  await settle(()=>b.evaluate(text=>engine.model.messages.some(m=>m.content===text),mouseMention.trim()),'mouse mention send');
+  assert.deepEqual(await b.evaluate(text=>engine.model.messages.find(m=>m.content===text)?.mentions,mouseMention.trim()),[cid]);
+  await messageBox.pressSequentially('Removed mention @Bo');
+  await messageBox.press('Tab');
+  assert.equal(await messageBox.inputValue(),'Removed mention @Bob ');
+  await messageBox.press('Backspace');
+  for(let i=0;i<'@Bob'.length;i++)await messageBox.press('Backspace');
+  await a.getByRole('button',{name:'Send message',exact:true}).click();
+  await settle(()=>b.evaluate(()=>engine.model.messages.some(m=>m.content==='Removed mention')),'deleted mention send');
+  assert.deepEqual(await b.evaluate(()=>engine.model.messages.find(m=>m.content==='Removed mention')?.mentions||[]),[],'deleted mention must not retain a notification target');
+  console.log('PASS typed @ suggestions, keyboard and mouse insertion, real mention delivery and token deletion');
+
   await a.goto(origin+'/chat/'+aid);await a.getByRole('textbox',{name:'Message',exact:true}).waitFor({state:'visible',timeout:30000});await a.getByRole('textbox',{name:'Message',exact:true}).fill('Typed into self chat');await a.getByRole('button',{name:'Send message',exact:true}).click();await a.getByText('Typed into self chat',{exact:true}).last().waitFor({state:'visible',timeout:20000});
   await a.getByRole('button',{name:'Voice',exact:true}).click();await a.getByRole('button',{name:'Stop & preview',exact:true}).waitFor();await sleep(1200);await a.getByRole('button',{name:'Stop & preview',exact:true}).click();await a.getByRole('button',{name:'Send voice message',exact:true}).click();await a.locator('audio').first().waitFor({state:'visible'});console.log('PASS microphone permission, recording preview and voice-message send');await a.screenshot({path:'/tmp/serotine-desktop.png'});await a.setViewportSize({width:390,height:844});await a.screenshot({path:'/tmp/serotine-mobile.png'});
   assert.equal(await a.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false,'mobile must not overflow');
   console.log('PASS rendered self-chat composer on desktop and mobile');
   assert.deepEqual(errors,[],'browser page errors');
   console.log('ALL BROWSER INTEGRATION CHECKS PASSED');
- }finally{await browser?.close();server.kill()}
+ }finally{await browser?.close();server.kill();fs.closeSync(log)}
 })().catch(e=>{console.error(e);process.exitCode=1});

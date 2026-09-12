@@ -26,14 +26,15 @@ function source(filename) {
 const files = source(path.join(root, 'lib/attachments.ts'))
 const { RichMessage } = source(path.join(root, 'components/chat/rich-message.tsx'))
 
-test('maximum-size binary file survives out-of-order encrypted-event chunk transport', async () => {
+test('10 MiB binary file survives out-of-order attachment chunk assembly', async () => {
+  assert.equal(files.MAX_FILE_BYTES, 10 * 1024 * 1024)
   const data = Uint8Array.from({ length: files.MAX_FILE_BYTES }, (_, index) => index % 251)
   const file = new File([data], 'homework.zip', { type: 'application/zip' })
   const { metadata, chunks } = await files.prepareAttachment(file)
   assert.equal(files.isAttachmentMeta(metadata), true)
-  assert.equal(chunks.length, 69)
+  assert.equal(chunks.length, 342)
   assert.ok(chunks.every(chunk => chunk.data.length <= 40960))
-  assert.equal(files.attachmentProgress(metadata, chunks.slice(0, 1)), 1)
+  assert.equal(files.attachmentProgress(metadata, chunks.slice(0, 4)), 1)
   const blob = await files.assembleAttachment(metadata, chunks.toReversed())
   assert.equal(blob.type, 'application/octet-stream')
   assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), data)
@@ -43,7 +44,7 @@ test('zero-byte files round-trip and files above the cap are rejected before rea
   const { metadata, chunks } = await files.prepareAttachment(new File([], 'empty.txt'))
   assert.equal(chunks.length, 1)
   assert.equal((await files.assembleAttachment(metadata, chunks)).size, 0)
-  await assert.rejects(files.prepareAttachment({ size: files.MAX_FILE_BYTES + 1, name: 'large.zip', arrayBuffer() { assert.fail('must not read oversized file') } }), /2 MB/)
+  await assert.rejects(files.prepareAttachment({ size: files.MAX_FILE_BYTES + 1, name: 'large.zip', arrayBuffer() { assert.fail('must not read oversized file') } }), /10 MB/)
 })
 
 test('missing, tampered, conflicting and oversized chunks never produce a download', async () => {

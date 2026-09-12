@@ -4,6 +4,9 @@ Browser-based, end-to-end encrypted messaging with device-local identities and a
 
 ## Conversations
 
+- **Appearance:** choose Light, Dark, or System from the theme button. System follows your device automatically; your choice is remembered in this browser. The desktop sidebar collapses into a conversation rail and remembers its width preference. Compact message spacing and a single composer toolbar leave more room for messages and media.
+- **Delete individual messages:** open a message’s actions and choose **Delete for me…**, then confirm. This removes that message and its attachment from this device’s saved history, search, pins, and shared-file list. Other participants and independently linked devices retain their copies. Deletion markers travel in full backups and prevent replay or importing an older backup from restoring removed content.
+
 - **Group chats:** create a named group, add contacts, manage membership, and leave. The creator manages membership and the group name. Groups support up to twenty people.
 - **Inbox:** all conversations receive messages while Serotine is open, with unread counts and recent-message previews. Unknown people appear in message requests.
 - **Archive and delete chats:** open a chat's options menu in the inbox or conversation header, including for left groups and retired contacts. Archive hides the chat from the inbox and notifications while keeping its history; use the Archived view to restore it. Delete asks for confirmation and removes saved messages and files on this device, keeping contacts and group membership unchanged. New messages can start the chat again; sync and old-backup imports do not bring back deleted history. These preferences travel in full backups but do not automatically sync to other devices.
@@ -64,6 +67,8 @@ npm run build
 ```
 
 For browser integration, run `npx playwright install chromium` once, then `npm run test:browser`. The smoke test starts a local server and uses synthetic identities to exercise actual D1 traffic, groups, attachments, voice recording, backups, linked browsers, and the mobile layout. `SEROTINE_CHROMIUM_PATH` can point to an existing Chromium executable.
+
+Run `npm run test:appearance` for theme selection, system-theme changes, sidebar collapse, desktop/mobile layout, message actions, and individual-message deletion.
 
 Run `npm run test:cleanup` for desktop and mobile archive/restore/delete controls, reload persistence, deletion confirmation, and protection against replay or old-backup imports restoring deleted history.
 

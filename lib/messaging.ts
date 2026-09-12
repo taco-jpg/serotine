@@ -3,11 +3,11 @@ import { loadContacts, shortAddress, validateAddress, type Contact, type Identit
 import { ID_PATTERN, isEnvelope, MAX_MESSAGE_LENGTH, PUBLIC_KEY_PATTERN } from "./protocol"
 import { createRequestProof } from "./request-auth"
 import { deleteMessage, getEventFeed, getLegacyInbox, storeEncryptedEvent } from "./relay-client"
-import { deleteConversationHistoryFromStorage, exportAllMessagesFromStorage, migrateLegacyHistory } from "./storage"
-import { defaultMessagingPreferences, deleteStoredConversation, eventStorageKey, getMessagingPreferences, getStoredEvents, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor } from "./messaging-store"
-import { isDeletedConversationEvent } from "./messaging-history"
+import { deleteConversationHistoryFromStorage, deleteMessageHistoryFromStorage, exportAllMessagesFromStorage, migrateLegacyHistory } from "./storage"
+import { defaultMessagingPreferences, deleteStoredConversation, deleteStoredMessage, eventStorageKey, getMessagingPreferences, getStoredEvents, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor } from "./messaging-store"
+import { isDeletedStoredEvent, isDeletedLegacyMessage } from "./messaging-history"
 import { ATTACHMENT_CHUNK_BYTES, MAX_ATTACHMENT_CHUNKS, isAttachmentMeta } from "./attachments"
-import { legacyMessageEvents } from "./legacy-messaging"
+import { legacyMessageEvents, legacyStoredMessageId, legacyVisibleMessageIds } from "./legacy-messaging"
 import { notifyIncoming, requestMessagingNotifications } from "./message-notifications"
 import type { AttachmentMeta, ConversationRecord, EventKind, EventPayload, GroupState, MessageRecord, MessagingEvent, MessagingModel, MessagingPreferences, NotificationMode, StoredEvent } from "./messaging-types"
 
@@ -103,10 +103,14 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
   const authorized = authorizedOutput ?? new Set<string>()
   authorized.clear()
   const controls: StoredEvent[] = []
-  const ordered = [...records].sort((a, b) => a.receivedAt - b.receivedAt || (a.sequence && b.sequence ? a.sequence - b.sequence : 0) || a.event.timestamp - b.event.timestamp || a.key.localeCompare(b.key))
+  const checkpoints: StoredEvent[] = Object.entries(preferences.deletedMessages ?? {}).flatMap(([cid, deletion]) => (deletion.groupEvents ?? []).map(checkpoint => ({
+    key: checkpoint.key, receivedAt: checkpoint.receivedAt, sequence: checkpoint.sequence, local: false, delivered: [],
+    event: { version: 3, id: checkpoint.key.slice(checkpoint.key.lastIndexOf(":") + 1), author: checkpoint.group.admin, conversationId: cid, recipients: [owner], timestamp: checkpoint.timestamp, kind: "group", payload: {}, group: checkpoint.group, signature: "" },
+  })))
+  const ordered = [...records, ...checkpoints].sort((a, b) => a.receivedAt - b.receivedAt || (a.sequence && b.sequence ? a.sequence - b.sequence : 0) || a.event.timestamp - b.event.timestamp || a.key.localeCompare(b.key))
   for (const record of ordered) {
     const e = record.event, cid = conversationForEvent(e, owner)
-    if (isDeletedConversationEvent(record, owner, preferences)) continue
+    if (isDeletedStoredEvent(record, owner, preferences)) continue
     if (e.author !== owner && preferences.blocked.includes(e.author)) continue
     if (e.group) {
       const prior = groups.get(cid)
@@ -232,11 +236,8 @@ export class MessagingEngine {
     const existing = new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
     for (const row of await exportAllMessagesFromStorage(owner)) {
       this.assertActive()
-      let id = row.id
-      if (!ID_PATTERN.test(id)) {
-        const hash = arrayBufferToHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${row.peerPubKey}:${row.senderPubKey}:${id}`)))
-        id = `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-8${hash.slice(17,20)}-${hash.slice(20,32)}`
-      }
+      if (isDeletedLegacyMessage(row, await getMessagingPreferences(owner))) continue
+      const id = await legacyStoredMessageId(row)
       const cid = row.senderPubKey === owner ? row.peerPubKey : owner
       const pending = row.senderPubKey === owner && ["pending", "failed"].includes(row.delivery ?? "")
       const events = await legacyMessageEvents({ id, sender: row.senderPubKey, recipient: cid, timestamp: row.timestamp, content: row.content, attachments: row.attachments })
@@ -315,6 +316,24 @@ export class MessagingEngine {
     const target = this.model.messages.find(m => m.conversationId === cid && m.id === messageId)
     if (!target || target.senderPubKey !== this.identity.publicKey || target.attachment || target.poll) throw new Error("You can edit your own text messages.")
     await this.sendEvent(cid, "edit", { targetId: messageId, content: text.trim() })
+  }
+  deleteMessage = async (cid: string, messageId: string) => {
+    this.assertActive()
+    const owner = this.identity.publicKey
+    const legacyRows = []
+    // A legacy envelope may contain text and several files. Remove its duplicate
+    // raw bytes while keeping every other already-migrated message intact.
+    for (const row of await exportAllMessagesFromStorage(owner)) if (row.peerPubKey === cid) {
+      const id = await legacyStoredMessageId(row)
+      const ids = await legacyVisibleMessageIds({ id, sender: row.senderPubKey, recipient: row.senderPubKey === owner ? cid : owner, timestamp: row.timestamp, content: row.content, attachments: row.attachments })
+      if (ids.includes(messageId)) legacyRows.push(row)
+    }
+    this.assertActive()
+    await deleteStoredMessage(owner, cid, messageId, legacyRows)
+    this.assertActive()
+    try {
+      for (const row of legacyRows) await deleteMessageHistoryFromStorage(owner, cid, row.senderPubKey, row.id)
+    } finally { await this.refresh() }
   }
   pinMessage = async (cid: string, messageId: string, pinned: boolean) => { await this.sendEvent(cid, "pin", { targetId: messageId, pinned }) }
   createPoll = (cid: string, question: string, options: string[]) => this.sendEvent(cid, "poll", { question: question.trim(), options: options.map(x => x.trim()) })
@@ -445,7 +464,7 @@ export class MessagingEngine {
             const data = { id: record.event.id, recipientPubKey, encryptedData }
             const proof = await createRequestProof("event:send", data, this.identity.privateKey, owner)
             this.assertActive()
-            if (isDeletedConversationEvent(record, owner, await getMessagingPreferences(owner))) return
+            if (isDeletedStoredEvent(record, owner, await getMessagingPreferences(owner))) return
             const result = await storeEncryptedEvent(data, proof)
             this.assertActive()
             if (!result.success && result.retryAfterMs) {

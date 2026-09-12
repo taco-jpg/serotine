@@ -19,9 +19,13 @@ export interface ConversationRecord {
 export interface ConversationDeletion {
   deletedAt: number; eventKeys: string[]; attachmentIds?: string[]; group?: GroupState; leftMembers?: string[]
 }
+export interface MessageDeletion extends ConversationDeletion {
+  messageIds: string[]; legacyKeys?: string[]; attachmentKeys?: string[]
+  groupEvents?: Array<{ key: string; group: GroupState; receivedAt: number; timestamp: number; sequence?: number }>
+}
 export interface MessagingPreferences {
   accepted: string[]; blocked: string[]; notifications: Record<string, NotificationMode>; readAt: Record<string, number>; readReceipts: boolean
-  archived: string[]; deleted: Record<string, ConversationDeletion>
+  archived: string[]; deleted: Record<string, ConversationDeletion>; deletedMessages: Record<string, MessageDeletion>
 }
 export type EventKind = "message" | "edit" | "pin" | "poll" | "vote" | "receipt" | "group" | "leave" | "attachment" | "attachment-chunk"
 export interface EventPayload {
@@ -43,6 +47,7 @@ export interface MessagingContextValue extends MessagingModel {
   identity: Identity | null; contacts: Contact[]; ready: boolean; error: string | null; status: "connecting" | "online" | "offline"; preferences: MessagingPreferences
   sendText: (conversationId: string, text: string, replyTo?: string, mentions?: string[]) => Promise<string>
   editMessage: (conversationId: string, messageId: string, text: string) => Promise<void>
+  deleteMessage: (conversationId: string, messageId: string) => Promise<void>
   pinMessage: (conversationId: string, messageId: string, pinned: boolean) => Promise<void>
   createPoll: (conversationId: string, question: string, options: string[]) => Promise<string>
   vote: (conversationId: string, messageId: string, option: number) => Promise<void>

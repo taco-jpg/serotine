@@ -1,7 +1,8 @@
 import { base64ToArrayBuffer } from "./crypto"
 import { type Contact, type Identity, type RestoreIdentityOptions, loadContacts, restoreIdentityBackup, restoreValidatedIdentity, saveContacts, validateAddress, validateIdentity } from "./identity"
-import { deleteConversationHistoryFromStorage, exportAllMessagesFromStorage, importMessagesToStorage, migrateLegacyHistory, type StoredMessage, validateStoredMessages } from "./storage"
+import { deleteConversationHistoryFromStorage, deleteMessageHistoryFromStorage, exportAllMessagesFromStorage, importMessagesToStorage, migrateLegacyHistory, type StoredMessage, validateStoredMessages } from "./storage"
 import { exportMessagingSnapshot, getMessagingPreferences, importMessagingSnapshot, validateMessagingSnapshot } from "./messaging-store"
+import { isDeletedLegacyMessage } from "./messaging-history"
 import type { MessagingPreferences, MessagingSnapshot } from "./messaging-types"
 
 export const MAX_BACKUP_FILE_BYTES = 100 * 1024 * 1024
@@ -20,10 +21,7 @@ export interface FullBackupSnapshot {
 }
 
 function retainedMessages(messages: StoredMessage[], preferences: MessagingPreferences): StoredMessage[] {
-  return messages.filter(row => {
-    const deletion = preferences.deleted?.[row.peerPubKey]
-    return !deletion || row.timestamp > deletion.deletedAt
-  })
+  return messages.filter(row => !isDeletedLegacyMessage(row, preferences))
 }
 
 // Chunk the conversion so attachment-heavy backups don't build a huge rope of
@@ -117,10 +115,19 @@ export async function restoreBackup(text: string, password: string, options: Res
       // Both this device and the backup may contain deletion markers. Apply the
       // merged markers to existing rows as well as incoming history and files.
       const preferences = await getMessagingPreferences(identity.publicKey)
-      for (const [conversationId, deletion] of Object.entries(preferences.deleted ?? {})) {
+      await importMessagesToStorage(identity.publicKey, retainedMessages(snapshot.messages, preferences))
+      // Re-read after the separate legacy transaction: another tab may delete
+      // while restore is importing rows, and its raw attachment bytes must go.
+      const latestPreferences = await getMessagingPreferences(identity.publicKey)
+      for (const [conversationId, deletion] of Object.entries(latestPreferences.deleted ?? {})) {
         await deleteConversationHistoryFromStorage(identity.publicKey, conversationId, deletion.deletedAt)
       }
-      await importMessagesToStorage(identity.publicKey, retainedMessages(snapshot.messages, preferences))
+      for (const [conversationId, deletion] of Object.entries(latestPreferences.deletedMessages ?? {})) {
+        for (const key of deletion.legacyKeys ?? []) {
+          const [senderPubKey, messageId] = JSON.parse(key) as [string, string]
+          await deleteMessageHistoryFromStorage(identity.publicKey, conversationId, senderPubKey, messageId)
+        }
+      }
       let current: Contact[] = []
       try { current = loadContacts(identity.publicKey) } catch { /* A validated backup repairs unreadable contacts. */ }
       const merged = new Map(snapshot.contacts.map(contact => [contact.pub, contact]))

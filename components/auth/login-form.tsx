@@ -50,28 +50,28 @@ export function LoginForm() {
     return restoreBackup(await file.text(), password, { replaceIdentity })
   })
   const toggleRestore = () => { setRestore(!restore); setError(null); setConflict(null); setPassword(""); setShowPassword(false); setFile(null) }
-  if (checking) return <p role="status" className="flex items-center gap-2 text-sm text-zinc-400"><Loader2 className="size-4 animate-spin" /> Checking this browser…</p>
+  if (checking) return <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Checking this browser…</p>
   return <div className="space-y-5">
-    {error && <p role="alert" className="rounded-lg border border-red-400/25 bg-red-400/10 p-3 text-sm text-red-200">{error}</p>}
+    {error && <p role="alert" className="rounded-lg border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
     {blocked ? <Button className="h-12 w-full" onClick={() => setAttempt(value => value + 1)}>Check again</Button> : hasIdentity && !restore ? <>
-      <p className="text-sm leading-relaxed text-zinc-400">Your identity is ready on this browser. Pick up where you left off.</p>
+      <p className="text-sm leading-relaxed text-muted-foreground">Your identity is ready on this browser. Pick up where you left off.</p>
       <Button className="w-full h-12" onClick={() => router.replace("/chat")}>Open messages</Button>
       <Button variant="ghost" className="w-full" onClick={toggleRestore}>I have a backup from another device</Button>
     </> : <>
       {!restore ? <>
-        <p className="text-base leading-relaxed text-zinc-400">Create an address on this device. No email, phone number, or account password required.</p>
+        <p className="text-base leading-relaxed text-muted-foreground">Create an address on this device. No email, phone number, or account password required.</p>
         <Button className="w-full h-12" disabled={loading} onClick={() => void run(createIdentity)}>
           {loading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <KeyRound className="mr-2 size-4" />} Create my identity
         </Button>
-        <p className="text-sm leading-relaxed text-zinc-500">After entering, download a backup. Clearing browser data without one permanently removes access to your identity.</p>
+        <p className="text-sm leading-relaxed text-muted-foreground">After entering, download a backup. Clearing browser data without one permanently removes access to your identity.</p>
       </> : <>
       {conflict && <RestoreConfirmation conflict={conflict} busy={loading} onConfirm={() => void restoreFile(conflict.existingPublicKey)} onCancel={() => setConflict(null)} />}
       <form className="space-y-4" onSubmit={event => { event.preventDefault(); if (file && !conflict) void restoreFile() }}>
-        <div className="space-y-2"><Label htmlFor="backup-file">Serotine backup</Label><Input id="backup-file" type="file" accept=".json,application/json" required disabled={loading} onChange={event => { setFile(event.target.files?.[0] ?? null); setConflict(null) }} /><p className="text-sm text-zinc-500">Restore a full chat backup or an older identity backup. This also links a device to your existing identity.</p></div>
-        <div className="space-y-2"><Label htmlFor="backup-password">Backup password</Label><Input id="backup-password" type={showPassword ? "text" : "password"} autoComplete="current-password" maxLength={1024} disabled={loading} value={password} onChange={event => { setPassword(event.target.value); setConflict(null) }} /><Button type="button" variant="ghost" size="sm" disabled={loading} aria-pressed={showPassword} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeOff className="mr-2 size-4" /> : <Eye className="mr-2 size-4" />}{showPassword ? "Hide password" : "Show password"}</Button><p className="text-sm text-zinc-500">Leave blank for an older unencrypted key export.</p></div>
+        <div className="space-y-2"><Label htmlFor="backup-file">Serotine backup</Label><Input id="backup-file" type="file" accept=".json,application/json" required disabled={loading} onChange={event => { setFile(event.target.files?.[0] ?? null); setConflict(null) }} /><p className="text-sm text-muted-foreground">Restore a full chat backup or an older identity backup. This also links a device to your existing identity.</p></div>
+        <div className="space-y-2"><Label htmlFor="backup-password">Backup password</Label><Input id="backup-password" type={showPassword ? "text" : "password"} autoComplete="current-password" maxLength={1024} disabled={loading} value={password} onChange={event => { setPassword(event.target.value); setConflict(null) }} /><Button type="button" variant="ghost" size="sm" disabled={loading} aria-pressed={showPassword} onClick={() => setShowPassword(!showPassword)}>{showPassword ? <EyeOff className="mr-2 size-4" /> : <Eye className="mr-2 size-4" />}{showPassword ? "Hide password" : "Show password"}</Button><p className="text-sm text-muted-foreground">Leave blank for an older unencrypted key export.</p></div>
         <Button className="w-full h-12" disabled={!file || loading || !!conflict}>{loading ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Upload className="mr-2 size-4" />} Restore backup</Button>
       </form></>}
-      {recoveryRequired ? <p className="text-sm leading-relaxed text-zinc-400">The identity saved on this browser could not be opened. Restore its backup to repair it. Your existing local data has been preserved.</p> : <Button variant="ghost" className="w-full" disabled={loading} onClick={toggleRestore}>{restore ? hasIdentity ? "Back to my saved identity" : "Create a new identity" : "I have a backup"}</Button>}
+      {recoveryRequired ? <p className="text-sm leading-relaxed text-muted-foreground">The identity saved on this browser could not be opened. Restore its backup to repair it. Your existing local data has been preserved.</p> : <Button variant="ghost" className="w-full" disabled={loading} onClick={toggleRestore}>{restore ? hasIdentity ? "Back to my saved identity" : "Create a new identity" : "I have a backup"}</Button>}
     </>}
   </div>
 }

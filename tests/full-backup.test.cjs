@@ -6,7 +6,7 @@ const { test, before, beforeEach } = require('node:test')
 const ts = require('typescript')
 const root = path.join(__dirname, '..')
 const local = new Map(), databases = new Map(), cache = new Map()
-let writes = 0
+let writes = 0, failCommit = false, beforeLegacyPut
 const localStorage = {
   getItem(key) { return local.get(key) ?? null },
   setItem(key, value) { writes++; local.set(key, String(value)) },
@@ -27,6 +27,7 @@ function database(name) {
       } }
     },
     async put(value, key) {
+      if (store === 'messages' && beforeLegacyPut) { const hook = beforeLegacyPut; beforeLegacyPut = undefined; await hook() }
       writes++
       if (staging && !staging.has(store)) staging.set(store, new Map(rows(store)))
       ;(staging?.get(store) ?? rows(store)).set(keyFor(store, value, key), structuredClone(value))
@@ -44,10 +45,18 @@ function database(name) {
     async put(store, value, key) { return facade(store).put(value, key) },
     transaction(stores) {
       const staged = new Map()
+      let aborted = false, completion
       return {
         store: facade(stores, staged),
         objectStore: store => facade(store, staged),
-        get done() { for (const [store, values] of staged) data.set(store, values); return Promise.resolve() },
+        abort() { aborted = true },
+        get done() {
+          if (!completion) {
+            if (aborted || (failCommit && staged.size)) completion = Promise.reject(new Error('Transaction aborted'))
+            else { for (const [store, values] of staged) data.set(store, values); completion = Promise.resolve() }
+          }
+          return completion
+        },
       }
     },
   }
@@ -123,7 +132,7 @@ before(async () => {
   expectedMessaging = await events.exportMessagingSnapshot(alice.publicKey)
   encrypted = await backup.exportFullBackup(alice, password)
 })
-beforeEach(() => { local.clear(); databases.clear(); writes = 0 })
+beforeEach(() => { local.clear(); databases.clear(); writes = 0; failCommit = false; beforeLegacyPut = undefined })
 
 test('full encrypted backup restores identity, contacts, legacy history, signed attachment chunks, pending outbox and preferences without transplanting the feed cursor', async () => {
   assert.equal(encrypted.includes(alice.privateKey.d), false)
@@ -343,4 +352,208 @@ test('oversized inputs, invalid contacts and short export passwords are refused'
   await assert.rejects(backup.validateFullBackupSnapshot(invalid))
   assert.throws(() => storage.validateStoredMessages([...expectedMessages, ...expectedMessages], alice.publicKey), /duplicate/i)
   assert.equal(writes, 0)
+})
+
+async function saveEvent(author, cid, kind, payload, extra = {}) {
+  const group = extra.group
+  const event = await messaging.signMessagingEvent({ version: 3, id: extra.id || crypto.randomUUID(), author: author.publicKey,
+    conversationId: cid.startsWith('group:') || author.publicKey === alice.publicKey ? cid : alice.publicKey,
+    recipients: group ? group.members.filter(member => member !== author.publicKey) : [author.publicKey === alice.publicKey ? cid : alice.publicKey],
+    timestamp: extra.timestamp || Date.now(), kind, payload, ...(group ? { group } : {}) }, author)
+  const record = { key: events.eventStorageKey(event), event, local: author.publicKey === alice.publicKey, delivered: [], receivedAt: extra.receivedAt || Date.now(), ...(extra.sequence ? { sequence: extra.sequence } : {}) }
+  await events.saveStoredEvent(alice.publicKey, record)
+  return record
+}
+
+test('individual deletion removes text and controls while retaining replies, other messages and conversations', async () => {
+  const target = await saveEvent(bob, bob.publicKey, 'message', { content: 'Remove only this secret' })
+  await saveEvent(bob, bob.publicKey, 'edit', { targetId: target.event.id, content: 'Edited secret' })
+  await saveEvent(alice, bob.publicKey, 'pin', { targetId: target.event.id, pinned: true })
+  const reply = await saveEvent(alice, bob.publicKey, 'message', { content: 'Keep my reply', replyTo: target.event.id })
+  const unrelated = await saveEvent(charlie, charlie.publicKey, 'message', { content: 'Keep another conversation' }, { id: target.event.id })
+  const original = await events.exportMessagingSnapshot(alice.publicKey)
+  await events.deleteStoredMessage(alice.publicKey, bob.publicKey, target.event.id)
+  const retained = await events.getStoredEvents(alice.publicKey)
+  assert.deepEqual(retained, [reply, unrelated])
+  const preferences = await events.getMessagingPreferences(alice.publicKey)
+  const model = messaging.buildMessagingModel(retained, alice.publicKey, [], preferences)
+  assert.deepEqual(model.messages.map(message => message.content).sort(), ['Keep another conversation', 'Keep my reply'])
+  assert.equal(model.messages.find(message => message.id === reply.event.id).replyTo, target.event.id)
+  assert.equal(model.conversations.find(conversation => conversation.id === bob.publicKey).lastMessage.id, reply.event.id)
+  assert.equal(model.conversations.find(conversation => conversation.id === bob.publicKey).unreadCount, 0)
+  assert.equal(model.messages.some(message => message.pinned), false)
+  await events.saveMessagingPreferences(alice.publicKey, original.preferences)
+  await events.importMessagingSnapshot(alice.publicKey, original)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), retained, 'an older backup cannot restore text or controls')
+  for (const record of original.events.filter(record => !retained.some(kept => kept.key === record.key))) {
+    assert.equal(await events.saveStoredEvent(alice.publicKey, record), false, 'relay replay and stale writes stay deleted')
+  }
+  const late = await messaging.signMessagingEvent({ ...target.event, id: crypto.randomUUID(), kind: 'pin', payload: { targetId: target.event.id, pinned: true } }, bob)
+  assert.equal(await events.saveStoredEvent(alice.publicKey, { ...target, key: events.eventStorageKey(late), event: late }), false)
+  await events.deleteStoredMessage(alice.publicKey, bob.publicKey, target.event.id)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), retained, 'repeat deletion is idempotent')
+})
+
+test('deleting a file removes its pending bytes and only its author-scoped attachment', async () => {
+  const attachment = { id: crypto.randomUUID(), name: 'private.txt', mime: 'text/plain', size: 3, chunks: 1,
+    sha256: Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('abc'))).toString('hex'), kind: 'file' }
+  const chunks = await saveEvent(alice, bob.publicKey, 'attachment-chunk', { attachmentId: attachment.id, index: 0, data: 'YWJj' })
+  const target = await saveEvent(alice, bob.publicKey, 'attachment', { attachment })
+  const otherChunks = await saveEvent(bob, bob.publicKey, 'attachment-chunk', { attachmentId: attachment.id, index: 0, data: 'YWJj' })
+  const otherFile = await saveEvent(bob, bob.publicKey, 'attachment', { attachment })
+  await events.deleteStoredMessage(alice.publicKey, bob.publicKey, target.event.id)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), [otherChunks, otherFile])
+  assert.equal(await events.saveStoredEvent(alice.publicKey, chunks), false)
+  assert.equal(await events.saveStoredEvent(alice.publicKey, target), false)
+  const latest = await events.exportMessagingSnapshot(alice.publicKey)
+  await events.validateMessagingSnapshot(latest, alice.publicKey)
+  assert.equal(latest.preferences.deletedMessages[bob.publicKey].attachmentKeys.length, 1)
+  const failed = { ...target, error: 'Offline', failedRecipients: [bob.publicKey] }
+  assert.equal(await events.saveStoredEvent(alice.publicKey, failed), false, 'an in-flight sender cannot put deleted bytes back')
+})
+
+test('individual deletion failures roll back both payload and marker without a change notification', async () => {
+  const target = await saveEvent(bob, bob.publicKey, 'message', { content: 'Keep on failed commit' })
+  let changes = 0
+  const changed = () => { changes++ }
+  window.addEventListener('serotine:events', changed)
+  try {
+    failCommit = true
+    await assert.rejects(events.deleteStoredMessage(alice.publicKey, bob.publicKey, target.event.id), /aborted/)
+    failCommit = false
+    assert.deepEqual(await events.getStoredEvents(alice.publicKey), [target])
+    assert.deepEqual((await events.getMessagingPreferences(alice.publicKey)).deletedMessages, {})
+    assert.equal(changes, 0)
+    await assert.rejects(events.deleteStoredMessage(alice.publicKey, charlie.publicKey, target.event.id), /no longer available/)
+    assert.deepEqual(await events.getStoredEvents(alice.publicKey), [target])
+  } finally { failCommit = false; window.removeEventListener('serotine:events', changed) }
+})
+
+test('message deletion retains historical group messages and the deleted message membership checkpoint', async () => {
+  const cid = `group:${crypto.randomUUID()}`, now = Date.now() - 100
+  const first = await messaging.signGroup({ id: cid, name: 'First group', admin: alice.publicKey, members: [alice.publicKey, bob.publicKey, charlie.publicKey], epoch: 1, updatedAt: now }, alice)
+  const second = await messaging.signGroup({ ...first, name: 'Updated group', members: [alice.publicKey, bob.publicKey], epoch: 2, updatedAt: now + 2 }, alice)
+  const historical = await saveEvent(charlie, cid, 'message', { content: 'Historical member message' }, { group: first, timestamp: now, receivedAt: now })
+  const target = await saveEvent(alice, cid, 'message', { content: 'Only carrier of epoch two' }, { group: second, timestamp: now + 2, receivedAt: now + 2 })
+  const lateRemoved = await saveEvent(charlie, cid, 'message', { content: 'Removed member must stay rejected' }, { group: first, timestamp: now + 3, receivedAt: now + 3 })
+  await events.deleteStoredMessage(alice.publicKey, cid, target.event.id)
+  const snapshot = await events.exportMessagingSnapshot(alice.publicKey)
+  await events.validateMessagingSnapshot(snapshot, alice.publicKey)
+  let model = messaging.buildMessagingModel(snapshot.events, alice.publicKey, [], snapshot.preferences)
+  assert.deepEqual(model.messages.map(message => message.id), [historical.event.id])
+  assert.deepEqual(model.groups[0], second)
+  assert.equal(snapshot.events.some(record => record.key === lateRemoved.key), true, 'authorization, rather than deletion, rejects the late outsider')
+  assert.equal(JSON.stringify(snapshot.preferences.deletedMessages).includes('Only carrier'), false)
+  await events.importMessagingSnapshot(alice.publicKey, snapshot)
+  model = messaging.buildMessagingModel(await events.getStoredEvents(alice.publicKey), alice.publicKey, [], await events.getMessagingPreferences(alice.publicKey))
+  assert.deepEqual(model.messages.map(message => message.id), [historical.event.id])
+  assert.deepEqual(model.conversations.find(conversation => conversation.id === cid).members, [alice.publicKey, bob.publicKey])
+})
+
+test('legacy file deletion removes its raw envelope but retains sibling messages across reload and old backup restore', async () => {
+  const row = { ...structuredClone(expectedMessages[0]), id: 'old-non-uuid-id', content: 'Keep the legacy caption', attachments: [
+    { name: 'first.txt', type: 'text/plain', size: 3, data: 'YWJj' },
+    { name: 'second.txt', type: 'text/plain', size: 3, data: 'ZGVm' },
+  ] }
+  await storage.importMessagesToStorage(alice.publicKey, [row])
+  const engine = new messaging.MessagingEngine(alice)
+  engine.sync = async () => {}
+  await engine.migrateLocalHistory()
+  await engine.refresh()
+  const caption = engine.model.messages.find(message => message.content === row.content)
+  const first = engine.model.messages.find(message => message.attachment?.name === 'first.txt')
+  const second = engine.model.messages.find(message => message.attachment?.name === 'second.txt')
+  const before = await backup.exportFullBackup(alice, password)
+  await engine.deleteMessage(bob.publicKey, first.id)
+  assert.deepEqual(await storage.exportAllMessagesFromStorage(alice.publicKey), [])
+  assert.deepEqual(new Set(engine.model.messages.map(message => message.id)), new Set([caption.id, second.id]))
+  assert.equal(engine.getAttachmentChunks(bob.publicKey, first.id).length, 0)
+  assert.equal(engine.getAttachmentChunks(bob.publicKey, second.id).length, 1)
+  await engine.migrateLocalHistory()
+  await backup.restoreBackup(before, password)
+  await engine.refresh()
+  assert.deepEqual(await storage.exportAllMessagesFromStorage(alice.publicKey), [])
+  assert.deepEqual(new Set(engine.model.messages.map(message => message.id)), new Set([caption.id, second.id]))
+  await engine.deleteMessage(bob.publicKey, second.id)
+  assert.deepEqual(engine.model.messages.map(message => message.id), [caption.id])
+  const after = await decryptPayload(await backup.exportFullBackup(alice, password))
+  assert.equal(after.messaging.events.some(record => record.event.kind === 'attachment-chunk'), false)
+  assert.deepEqual(after.messages, [])
+  engine.dispose()
+})
+
+test('a deletion in another tab during legacy backup import is purged after the import commits', async () => {
+  const original = snapshot()
+  const row = original.messages[0]
+  const legacy = load(path.join(root, 'lib/legacy-messaging.ts'))
+  const id = await legacy.legacyStoredMessageId(row)
+  const converted = await legacy.legacyMessageEvents({ id, sender: row.senderPubKey, recipient: row.peerPubKey, timestamp: row.timestamp, content: row.content, attachments: row.attachments })
+  for (const event of converted) original.messaging.events.push({ key: events.eventStorageKey(event), event, local: false, delivered: event.recipients, receivedAt: row.timestamp, legacy: true })
+  const encrypted = await encryptPayload(original)
+  beforeLegacyPut = async () => {
+    await events.deleteStoredMessage(alice.publicKey, bob.publicKey, id, [row])
+    await storage.deleteMessageHistoryFromStorage(alice.publicKey, bob.publicKey, row.senderPubKey, row.id)
+  }
+  await backup.restoreBackup(encrypted, password)
+  assert.deepEqual(await storage.exportAllMessagesFromStorage(alice.publicKey), [], 'the concurrent deletion cannot leave raw attachment bytes behind')
+  assert.equal((await events.getStoredEvents(alice.publicKey)).some(record => record.event.id === id), false)
+})
+
+test('old preference defaults and invalid individual deletion backup fields are handled before writes', async () => {
+  const older = structuredClone(expectedMessaging)
+  delete older.preferences.deletedMessages
+  assert.deepEqual((await events.validateMessagingSnapshot(older, alice.publicKey)).preferences.deletedMessages, {})
+  const base = { deletedAt: Date.now(), eventKeys: [], messageIds: [crypto.randomUUID()] }
+  for (const deletedMessages of [null, [], { [bob.publicKey]: { ...base, messageIds: ['invalid'] } },
+    { [bob.publicKey]: { ...base, legacyKeys: ['not-json'] } },
+    { [bob.publicKey]: { ...base, legacyKeys: [JSON.stringify([charlie.publicKey, 'raw-id'])] } },
+    { [bob.publicKey]: { ...base, attachmentKeys: [JSON.stringify([bob.publicKey, 'not-a-uuid'])] } },
+    { [bob.publicKey]: { ...base, groupEvents: [null] } }]) {
+    const invalid = structuredClone(expectedMessaging)
+    invalid.preferences.deletedMessages = deletedMessages
+    await assert.rejects(events.importMessagingSnapshot(alice.publicKey, invalid), /deleted messages are invalid/)
+  }
+  assert.equal(writes, 0)
+})
+
+test('deleting during file encryption cancels prepared relay requests and leaves no payload behind', async () => {
+  const relay = load(path.join(root, 'lib/relay-client.ts'))
+  const originalEncrypt = cryptography.encryptForPeer, originalSend = relay.storeEncryptedEvent
+  let reached, release, sends = 0
+  const started = new Promise(resolve => { reached = resolve })
+  const held = new Promise(resolve => { release = resolve })
+  const attachment = { id: crypto.randomUUID(), name: 'cancel.txt', mime: 'text/plain', size: 3, chunks: 1,
+    sha256: Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('abc'))).toString('hex'), kind: 'file' }
+  await saveEvent(alice, bob.publicKey, 'attachment-chunk', { attachmentId: attachment.id, index: 0, data: 'YWJj' })
+  const target = await saveEvent(alice, bob.publicKey, 'attachment', { attachment })
+  const engine = new messaging.MessagingEngine(alice)
+  engine.key = await cryptography.importKey(alice.privateKey, 'encryption', 'private')
+  engine.sync = async () => {}
+  await engine.refresh()
+  cryptography.encryptForPeer = async (...args) => { reached(); await held; return originalEncrypt(...args) }
+  relay.storeEncryptedEvent = async () => { sends++; return { success: true } }
+  try {
+    const flushing = engine.flushOutbox()
+    await started
+    await engine.deleteMessage(bob.publicKey, target.event.id)
+    release()
+    await flushing
+    assert.equal(sends, 0)
+    assert.deepEqual(await events.getStoredEvents(alice.publicKey), [])
+    assert.deepEqual(engine.model.messages, [])
+  } finally {
+    release(); cryptography.encryptForPeer = originalEncrypt; relay.storeEncryptedEvent = originalSend; engine.dispose()
+  }
+})
+
+test('import merges individual deletion markers from both devices before inserting old events', async () => {
+  const first = await saveEvent(bob, bob.publicKey, 'message', { content: 'Deleted here' })
+  const second = await saveEvent(bob, bob.publicKey, 'message', { content: 'Deleted on the other device' })
+  const original = await events.exportMessagingSnapshot(alice.publicKey)
+  await events.deleteStoredMessage(alice.publicKey, bob.publicKey, first.event.id)
+  const incoming = structuredClone(original)
+  incoming.preferences.deletedMessages = { [bob.publicKey]: { deletedAt: Date.now(), eventKeys: [second.key], messageIds: [second.event.id] } }
+  await events.importMessagingSnapshot(alice.publicKey, incoming)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), [])
+  assert.deepEqual(new Set((await events.getMessagingPreferences(alice.publicKey)).deletedMessages[bob.publicKey].messageIds), new Set([first.event.id, second.event.id]))
 })

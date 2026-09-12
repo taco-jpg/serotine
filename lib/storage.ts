@@ -46,6 +46,44 @@ export async function getMessagesFromStorage(owner: string, peerPubKey: string) 
   try { return await db.getAllFromIndex("messages", "by-peer", peerPubKey) } finally { db.close() }
 }
 
+/** Remove one original legacy row, including its inline attachment bytes. */
+export async function deleteMessageHistoryFromStorage(owner: string, peerPubKey: string, senderPubKey: string, messageId: string): Promise<void> {
+  let changed: boolean
+  const db = await initDB(owner)
+  try {
+    const tx = db.transaction("messages", "readwrite")
+    const key: [string, string, string] = [peerPubKey, senderPubKey, messageId]
+    const existing = await tx.store.get(key)
+    if (existing) await tx.store.delete(key)
+    await tx.done
+    changed = !!existing
+  } finally { db.close() }
+  // Shared history belongs only to its recorded migration owner. Its older
+  // primary key differs, so compare the normalized row identity via a cursor.
+  if (typeof localStorage !== "undefined" && localStorage.getItem("serotine_legacy_history_owner") === owner) {
+    const legacy = await openDB<ChatDB>("chat-storage", 2)
+    try {
+      if (legacy.objectStoreNames.contains("messages")) {
+        const tx = legacy.transaction("messages", "readwrite")
+        let cursor = await tx.store.openCursor()
+        let removed = false
+        while (cursor) {
+          const row = cursor.value
+          const peer = row?.senderPubKey === owner ? row.peerPubKey : row?.senderPubKey
+          if (peer === peerPubKey && row.senderPubKey === senderPubKey && row.id === messageId) {
+            await cursor.delete()
+            removed = true
+          }
+          cursor = await cursor.continue()
+        }
+        await tx.done
+        changed ||= removed
+      }
+    } finally { legacy.close() }
+  }
+  if (changed) notifyHistoryChanged(owner, peerPubKey)
+}
+
 /** Remove legacy history and its inline files after the deletion marker is saved. */
 export async function deleteConversationHistoryFromStorage(owner: string, peerPubKey: string, deletedAt = Infinity): Promise<void> {
   const db = await initDB(owner)

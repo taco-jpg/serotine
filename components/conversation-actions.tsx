@@ -58,7 +58,7 @@ export function ConversationActions({ conversation, disabled = false, children, 
 
   return <>
     <DropdownMenu>
-      <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="mr-1 size-11 shrink-0 text-zinc-500 md:size-8" aria-label={`Options for ${conversation.name}`} title="Chat options" aria-busy={busy} disabled={disabled || busy || !messaging.ready}>{busy ? <Loader2 className="size-4 animate-spin" /> : <MoreHorizontal className="size-4" />}</Button></DropdownMenuTrigger>
+      <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="mr-1 size-11 shrink-0 text-muted-foreground md:size-8" aria-label={`Options for ${conversation.name}`} title="Chat options" aria-busy={busy} disabled={disabled || busy || !messaging.ready}>{busy ? <Loader2 className="size-4 animate-spin" /> : <MoreHorizontal className="size-4" />}</Button></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="[&_[role=menuitem]]:min-h-11" onCloseAutoFocus={event => {
         if (!openDeleteAfterMenu.current) return
         event.preventDefault()
@@ -73,9 +73,9 @@ export function ConversationActions({ conversation, disabled = false, children, 
     <Dialog open={deleteOpen} onOpenChange={open => { if (!actionLock.current) setDeleteOpen(open) }}>
       <DialogContent showCloseButton={!busy} onOpenAutoFocus={event => { event.preventDefault(); cancelDelete.current?.focus() }}>
         <DialogHeader><DialogTitle>Delete this chat?</DialogTitle><DialogDescription className="break-words">Delete the saved messages and files for {conversation.name} from this device. This cannot be undone.</DialogDescription></DialogHeader>
-        <p className="text-sm leading-relaxed text-zinc-400">Your contacts stay saved. This does not delete anyone else’s copy or leave a group. New messages may make this chat appear again.</p>
-        <p className="text-sm leading-relaxed text-zinc-400">To hide the chat and keep its history, choose Archive chat instead.</p>
-        {deleteError && <p role="alert" className="break-words text-sm text-red-300">{deleteError}</p>}
+        <p className="text-sm leading-relaxed text-muted-foreground">Your contacts stay saved. This does not delete anyone else’s copy or leave a group. New messages may make this chat appear again.</p>
+        <p className="text-sm leading-relaxed text-muted-foreground">To hide the chat and keep its history, choose Archive chat instead.</p>
+        {deleteError && <p role="alert" className="break-words text-sm text-destructive">{deleteError}</p>}
         <DialogFooter><Button ref={cancelDelete} variant="outline" disabled={busy} onClick={() => setDeleteOpen(false)}>Cancel</Button><Button variant="destructive" disabled={busy} onClick={() => void deleteChat()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}Delete chat</Button></DialogFooter>
       </DialogContent>
     </Dialog>

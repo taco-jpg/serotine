@@ -14,7 +14,7 @@ export interface MessageRecord {
 export interface ConversationRecord {
   id: string; kind: "direct" | "group" | "self"; name: string; members: string[]
   unreadCount: number; lastMessage?: MessageRecord; updatedAt: number; notificationMode: NotificationMode
-  blocked: boolean; request: boolean; group?: GroupState
+  blocked: boolean; request: boolean; group?: GroupState; sendError?: string
 }
 export interface MessagingPreferences {
   accepted: string[]; blocked: string[]; notifications: Record<string, NotificationMode>; readAt: Record<string, number>; readReceipts: boolean
@@ -30,7 +30,7 @@ export interface MessagingEvent {
   kind: EventKind; payload: EventPayload; group?: GroupState; signature: string
 }
 export interface StoredEvent {
-  key: string; event: MessagingEvent; local: boolean; delivered: string[]; error?: string
+  key: string; event: MessagingEvent; local: boolean; delivered: string[]; error?: string; failedRecipients?: string[]
   receivedAt: number; legacy?: boolean; sequence?: number
 }
 export interface MessagingSnapshot { version: 3; owner: string; events: StoredEvent[]; preferences: MessagingPreferences }

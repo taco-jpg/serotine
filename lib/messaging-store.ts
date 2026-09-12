@@ -71,6 +71,7 @@ export async function validateMessagingSnapshot(value: unknown, owner: string): 
     const e = record.event
     if (e.author !== owner && !e.recipients?.includes(owner)) throw new Error("The backup contains messages for another identity.")
     if (record.local && e.author !== owner) throw new Error("The backup contains an invalid outgoing message.")
+    if (record.failedRecipients !== undefined && (!stringArray(record.failedRecipients) || !record.failedRecipients.every(peer => e.recipients.includes(peer)))) throw new Error("The backup contains invalid failed recipients.")
     if (record.legacy) {
       if (!validLegacyMessagingEvent(e)) throw new Error("The backup contains invalid legacy history.")
       // Legacy history is display-only and must never execute controls or resend.

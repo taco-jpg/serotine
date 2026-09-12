@@ -85,6 +85,11 @@ function outboxStatus(record: StoredEvent) {
   if (!record.local) return "received" as const
   return record.event.recipients.every(x => record.delivered.includes(x)) ? "sent" as const : record.error ? "failed" as const : "pending" as const
 }
+function canSendTo(record: StoredEvent, peer: string) {
+  // Older failed records have no per-recipient detail and still need an
+  // explicit retry. New failures leave other destinations free to continue.
+  return !record.delivered.includes(peer) && (!record.error || (!!record.failedRecipients && !record.failedRecipients.includes(peer)))
+}
 /** Only validated immutable events may enter this reducer. Authority is checked again for controls. */
 export function buildMessagingModel(records: StoredEvent[], owner: string, contacts: Contact[], preferences: MessagingPreferences, authorizedOutput?: Set<string>): MessagingModel {
   const groups = new Map<string, GroupState>()
@@ -104,7 +109,7 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
       if (!prior || e.group.epoch > prior.epoch) { groups.set(cid, e.group); left.set(cid, new Set()) }
       else if (JSON.stringify(prior) !== JSON.stringify(e.group)) continue
       if (e.kind !== "group" && (!e.group.members.includes(owner) || left.get(cid)?.has(e.author))) continue
-      if (e.kind === "leave") { if (e.author === e.group.admin) e.group.members.forEach(member => left.get(cid)?.add(member)); else left.get(cid)?.add(e.author); continue }
+      if (e.kind === "leave") { authorized.add(record.key); if (e.author === e.group.admin) e.group.members.forEach(member => left.get(cid)?.add(member)); else left.get(cid)?.add(e.author); continue }
     }
     authorized.add(record.key)
     if (e.kind === "group") continue
@@ -138,14 +143,20 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
     else if (chunks.some(r => outboxStatus(r) === "pending")) message.delivery = "pending"
   }
   const list = [...messages.values()].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id))
-  const ids = new Set([owner, ...contacts.map(c => c.pub), ...groups.keys(), ...list.map(m => m.conversationId), ...preferences.accepted])
+  // Receipts and group controls can fail without producing a message bubble.
+  // Keep their delivery errors with the affected conversation, not the inbox.
+  const sendErrors = new Map<string, string>()
+  for (const record of ordered) if (authorized.has(record.key) && outboxStatus(record) === "failed") {
+    sendErrors.set(conversationForEvent(record.event, owner), record.error!)
+  }
+  const ids = new Set([owner, ...contacts.map(c => c.pub), ...groups.keys(), ...list.map(m => m.conversationId), ...preferences.accepted, ...sendErrors.keys()])
   const conversations: ConversationRecord[] = [...ids].map((id): ConversationRecord => {
     const group = groups.get(id)
     const rows = list.filter(m => m.conversationId === id)
     const lastMessage = rows.at(-1)
     const known = id === owner || contacts.some(c => c.pub === id) || preferences.accepted.includes(id) || rows.some(m => m.senderPubKey === owner) || group?.admin === owner
     const blocked = preferences.blocked.includes(id) || !!(group && preferences.blocked.includes(group.admin))
-    return { id, kind: group ? "group" : id === owner ? "self" : "direct", name: group?.name ?? (id === owner ? "You" : contacts.find(c => c.pub === id)?.alias || shortAddress(id)), members: group ? group.members.filter(x => !left.get(id)?.has(x)) : id === owner ? [owner] : [owner, id], unreadCount: blocked ? 0 : rows.filter(m => m.senderPubKey !== owner && m.timestamp > (preferences.readAt[id] ?? 0)).length, lastMessage, updatedAt: lastMessage?.timestamp ?? group?.updatedAt ?? 0, notificationMode: preferences.notifications[id] ?? "all", blocked, request: !known && !blocked, group }
+    return { id, kind: group ? "group" : id === owner ? "self" : "direct", name: group?.name ?? (id === owner ? "You" : contacts.find(c => c.pub === id)?.alias || shortAddress(id)), members: group ? group.members.filter(x => !left.get(id)?.has(x)) : id === owner ? [owner] : [owner, id], unreadCount: blocked ? 0 : rows.filter(m => m.senderPubKey !== owner && m.timestamp > (preferences.readAt[id] ?? 0)).length, lastMessage, updatedAt: lastMessage?.timestamp ?? group?.updatedAt ?? 0, notificationMode: preferences.notifications[id] ?? "all", blocked, request: !known && !blocked, group, sendError: sendErrors.get(id) }
   }).sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name))
   return { messages: list, groups: [...groups.values()], conversations, requests: conversations.filter(c => c.request) }
 }
@@ -365,7 +376,7 @@ export class MessagingEngine {
   retry = async (messageId?: string) => {
     this.assertActive()
     const message = this.model.messages.find(m => m.id === messageId)
-    for (const record of await getStoredEvents(this.identity.publicKey)) if (record.local && record.error && (!messageId || record.event.id === messageId || (message?.attachment && record.event.payload.attachmentId === message.attachment.id))) { this.assertActive(); await saveStoredEvent(this.identity.publicKey, { ...record, error: undefined }) }
+    for (const record of await getStoredEvents(this.identity.publicKey)) if (record.local && record.error && (!messageId || record.event.id === messageId || (message?.attachment && record.event.payload.attachmentId === message.attachment.id))) { this.assertActive(); await saveStoredEvent(this.identity.publicKey, { ...record, error: undefined, failedRecipients: undefined }) }
     this.assertActive()
     await this.sync()
   }
@@ -380,8 +391,9 @@ export class MessagingEngine {
         await this.readFeed()
         await this.readLegacyInbox()
         await this.refresh()
-        const failed = this.records.find(r => r.local && r.error && r.event.recipients.some(peer => !r.delivered.includes(peer)))
-        this.status = failed ? "offline" : "online"; this.error = failed?.error ?? null
+        // Successful inbox reads establish connectivity. An older failed send
+        // (including a receipt to a retired contact) says nothing about it.
+        this.status = "online"; this.error = null
         this.emit()
       }
       if (navigator.locks) await navigator.locks.request(`serotine:sync:${this.identity.publicKey}`, { ifAvailable: true }, async lock => { if (lock) await run() })
@@ -398,14 +410,14 @@ export class MessagingEngine {
     this.assertActive()
     if (Date.now() < this.outboxRetryAt) return
     const owner = this.identity.publicKey
-    const pending = (await getStoredEvents(owner)).filter(r => r.local && !r.legacy && !r.error && r.event.recipients.some(peer => !r.delivered.includes(peer))).sort((a, b) => a.receivedAt - b.receivedAt)
-    let failure: Error | undefined
+    const pending = (await getStoredEvents(owner)).filter(r => r.local && !r.legacy && r.event.recipients.some(peer => canSendTo(r, peer))).sort((a, b) => a.receivedAt - b.receivedAt)
+    let transportFailed = false
     for (let index = 0; index < pending.length; index += 4) {
       if (this.disposed) return
       await Promise.all(pending.slice(index, index + 4).map(async record => {
         for (const recipientPubKey of record.event.recipients) {
           if (this.disposed || Date.now() < this.outboxRetryAt) return
-          if (record.delivered.includes(recipientPubKey)) continue
+          if (!canSendTo(record, recipientPubKey)) continue
           try {
             const encryptedData = await encryptForPeer(JSON.stringify(record.event), this.key!, recipientPubKey)
             this.assertActive()
@@ -420,15 +432,22 @@ export class MessagingEngine {
               this.outboxRetryAt = Math.max(this.outboxRetryAt, Date.now() + result.retryAfterMs)
               return
             }
-            if (!result.success) throw new Error(result.error)
-            record.delivered = [...new Set([...record.delivered, recipientPubKey])]; delete record.error
+            if (!result.success) {
+              record.error = record.event.group ? `${shortAddress(recipientPubKey)}: ${result.error}` : result.error
+              record.failedRecipients = [...new Set([...(record.failedRecipients ?? []), recipientPubKey])]
+              await saveStoredEvent(owner, record)
+              // A refused destination must not block active group members or
+              // unrelated conversations. Rejected recipients stay unconfirmed.
+              continue
+            }
+            record.delivered = [...new Set([...record.delivered, recipientPubKey])]
+            if (record.event.recipients.every(peer => record.delivered.includes(peer))) { record.error = undefined; record.failedRecipients = undefined }
             await saveStoredEvent(owner, record)
-          } catch (error) { if (this.disposed) return; record.error = error instanceof Error ? error.message : "Sending failed. Retry when connected."; failure = new Error(record.error); await saveStoredEvent(owner, record); break }
+          } catch (error) { if (this.disposed) return; record.error = error instanceof Error ? error.message : "Sending failed. Retry when connected."; record.failedRecipients = [...new Set([...(record.failedRecipients ?? []), recipientPubKey])]; transportFailed = true; await saveStoredEvent(owner, record); break }
         }
       }))
-      if (failure || Date.now() < this.outboxRetryAt) break
+      if (transportFailed || Date.now() < this.outboxRetryAt) break
     }
-    if (failure) { this.error = failure.message; this.status = "offline" }
   }
   private async readFeed() {
     this.assertActive()

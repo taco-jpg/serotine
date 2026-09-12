@@ -97,7 +97,7 @@ before(async () => {
   const attachment = { id: crypto.randomUUID(), name: 'notes.txt', mime: 'text/plain', size: bytes.length, chunks: 1, sha256: Buffer.from(await crypto.subtle.digest('SHA-256', bytes)).toString('hex'), kind: 'file' }
   for (const [kind, payload] of [['attachment', { attachment }], ['attachment-chunk', { attachmentId: attachment.id, index: 0, data: Buffer.from(bytes).toString('base64') }]]) {
     const event = await messaging.signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: alice.publicKey, conversationId: bob.publicKey, recipients: [bob.publicKey], timestamp: Date.now(), kind, payload }, alice)
-    await events.saveStoredEvent(alice.publicKey, { key: events.eventStorageKey(event), event, local: true, delivered: [], receivedAt: Date.now(), error: 'Offline' })
+    await events.saveStoredEvent(alice.publicKey, { key: events.eventStorageKey(event), event, local: true, delivered: [], receivedAt: Date.now(), error: 'Offline', failedRecipients: [bob.publicKey] })
   }
   await events.saveMessagingPreferences(alice.publicKey, { accepted: [bob.publicKey], blocked: [], notifications: { [bob.publicKey]: 'mentions' }, readAt: { [bob.publicKey]: Date.now() }, readReceipts: false })
   await events.saveSyncCursor(alice.publicKey, 999)
@@ -123,6 +123,18 @@ test('wrong password and tampered ciphertext cannot mutate identity or chat stor
   const modified = JSON.parse(encrypted), bytes = Buffer.from(modified.ciphertext, 'base64')
   bytes[0] ^= 1; modified.ciphertext = bytes.toString('base64')
   await assert.rejects(backup.restoreBackup(JSON.stringify(modified), password), /password.*incorrect|damaged/i)
+  assert.equal(writes, 0)
+})
+
+test('backup recipient failures are validated while older failed outboxes remain restorable', async () => {
+  const older = structuredClone(expectedMessaging)
+  for (const record of older.events) delete record.failedRecipients
+  await events.validateMessagingSnapshot(older, alice.publicKey)
+  for (const failedRecipients of ['not an array', [charlie.publicKey]]) {
+    const invalid = structuredClone(expectedMessaging)
+    invalid.events.find(record => record.local).failedRecipients = failedRecipients
+    await assert.rejects(events.validateMessagingSnapshot(invalid, alice.publicKey), /invalid failed recipients/)
+  }
   assert.equal(writes, 0)
 })
 

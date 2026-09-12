@@ -9,11 +9,14 @@ import { isDeletedStoredEvent, isDeletedLegacyMessage } from "./messaging-histor
 import { ATTACHMENT_CHUNK_BYTES, MAX_ATTACHMENT_CHUNKS, isAttachmentMeta } from "./attachments"
 import { legacyMessageEvents, legacyStoredMessageId, legacyVisibleMessageIds } from "./legacy-messaging"
 import { notifyIncoming, requestMessagingNotifications } from "./message-notifications"
-import type { AttachmentMeta, ConversationRecord, EventKind, EventPayload, GroupState, MessageRecord, MessagingEvent, MessagingModel, MessagingPreferences, NotificationMode, StoredEvent } from "./messaging-types"
+import { isPrivateEventExpired, privateDestroyCutoffs } from "./private-messaging"
+import type { AttachmentMeta, ConversationRecord, EventKind, EventPayload, GroupState, MessageRecord, MessagingEvent, MessagingModel, MessagingPreferences, NotificationMode, PrivateTtlSeconds, StoredEvent } from "./messaging-types"
 
 const MAX_MEMBERS = 20
-const VISIBLE_KINDS = new Set(["message", "poll", "attachment"])
-const EVENT_KINDS = new Set(["message", "edit", "pin", "poll", "vote", "receipt", "group", "leave", "attachment", "attachment-chunk"])
+const VISIBLE_KINDS = new Set(["message", "poll", "attachment", "private-message"])
+const PRIVATE_KINDS = new Set(["private-settings", "private-message", "private-destroy"])
+const EVENT_KINDS = new Set(["message", "edit", "pin", "poll", "vote", "receipt", "group", "leave", "attachment", "attachment-chunk", ...PRIVATE_KINDS])
+const PRIVATE_DURATIONS = new Set([0, 300, 3600, 86400])
 const validGroupId = (value: string) => typeof value === "string" && value.startsWith("group:") && ID_PATTERN.test(value.slice(6))
 const sameSet = (left: string[], right: string[]) => left.length === right.length && left.every(x => right.includes(x))
 const validTime = (value: number) => Number.isSafeInteger(value) && value > 0 && value <= Date.now() + 60_000
@@ -41,10 +44,14 @@ export function validAttachment(value: AttachmentMeta | undefined): value is Att
 
 function validPayload(kind: EventKind, p: EventPayload) {
   if (!p || typeof p !== "object" || Array.isArray(p)) return false
+  if (!PRIVATE_KINDS.has(kind) && ["expiresAt", "secret", "ttlSeconds", "destroyBefore"].some(key => key in p)) return false
   if (p.replyTo !== undefined && !validId(p.replyTo)) return false
   if (p.mentions !== undefined && (!Array.isArray(p.mentions) || p.mentions.length > MAX_MEMBERS || !p.mentions.every(x => PUBLIC_KEY_PATTERN.test(x)))) return false
   switch (kind) {
     case "message": return validText(p.content)
+    case "private-message": return validText(p.content) && Number.isSafeInteger(p.expiresAt) && (p.secret === undefined || typeof p.secret === "boolean") && Object.keys(p).every(key => ["content", "expiresAt", "secret"].includes(key))
+    case "private-settings": return PRIVATE_DURATIONS.has(p.ttlSeconds!) && Object.keys(p).length === 1
+    case "private-destroy": return Number.isSafeInteger(p.destroyBefore) && p.destroyBefore! > 0 && Object.keys(p).length === 1
     case "edit": return validId(p.targetId) && validText(p.content)
     case "pin": return validId(p.targetId) && typeof p.pinned === "boolean"
     case "poll": return validText(p.question, 300) && Array.isArray(p.options) && p.options.length >= 2 && p.options.length <= 10 && p.options.every(x => validText(x, 120)) && new Set(p.options.map(x => x.trim().toLowerCase())).size === p.options.length
@@ -67,6 +74,11 @@ export async function validateMessagingEvent(value: unknown, transport?: { sende
     const e = value as MessagingEvent
     if (!e || e.version !== 3 || !validId(e.id) || !PUBLIC_KEY_PATTERN.test(e.author) || !Array.isArray(e.recipients) || e.recipients.length < 1 || e.recipients.length > MAX_MEMBERS * 2 || !e.recipients.every(x => typeof x === "string" && PUBLIC_KEY_PATTERN.test(x)) || new Set(e.recipients).size !== e.recipients.length || !validTime(e.timestamp) || !EVENT_KINDS.has(e.kind) || !validPayload(e.kind, e.payload) || !/^[0-9a-f]{128}$/.test(e.signature) || JSON.stringify(e).length > 60000) return false
     if (transport && (e.author !== transport.senderPubKey || e.id !== transport.id || !e.recipients.includes(transport.recipientPubKey))) return false
+    // New event kinds make old clients reject temporary content instead of
+    // silently retaining it as an ordinary message.
+    if (PRIVATE_KINDS.has(e.kind) && (e.group || !PUBLIC_KEY_PATTERN.test(e.conversationId) || e.author === e.conversationId)) return false
+    if (e.kind === "private-message" && (e.payload.expiresAt! <= e.timestamp || e.payload.expiresAt! - e.timestamp > 86400_000)) return false
+    if (e.kind === "private-destroy" && e.payload.destroyBefore! > e.timestamp) return false
     if (validGroupId(e.conversationId)) {
       if (!e.group || e.group.id !== e.conversationId || !await validateGroup(e.group)) return false
       if (e.kind === "group") { if (e.author !== e.group.admin || !e.group.members.every(x => x === e.author || e.recipients.includes(x))) return false }
@@ -93,6 +105,9 @@ function canSendTo(record: StoredEvent, peer: string) {
 }
 /** Only validated immutable events may enter this reducer. Authority is checked again for controls. */
 export function buildMessagingModel(records: StoredEvent[], owner: string, contacts: Contact[], preferences: MessagingPreferences, authorizedOutput?: Set<string>, includeDeletedConversations = false): MessagingModel {
+  const now = Date.now()
+  const destroyCutoffs = privateDestroyCutoffs(records, owner)
+  const privateSettings = new Map<string, MessagingEvent>()
   const groups = new Map<string, GroupState>()
   const left = new Map<string, Set<string>>()
   for (const [cid, deletion] of Object.entries(preferences.deleted ?? {})) if (deletion.group) {
@@ -112,6 +127,8 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
     const e = record.event, cid = conversationForEvent(e, owner)
     if (isDeletedStoredEvent(record, owner, preferences)) continue
     if (e.author !== owner && preferences.blocked.includes(e.author)) continue
+    if (PRIVATE_KINDS.has(e.kind) && (record.legacy || e.group || e.author === e.conversationId || (e.author !== owner && (e.conversationId !== owner || !e.recipients.includes(owner))))) continue
+    if (isPrivateEventExpired(record, owner, destroyCutoffs, now)) continue
     if (e.group) {
       const prior = groups.get(cid)
       if (prior && prior.admin !== e.group.admin) continue
@@ -123,10 +140,16 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
     }
     authorized.add(record.key)
     if (e.kind === "group") continue
+    if (e.kind === "private-settings") {
+      const prior = privateSettings.get(cid)
+      if (!prior || e.timestamp > prior.timestamp || (e.timestamp === prior.timestamp && e.id.localeCompare(prior.id) > 0)) privateSettings.set(cid, e)
+      continue
+    }
+    if (e.kind === "private-destroy") continue
     const key = `${cid}:${e.id}`
     if (VISIBLE_KINDS.has(e.kind)) {
       if (messages.has(key)) continue
-      messages.set(key, { id: e.id, conversationId: cid, senderPubKey: e.author, content: e.payload.content ?? (e.kind === "poll" ? e.payload.question! : ""), timestamp: e.timestamp, delivery: record.legacy && e.author === owner ? "sent" : outboxStatus(record), replyTo: e.payload.replyTo, pinned: false, attachment: e.payload.attachment, poll: e.kind === "poll" ? { question: e.payload.question!, options: [...e.payload.options!], votes: {} } : undefined, mentions: e.payload.mentions, error: record.error, deliveredTo: [], readBy: [] })
+      messages.set(key, { id: e.id, conversationId: cid, senderPubKey: e.author, content: e.payload.content ?? (e.kind === "poll" ? e.payload.question! : ""), timestamp: e.timestamp, delivery: record.legacy && e.author === owner ? "sent" : outboxStatus(record), replyTo: e.payload.replyTo, pinned: false, attachment: e.payload.attachment, poll: e.kind === "poll" ? { question: e.payload.question!, options: [...e.payload.options!], votes: {} } : undefined, mentions: e.payload.mentions, error: record.error, deliveredTo: [], readBy: [], ...(e.kind === "private-message" ? { private: true, expiresAt: e.payload.expiresAt, secret: e.payload.secret ?? false } : {}) })
       continue
     }
     controls.push(record)
@@ -136,8 +159,8 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
     const e = record.event, cid = conversationForEvent(e, owner)
     const target = e.payload.targetId ? messages.get(`${cid}:${e.payload.targetId}`) : undefined
     if (!target) continue
-    if (e.kind === "edit" && target.senderPubKey === e.author && !target.poll && !target.attachment && (!target.editedAt || e.timestamp >= target.editedAt)) { target.content = e.payload.content!; target.editedAt = e.timestamp }
-    if (e.kind === "pin") target.pinned = e.payload.pinned!
+    if (e.kind === "edit" && !target.private && target.senderPubKey === e.author && !target.poll && !target.attachment && (!target.editedAt || e.timestamp >= target.editedAt)) { target.content = e.payload.content!; target.editedAt = e.timestamp }
+    if (e.kind === "pin" && !target.private) target.pinned = e.payload.pinned!
     if (e.kind === "vote" && target.poll && e.payload.option! < target.poll.options.length) target.poll.votes[e.author] = e.payload.option!
     if (e.kind === "receipt" && target.senderPubKey === owner && e.author !== owner) {
       if (!target.deliveredTo.includes(e.author)) target.deliveredTo.push(e.author)
@@ -145,6 +168,9 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
       target.delivery = target.readBy.length ? "read" : "delivered"
     }
   }
+  // Never turn a temporary message into a lasting reply preview.
+  const privateTargets = new Set(records.filter(r => r.event.kind === "private-message").map(r => `${conversationForEvent(r.event, owner)}:${r.event.id}`))
+  for (const message of messages.values()) if (message.replyTo && privateTargets.has(`${message.conversationId}:${message.replyTo}`)) message.replyTo = undefined
   // A file is only sent when its complete chunk set has left the durable outbox.
   for (const message of messages.values()) if (message.attachment && message.senderPubKey === owner) {
     const chunks = ordered.filter(r => authorized.has(r.key) && r.event.kind === "attachment-chunk" && r.event.author === owner && conversationForEvent(r.event, owner) === message.conversationId && r.event.payload.attachmentId === message.attachment!.id)
@@ -159,14 +185,15 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
   for (const record of ordered) if (authorized.has(record.key) && outboxStatus(record) === "failed") {
     sendErrors.set(conversationForEvent(record.event, owner), record.error!)
   }
-  const ids = new Set([owner, ...contacts.map(c => c.pub), ...groups.keys(), ...list.map(m => m.conversationId), ...preferences.accepted, ...sendErrors.keys()])
+  const ids = new Set([owner, ...contacts.map(c => c.pub), ...groups.keys(), ...privateSettings.keys(), ...list.map(m => m.conversationId), ...preferences.accepted, ...sendErrors.keys()])
   const conversations: ConversationRecord[] = [...ids].filter(id => includeDeletedConversations || !preferences.deleted?.[id] || list.some(message => message.conversationId === id)).map((id): ConversationRecord => {
     const group = groups.get(id)
     const rows = list.filter(m => m.conversationId === id)
-    const lastMessage = rows.at(-1)
+    const latest = rows.at(-1)
+    const lastMessage = latest?.private ? { ...latest, content: latest.secret ? "Access key" : "Private message" } : latest
     const known = id === owner || contacts.some(c => c.pub === id) || preferences.accepted.includes(id) || rows.some(m => m.senderPubKey === owner) || group?.admin === owner
     const blocked = preferences.blocked.includes(id) || !!(group && preferences.blocked.includes(group.admin))
-    return { id, kind: group ? "group" : id === owner ? "self" : "direct", name: group?.name ?? (id === owner ? "You" : contacts.find(c => c.pub === id)?.alias || shortAddress(id)), members: group ? group.members.filter(x => !left.get(id)?.has(x)) : id === owner ? [owner] : [owner, id], unreadCount: blocked ? 0 : rows.filter(m => m.senderPubKey !== owner && m.timestamp > (preferences.readAt[id] ?? 0)).length, lastMessage, updatedAt: lastMessage?.timestamp ?? group?.updatedAt ?? 0, notificationMode: preferences.notifications[id] ?? "all", blocked, request: !known && !blocked, archived: preferences.archived?.includes(id) ?? false, group, sendError: sendErrors.get(id) }
+    return { id, kind: group ? "group" : id === owner ? "self" : "direct", name: group?.name ?? (id === owner ? "You" : contacts.find(c => c.pub === id)?.alias || shortAddress(id)), members: group ? group.members.filter(x => !left.get(id)?.has(x)) : id === owner ? [owner] : [owner, id], unreadCount: blocked ? 0 : rows.filter(m => m.senderPubKey !== owner && m.timestamp > (preferences.readAt[id] ?? 0)).length, lastMessage, updatedAt: lastMessage?.timestamp ?? privateSettings.get(id)?.timestamp ?? group?.updatedAt ?? 0, notificationMode: preferences.notifications[id] ?? "all", blocked, request: !known && !blocked, archived: preferences.archived?.includes(id) ?? false, group, sendError: sendErrors.get(id), privateTtlSeconds: privateSettings.get(id)?.payload.ttlSeconds }
   }).sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name))
   return { messages: list, groups: [...groups.values()], conversations, requests: conversations.filter(c => c.request && !c.archived) }
 }
@@ -186,6 +213,8 @@ export class MessagingEngine {
   private key?: CryptoKey
   private timer?: ReturnType<typeof setInterval>
   private refreshTimer?: ReturnType<typeof setTimeout>
+  private expiryTimer?: ReturnType<typeof setTimeout>
+  private refreshGeneration = 0
   private refreshPending = false
   private initializedAt = Date.now()
   private authorizedKeys = new Set<string>()
@@ -222,14 +251,35 @@ export class MessagingEngine {
     this.timer = setInterval(() => { void this.sync() }, 5000)
     void this.sync()
   }
-  dispose() { this.disposed = true; this.key = undefined; clearInterval(this.timer); clearTimeout(this.refreshTimer); window.removeEventListener("serotine:events", this.storeListener); window.removeEventListener("serotine:contacts", this.storeListener); window.removeEventListener("storage", this.storeListener); window.removeEventListener("online", this.sync); this.listeners.clear() }
+  dispose() { this.disposed = true; this.key = undefined; clearInterval(this.timer); clearTimeout(this.refreshTimer); clearTimeout(this.expiryTimer); window.removeEventListener("serotine:events", this.storeListener); window.removeEventListener("serotine:contacts", this.storeListener); window.removeEventListener("storage", this.storeListener); window.removeEventListener("online", this.sync); this.listeners.clear() }
   refresh = async () => {
     this.assertActive()
+    const generation = ++this.refreshGeneration
     const [records, preferences] = await Promise.all([getStoredEvents(this.identity.publicKey), getMessagingPreferences(this.identity.publicKey)])
     this.assertActive()
-    this.records = records; this.preferences = preferences; this.contacts = loadContacts(this.identity.publicKey)
-    this.model = buildMessagingModel(records, this.identity.publicKey, this.contacts, preferences, this.authorizedKeys)
+    if (generation !== this.refreshGeneration) return
+    const cutoffs = privateDestroyCutoffs(records, this.identity.publicKey)
+    this.records = records.filter(record => !isPrivateEventExpired(record, this.identity.publicKey, cutoffs)); this.preferences = preferences; this.contacts = loadContacts(this.identity.publicKey)
+    this.model = buildMessagingModel(this.records, this.identity.publicKey, this.contacts, preferences, this.authorizedKeys)
+    this.scheduleExpiry()
     this.emit()
+  }
+  private scheduleExpiry() {
+    clearTimeout(this.expiryTimer)
+    const deadlines = this.records.filter(record => record.event.kind === "private-message").map(record => record.event.payload.expiresAt!)
+    if (!deadlines.length || this.disposed) return
+    this.expiryTimer = setTimeout(() => {
+      if (this.disposed) return
+      const owner = this.identity.publicKey, cutoffs = privateDestroyCutoffs(this.records, owner)
+      // Clear plaintext from the live model immediately, even when a network
+      // request or a durable-storage read is still waiting to complete.
+      this.records = this.records.filter(record => !isPrivateEventExpired(record, owner, cutoffs))
+      this.model = buildMessagingModel(this.records, owner, this.contacts, this.preferences, this.authorizedKeys)
+      this.scheduleExpiry()
+      this.emit()
+      void this.refresh().catch(error => this.fail(error))
+    }, Math.max(0, Math.min(...deadlines) - Date.now()))
+    this.expiryTimer.unref?.()
   }
   private async migrateLocalHistory() {
     const owner = this.identity.publicKey
@@ -278,11 +328,25 @@ export class MessagingEngine {
     if (!sameSet(group.members, conversation.members)) throw new Error("A member left. Waiting for the group administrator to update membership before sending.")
     return group
   }
+  getPrivateMode = (cid: string): PrivateTtlSeconds => {
+    const owner = this.identity.publicKey
+    if (!PUBLIC_KEY_PATTERN.test(cid) || cid === owner) return 0
+    let latest: MessagingEvent | undefined
+    for (const record of this.records) {
+      const event = record.event
+      if (record.legacy || event.group || event.kind !== "private-settings" || conversationForEvent(event, owner) !== cid
+        || (event.author !== owner && (event.conversationId !== owner || !event.recipients.includes(owner)))
+        || isDeletedStoredEvent(record, owner, this.preferences) || this.preferences.blocked.includes(event.author)) continue
+      if (!latest || event.timestamp > latest.timestamp || (event.timestamp === latest.timestamp && event.id.localeCompare(latest.id) > 0)) latest = event
+    }
+    return latest?.payload.ttlSeconds ?? 0
+  }
   sendEvent = async (cid: string, kind: EventKind, payload: EventPayload): Promise<string> => {
     this.assertActive()
     if (!this.key) throw new Error("Your identity is still loading.")
     const owner = this.identity.publicKey
     const startedAt = Date.now()
+    const submittedPrivateTtl = this.getPrivateMode(cid.trim().toLowerCase())
     const preferences = await getMessagingPreferences(owner)
     let group: GroupState | undefined
     let recipients: string[]
@@ -290,7 +354,24 @@ export class MessagingEngine {
     else { cid = await validateAddress(cid); if (this.preferences.blocked.includes(cid)) throw new Error("Unblock this contact before sending a message."); recipients = [cid] }
     this.assertActive()
     if (kind === "group") throw new Error("Use group management to update a group.")
-    const event = await signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: owner, conversationId: cid, recipients, timestamp: Math.max(startedAt, (preferences.deleted?.[cid]?.deletedAt ?? 0) + 1), kind, payload, ...(group ? { group } : {}) }, this.identity)
+    if (PRIVATE_KINDS.has(kind) && (group || cid === owner)) throw new Error("Private messages are available only in direct conversations with another person.")
+    const targetId = payload.replyTo ?? payload.targetId
+    const target = targetId ? this.model.messages.find(message => message.conversationId === cid && message.id === targetId) : undefined
+    if (target?.private && (payload.replyTo || kind === "edit" || kind === "pin")) throw new Error("Private messages cannot be replied to, edited, or pinned.")
+    const currentPrivateTtl = this.getPrivateMode(cid)
+    // A mode change while signing/preparing a draft must never downgrade a
+    // private submission into persistent history. Keep the shorter live timer.
+    const ttlSeconds = submittedPrivateTtl && currentPrivateTtl ? Math.min(submittedPrivateTtl, currentPrivateTtl) : submittedPrivateTtl || currentPrivateTtl
+    if (ttlSeconds && ["attachment", "attachment-chunk", "poll"].includes(kind)) throw new Error("Turn off private mode before sending files or polls.")
+    const priorSettingTime = kind === "private-settings" ? Math.max(0, ...this.records.filter(record => record.event.kind === kind && conversationForEvent(record.event, owner) === cid).map(record => record.event.timestamp)) : 0
+    const destroyBefore = privateDestroyCutoffs(this.records, owner)[cid] ?? 0
+    const timestamp = Math.max(startedAt, (preferences.deleted?.[cid]?.deletedAt ?? 0) + 1, priorSettingTime + 1, kind === "private-message" || (kind === "message" && ttlSeconds) ? destroyBefore + 1 : 0, kind === "private-destroy" ? payload.destroyBefore ?? 0 : 0)
+    if (ttlSeconds && kind === "message") {
+      if (payload.replyTo) throw new Error("Replies are unavailable in private mode.")
+      kind = "private-message"
+      payload = { content: payload.content, expiresAt: timestamp + ttlSeconds * 1000 }
+    }
+    const event = await signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: owner, conversationId: cid, recipients, timestamp, kind, payload, ...(group ? { group } : {}) }, this.identity)
     if (!await validateMessagingEvent(event)) throw new Error("This message is invalid or too large.")
     await this.queue(event)
     return event.id
@@ -298,7 +379,7 @@ export class MessagingEngine {
   private async queue(event: MessagingEvent) {
     this.assertActive()
     const saved = await saveStoredEvent(this.identity.publicKey, { key: eventStorageKey(event), event, local: true, delivered: [], receivedAt: Date.now() })
-    if (saved === false) throw new Error("This chat was deleted while the message was being prepared. Send a new message to reopen it.")
+    if (saved === false) throw new Error(event.kind === "private-message" ? "This private message expired or was destroyed while being prepared. Send a new message." : "This chat was deleted while the message was being prepared. Send a new message to reopen it.")
     this.assertActive()
     // Chunks are durable individually, but refreshing the full history after each
     // piece would repeatedly clone an entire large file. Its metadata refreshes
@@ -310,11 +391,36 @@ export class MessagingEngine {
     this.assertActive()
     void this.sync()
   }
-  sendText = (cid: string, text: string, replyTo?: string, mentions?: string[]) => this.sendEvent(cid, "message", { content: text.trim(), ...(replyTo ? { replyTo } : {}), ...(mentions?.length ? { mentions } : {}) })
+  sendText = (cid: string, text: string, replyTo?: string, mentions?: string[], expectedPrivateTtlSeconds?: PrivateTtlSeconds) => {
+    // The composer may still have a private draft when a remote mode change
+    // triggers its next render. Preserve the timer captured by that submission.
+    if (expectedPrivateTtlSeconds) {
+      if (!PRIVATE_DURATIONS.has(expectedPrivateTtlSeconds)) return Promise.reject(new Error("Choose a valid private message expiry."))
+      if (replyTo) return Promise.reject(new Error("Replies are unavailable in private mode."))
+      return this.sendEvent(cid, "private-message", { content: text.trim(), expiresAt: Date.now() + expectedPrivateTtlSeconds * 1000 })
+    }
+    return this.sendEvent(cid, "message", { content: text.trim(), ...(replyTo ? { replyTo } : {}), ...(mentions?.length ? { mentions } : {}) })
+  }
+  setPrivateMode = async (cid: string, ttlSeconds: PrivateTtlSeconds) => {
+    if (!PRIVATE_DURATIONS.has(ttlSeconds)) throw new Error("Choose Off, 5 minutes, 1 hour, or 24 hours.")
+    await this.sendEvent(cid, "private-settings", { ttlSeconds })
+  }
+  destroyPrivateHistory = async (cid: string) => {
+    this.assertActive()
+    // A peer clock can be slightly ahead. Include all currently visible private
+    // content rather than leaving those already-received messages behind.
+    const destroyBefore = Math.max(Date.now(), ...this.model.messages.filter(message => message.conversationId === cid && message.private).map(message => message.timestamp))
+    await this.sendEvent(cid, "private-destroy", { destroyBefore })
+  }
+  sendSecret = async (cid: string, text: string, ttlSeconds = 3600) => {
+    this.assertActive()
+    if (!ttlSeconds || !PRIVATE_DURATIONS.has(ttlSeconds)) return Promise.reject(new Error("Choose an expiry of 5 minutes, 1 hour, or 24 hours."))
+    return this.sendEvent(cid, "private-message", { content: text, expiresAt: Date.now() + ttlSeconds * 1000, secret: true })
+  }
   editMessage = async (cid: string, messageId: string, text: string) => {
     this.assertActive()
     const target = this.model.messages.find(m => m.conversationId === cid && m.id === messageId)
-    if (!target || target.senderPubKey !== this.identity.publicKey || target.attachment || target.poll) throw new Error("You can edit your own text messages.")
+    if (!target || target.senderPubKey !== this.identity.publicKey || target.attachment || target.poll || target.private) throw new Error("You can edit your own ordinary text messages.")
     await this.sendEvent(cid, "edit", { targetId: messageId, content: text.trim() })
   }
   deleteMessage = async (cid: string, messageId: string) => {
@@ -465,6 +571,10 @@ export class MessagingEngine {
             const proof = await createRequestProof("event:send", data, this.identity.privateKey, owner)
             this.assertActive()
             if (isDeletedStoredEvent(record, owner, await getMessagingPreferences(owner))) return
+            if (record.event.kind === "private-message") {
+              const current = await getStoredEvents(owner)
+              if (!current.some(row => row.key === record.key) || isPrivateEventExpired(record, owner, privateDestroyCutoffs(current, owner))) return
+            }
             const result = await storeEncryptedEvent(data, proof)
             this.assertActive()
             if (!result.success && result.retryAfterMs) {

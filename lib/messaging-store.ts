@@ -1,7 +1,8 @@
-import { openDB, type DBSchema } from "idb"
+import { openDB, type DBSchema, type IDBPTransaction } from "idb"
 import { ID_PATTERN, PUBLIC_KEY_PATTERN } from "./protocol"
 import type { MessagingPreferences, MessagingSnapshot, StoredEvent } from "./messaging-types"
 import { isDeletedStoredEvent, legacyMessageKey, mergeConversationDeletions, mergeMessageDeletions, storedConversationId } from "./messaging-history"
+import { isPrivateEventExpired, privateDestroyCutoffs, privateMessageTarget } from "./private-messaging"
 export { isDeletedConversationEvent } from "./messaging-history"
 
 interface MessagingDB extends DBSchema {
@@ -17,25 +18,102 @@ async function database(owner: string) {
   return openDB<MessagingDB>(`serotine-events:${owner}`, 1, { upgrade(db) { db.createObjectStore("events", { keyPath: "key" }); db.createObjectStore("metadata") } })
 }
 export function eventStorageKey(event: { author: string; conversationId: string; id: string }) { return `${event.author}:${event.conversationId}:${event.id}` }
+type EventTransaction = IDBPTransaction<MessagingDB, ["events", "metadata"], "readwrite">
+const verifiedPrivate = new Map<string, string>()
+async function validatePrivateRecord(record: StoredEvent, owner: string) {
+  if (record.legacy || record.key !== eventStorageKey(record.event) || (record.event.author !== owner && !record.event.recipients.includes(owner))) return false
+  // Private content must never survive in a module-level validation cache.
+  const text = record.event.kind === "private-message" ? undefined : JSON.stringify(record.event)
+  if (text !== undefined && verifiedPrivate.get(record.event.signature) === text) return true
+  const { validateMessagingEvent } = await import("./messaging")
+  if (!await validateMessagingEvent(record.event)) return false
+  if (verifiedPrivate.size >= 2000) verifiedPrivate.clear()
+  if (text !== undefined) verifiedPrivate.set(record.event.signature, text)
+  return true
+}
+function mergeCutoffs(left: Record<string, number>, right: Record<string, number>) {
+  const result = { ...left }
+  for (const [cid, time] of Object.entries(right)) result[cid] = Math.max(result[cid] ?? 0, time)
+  return result
+}
+async function privateState(tx: EventTransaction) {
+  return {
+    cutoffs: (await tx.objectStore("metadata").get("private-cutoffs") ?? {}) as Record<string, number>,
+    targets: new Set((await tx.objectStore("metadata").get("private-targets") ?? []) as string[]),
+  }
+}
+function privateEdit(record: StoredEvent, owner: string, targets: Set<string>) {
+  return record.event.kind === "edit" && !!record.event.payload.targetId && targets.has(privateMessageTarget(record, owner, record.event.payload.targetId))
+}
+async function savePrivateState(tx: EventTransaction, state: Awaited<ReturnType<typeof privateState>>) {
+  await tx.objectStore("metadata").put(state.cutoffs, "private-cutoffs")
+  await tx.objectStore("metadata").put([...state.targets], "private-targets")
+}
+async function readPrunedEvents(owner: string, now: number) {
+  const db = await database(owner)
+  let removed = 0
+  try {
+    // Signature work must finish before opening the write transaction. IndexedDB
+    // transactions auto-close while unrelated asynchronous crypto is running.
+    const initial = await db.getAll("events")
+    const validPrivate: StoredEvent[] = []
+    for (const record of initial) if (record.event.kind.startsWith("private-") && await validatePrivateRecord(record, owner)) validPrivate.push(record)
+    const tx = db.transaction(["events", "metadata"], "readwrite")
+    try {
+      const state = await privateState(tx)
+      const cutoffs = mergeCutoffs(state.cutoffs, privateDestroyCutoffs(validPrivate, owner))
+      const targets = new Set([...state.targets, ...validPrivate.filter(record => record.event.kind === "private-message").map(record => privateMessageTarget(record, owner))])
+      const records = await tx.objectStore("events").getAll()
+      const retained: StoredEvent[] = []
+      for (const record of records) {
+        if (isPrivateEventExpired(record, owner, cutoffs, now) || privateEdit(record, owner, targets)) {
+          await tx.objectStore("events").delete(record.key); removed++
+        } else retained.push(record)
+      }
+      if (targets.size !== state.targets.size || JSON.stringify(cutoffs) !== JSON.stringify(state.cutoffs)) await savePrivateState(tx, { cutoffs, targets })
+      await tx.done
+      return { records: retained, removed }
+    } catch (error) { try { tx.abort() } catch { /* Already closed. */ } await tx.done.catch(() => {}); throw error }
+  } finally { db.close() }
+}
+
+/** Physically remove expired payloads, including when an idle tab resumes. */
+export async function pruneExpiredPrivateEvents(owner: string, now = Date.now()): Promise<number> {
+  const { removed } = await readPrunedEvents(owner, now)
+  if (removed) changed(owner)
+  return removed
+}
 function changed(owner: string) {
   if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("serotine:events", { detail: { owner } }))
 }
 export async function getStoredEvents(owner: string): Promise<StoredEvent[]> {
-  const db = await database(owner)
-  try { return await db.getAll("events") } finally { db.close() }
+  return (await readPrunedEvents(owner, Date.now())).records
 }
 export async function saveStoredEvent(owner: string, record: StoredEvent) {
+  // Callers cannot establish a destructive boundary using an unverified event.
+  if (record.event.kind.startsWith("private-") && !await validatePrivateRecord(record, owner)) throw new Error("The private conversation event is invalid.")
   const db = await database(owner)
   try {
     const tx = db.transaction(["events", "metadata"], "readwrite")
     try {
     const preferences = withDefaults(await tx.objectStore("metadata").get("preferences") as Partial<MessagingPreferences> | undefined)
+    const existing = await tx.objectStore("events").get(record.key)
+    // Check before a destruction event can remove the conflicting original.
+    if (existing && JSON.stringify(existing.event) !== JSON.stringify(record.event)) throw new Error("Conflicting message identifier.")
+    if (record.event.kind.startsWith("private-") || record.event.kind === "edit") {
+      const state = await privateState(tx)
+      if (record.event.kind === "private-message") state.targets.add(privateMessageTarget(record, owner))
+      if (record.event.kind === "private-destroy") state.cutoffs = mergeCutoffs(state.cutoffs, privateDestroyCutoffs([record], owner))
+      if (record.event.kind === "private-message" || record.event.kind === "private-destroy") {
+        await savePrivateState(tx, state)
+        for (const existing of await tx.objectStore("events").getAll()) if (isPrivateEventExpired(existing, owner, state.cutoffs) || privateEdit(existing, owner, state.targets)) await tx.objectStore("events").delete(existing.key)
+      }
+      if (isPrivateEventExpired(record, owner, state.cutoffs) || privateEdit(record, owner, state.targets)) { await tx.done; return false }
+    }
     // Check and write in one transaction: an old relay response or retry cannot
     // put deleted content back after the delete transaction has committed.
     if (isDeletedStoredEvent(record, owner, preferences)) { await tx.done; return false }
-    const existing = await tx.objectStore("events").get(record.key)
     // An event is immutable. A retry may only add per-recipient confirmations.
-    if (existing && JSON.stringify(existing.event) !== JSON.stringify(record.event)) throw new Error("Conflicting message identifier.")
     const value = existing ? { ...existing, ...record, local: existing.local || record.local, receivedAt: Math.min(existing.receivedAt, record.receivedAt), sequence: existing.sequence === undefined ? record.sequence : record.sequence === undefined ? existing.sequence : Math.min(existing.sequence, record.sequence), delivered: [...new Set([...existing.delivered, ...record.delivered])] } : record
     await tx.objectStore("events").put(value)
     await tx.done
@@ -68,7 +146,11 @@ export async function saveSyncCursor(owner: string, cursor: number) {
 }
 export async function exportMessagingSnapshot(owner: string): Promise<MessagingSnapshot> {
   const [events, preferences] = await Promise.all([getStoredEvents(owner), getMessagingPreferences(owner)])
-  return { version: 3, owner, events: events.filter(record => !isDeletedStoredEvent(record, owner, preferences)), preferences }
+  // Excluding orphan edits also prevents a late private edit from being copied
+  // into a backup after its original private message has already disappeared.
+  const publicTargets = new Set(events.filter(record => record.event.kind === "message").map(record => privateMessageTarget(record, owner)))
+  return { version: 3, owner, events: events.filter(record => record.event.kind !== "private-message" && !isDeletedStoredEvent(record, owner, preferences)
+    && (record.event.kind !== "edit" || !!record.event.payload.targetId && publicTargets.has(privateMessageTarget(record, owner, record.event.payload.targetId)))), preferences }
 }
 export async function deleteStoredConversation(owner: string, cid: string) {
   if (!validConversation(cid)) throw new Error("Choose a valid conversation.")
@@ -83,7 +165,7 @@ export async function deleteStoredConversation(owner: string, cid: string) {
       const conversation = model.conversations.find(c => c.id === cid)
       const group = model.groups.find(g => g.id === cid)
       const prior = preferences.deleted[cid]
-      const removed = records.filter(record => storedConversationId(record, owner) === cid && !((record.event.kind === "group" || record.event.kind === "leave") && record.local && record.event.recipients.some(peer => !record.delivered.includes(peer))))
+      const removed = records.filter(record => storedConversationId(record, owner) === cid && record.event.kind !== "private-destroy" && record.event.kind !== "private-settings" && !((record.event.kind === "group" || record.event.kind === "leave") && record.local && record.event.recipients.some(peer => !record.delivered.includes(peer))))
       const attachmentIds = [...new Set([...(prior?.attachmentIds ?? []), ...removed.flatMap(record => { const id = record.event.payload.attachmentId ?? record.event.payload.attachment?.id; return id ? [id] : [] })])]
       const deletion = { deletedAt: Math.max(Date.now(), prior?.deletedAt ?? 0), eventKeys: [...new Set([...(prior?.eventKeys ?? []), ...removed.map(record => record.key)])], attachmentIds, ...(group ? { group, leftMembers: conversation ? group.members.filter(member => !conversation.members.includes(member)) : prior?.leftMembers ?? [] } : {}) }
       for (const record of removed) await tx.objectStore("events").delete(record.key)
@@ -200,13 +282,18 @@ export async function importMessagingSnapshot(owner: string, value: MessagingSna
     const savedPreferences = await tx.objectStore("metadata").get("preferences") as Partial<MessagingPreferences> | undefined
     const old = withDefaults(savedPreferences)
     const preferences = savedPreferences ? { ...snapshot.preferences, ...old, accepted: [...new Set([...snapshot.preferences.accepted, ...old.accepted])], blocked: [...new Set([...snapshot.preferences.blocked, ...old.blocked])], notifications: { ...snapshot.preferences.notifications, ...old.notifications }, readAt: { ...snapshot.preferences.readAt, ...old.readAt }, archived: [...new Set([...snapshot.preferences.archived, ...old.archived])], deleted: mergeConversationDeletions(snapshot.preferences.deleted, old.deleted), deletedMessages: mergeMessageDeletions(snapshot.preferences.deletedMessages, old.deletedMessages) } : snapshot.preferences
-    for (const record of await tx.objectStore("events").getAll()) if (isDeletedStoredEvent(record, owner, preferences)) await tx.objectStore("events").delete(record.key)
+    const state = await privateState(tx)
+    state.cutoffs = mergeCutoffs(state.cutoffs, privateDestroyCutoffs(snapshot.events, owner))
+    for (const record of snapshot.events) if (record.event.kind === "private-message") state.targets.add(privateMessageTarget(record, owner))
+    // Imports cannot extend private lifetimes or bring private edit text back.
+    for (const record of await tx.objectStore("events").getAll()) if (isDeletedStoredEvent(record, owner, preferences) || isPrivateEventExpired(record, owner, state.cutoffs) || privateEdit(record, owner, state.targets)) await tx.objectStore("events").delete(record.key)
     for (const record of snapshot.events) {
-      if (isDeletedStoredEvent(record, owner, preferences)) continue
+      if (record.event.kind === "private-message" || isDeletedStoredEvent(record, owner, preferences) || privateEdit(record, owner, state.targets)) continue
       const existing = await tx.objectStore("events").get(record.key)
       if (existing && JSON.stringify(existing.event) !== JSON.stringify(record.event)) throw new Error("The backup conflicts with a saved message.")
       await tx.objectStore("events").put(existing ? { ...record, local: existing.local || record.local, delivered: [...new Set([...existing.delivered, ...record.delivered])] } : record)
     }
+    if (snapshot.events.some(record => record.event.kind.startsWith("private-"))) await savePrivateState(tx, state)
     await tx.objectStore("metadata").put(preferences, "preferences")
     // The receiving device must scan the retained feed for itself.
     await tx.objectStore("metadata").put(0, "cursor")

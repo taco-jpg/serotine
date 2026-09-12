@@ -8,6 +8,7 @@ import { conversationHref } from "@/lib/conversation-route"
 
 export function messagePreview(message?: MessageRecord): string {
   if (!message) return "Start a conversation"
+  if (message.private) return message.expiresAt && message.expiresAt <= Date.now() ? "Private message expired" : message.secret ? "Private access key" : "Private message"
   if (message.attachment?.kind === "voice") return message.content || "Voice message"
   if (message.attachment) return [message.attachment.name, message.content].filter(Boolean).join(" · ")
   if (message.poll) return `Poll: ${message.poll.question}`

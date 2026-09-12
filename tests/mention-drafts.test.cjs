@@ -10,7 +10,7 @@ const span = { publicKey: keyA, start: 0, end: 6, text: '@Alice' }
 
 function harness(storage = new Map(), options = {}) {
   const slots = [], effects = []
-  let cursor = 0, owner = 'owner', peer = 'group:test', content = '', ready = false
+  let cursor = 0, owner = 'owner', peer = 'group:test', content = '', ready = false, persistent = true
   const react = {
     useState(initial) {
       const index = cursor++
@@ -46,12 +46,13 @@ function harness(storage = new Map(), options = {}) {
   const hook = load(path.join(__dirname, '../hooks/use-mention-draft.ts')).useMentionDraft
   function view() {
     cursor = 0
-    const result = hook(owner, peer, content, ready)
+    const result = hook(owner, peer, content, ready, persistent)
     while (effects.length) effects.shift()()
     return result
   }
   return {
     view,
+    privacy(enabled) { persistent = !enabled; view(); return view() },
     show(nextContent, nextReady = true) { content = nextContent; ready = nextReady; view(); return view() },
     navigate(nextOwner, nextPeer, nextContent) { owner = nextOwner; peer = nextPeer; return this.show(nextContent) },
     save(nextText, spans, revision = crypto.randomUUID()) {
@@ -111,4 +112,15 @@ test('blocked storage keeps current-tab mentions usable and malformed records ne
     ] })],
   ])
   assert.deepEqual(harness(storage).show(text).mentionSpans, [])
+})
+
+test('private mode removes persisted mention sidecars and never saves private text', () => {
+  const storage = new Map(), h = harness(storage)
+  h.show(''); h.save(text, [span])
+  assert.ok(storage.has('serotine_mention_draft:owner:group:test'))
+  assert.deepEqual(h.privacy(true).mentionSpans, [])
+  assert.equal(storage.has('serotine_mention_draft:owner:group:test'), false)
+  h.view().saveMentionDraft('@Alice a private credential', [span])
+  assert.equal(storage.has('serotine_mention_draft:owner:group:test'), false)
+  assert.deepEqual(h.view().mentionSpans, [])
 })

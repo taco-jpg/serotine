@@ -43,7 +43,7 @@ function inlineContent(text: string, highlight: string): ReactNode[] {
     const index = match.index!
     nodes.push(<Fragment key={`text-${index}`}>{linkedText(text.slice(start, index), highlight)}</Fragment>)
     if (match[5] !== undefined) {
-      nodes.push(<code key={`code-${index}`} className="rounded bg-black/10 px-1 py-0.5 font-mono text-[0.9em] dark:bg-white/10"><MessageText content={match[5]} query={highlight} /></code>)
+      nodes.push(<code key={`code-${index}`} className="rounded bg-current/10 px-1 py-0.5 font-mono text-[0.9em]"><MessageText content={match[5]} query={highlight} /></code>)
     } else if (renderedMath++ < 64) {
       const expression = match[1] ?? match[2] ?? match[3] ?? match[4]
       const displayMode = match[1] !== undefined || match[2] !== undefined
@@ -72,7 +72,7 @@ export function RichMessage({ text, highlight = "", className = "" }: { text: st
     const index = match.index!
     nodes.push(<Fragment key={`text-${index}`}>{inlineContent(text.slice(start, index), highlight)}</Fragment>)
     const language = /^[\w#+.-]{1,30}$/.test(match[1].trim()) ? match[1].trim() : "code"
-    nodes.push(<div key={`fence-${index}`} className="my-2 min-w-0 overflow-hidden rounded-lg border border-current/15 bg-black/10 dark:bg-black/25">
+    nodes.push(<div key={`fence-${index}`} className="my-2 min-w-0 overflow-hidden rounded-lg border border-current/15 bg-current/5">
       <div className="border-b border-current/10 px-3 py-1 font-sans text-xs opacity-70">{language}</div>
       <pre className="max-w-full overflow-x-auto p-3 text-xs leading-relaxed" tabIndex={0} aria-label={`${language} code`}><code><MessageText content={match[2].replace(/\n$/, "")} query={highlight} /></code></pre>
     </div>)

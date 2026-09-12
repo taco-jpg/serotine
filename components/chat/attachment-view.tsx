@@ -46,7 +46,7 @@ export function AttachmentView({ metadata, chunks }: { metadata: AttachmentMeta;
     {url && !previewFailed && <>
       {preview === "image" && <Dialog key={url}>
         <DialogTrigger asChild><button type="button" aria-label={`Enlarge ${name}`} className="group relative block w-full cursor-zoom-in overflow-hidden rounded-lg bg-black/10 focus-visible:outline-2 focus-visible:outline-offset-2">
-          <img src={url} alt={name} loading="lazy" decoding="async" className="block max-h-[min(28rem,65dvh)] w-full object-contain" onError={() => setFailedPreviewUrl(url)} />
+          <img src={url} alt={name} loading="lazy" decoding="async" className="block max-h-[min(20rem,45dvh)] w-full object-contain" onError={() => setFailedPreviewUrl(url)} />
           <span aria-hidden="true" className="absolute bottom-2 right-2 flex items-center gap-1 rounded-md bg-black/65 px-2 py-1 text-xs text-white"><Maximize2 className="size-3" />Enlarge</span>
         </button></DialogTrigger>
         <DialogContent className="max-w-6xl gap-3 p-3 sm:p-4">
@@ -55,7 +55,7 @@ export function AttachmentView({ metadata, chunks }: { metadata: AttachmentMeta;
           <a href={url} download={name} className="inline-flex min-h-11 w-fit items-center gap-2 rounded-md px-2 text-sm underline underline-offset-4 focus-visible:outline-2"><Download className="size-4" aria-hidden="true" />Download original</a>
         </DialogContent>
       </Dialog>}
-      {preview === "video" && <video controls playsInline preload="metadata" src={url} aria-label={`Play ${name}`} className="block max-h-[min(28rem,65dvh)] w-full rounded-lg bg-black object-contain" onError={() => setFailedPreviewUrl(url)}>Your browser cannot play this video. Download it below.</video>}
+      {preview === "video" && <video controls playsInline preload="metadata" src={url} aria-label={`Play ${name}`} className="block max-h-[min(20rem,45dvh)] w-full rounded-lg bg-black object-contain" onError={() => setFailedPreviewUrl(url)}>Your browser cannot play this video. Download it below.</video>}
       {preview === "audio" && <audio controls preload="metadata" src={url} aria-label={metadata.kind === "voice" ? "Play voice message" : `Play ${name}`} className="w-full max-w-full" onError={() => setFailedPreviewUrl(url)}>Your browser cannot play this audio. Download it below.</audio>}
     </>}
     {previewFailed && <p role="status" className="px-1 text-xs">This {preview} cannot be previewed in your browser. You can still download the original below.</p>}

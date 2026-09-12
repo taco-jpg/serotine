@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { FolderPlus, Mic, Paperclip, Send, Settings2, Square, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { MAX_FILE_BYTES, attachmentPreviewKind, formatFileSize, safeFilename, validateAttachmentFile, type AttachmentKind, type AttachmentProgress } from "@/lib/attachments"
@@ -15,13 +15,15 @@ const RECORDING_LIMIT_SECONDS = 300
 const MAX_QUEUED_FILES = 8
 type PendingFile = { file: File; kind: AttachmentKind; originalBytes?: number }
 
-export function AttachmentComposer({ owner = "", disabled = false, captureRef, pasteRef, onSend, onSelectGif }: {
+export function AttachmentComposer({ owner = "", disabled = false, captureRef, pasteRef, onSend, onSelectGif, extraActions, toolbarHint }: {
   owner?: string
   disabled?: boolean
   captureRef?: RefObject<HTMLDivElement | null>
   pasteRef?: RefObject<HTMLTextAreaElement | null>
   onSend: (file: File, kind: AttachmentKind, onProgress?: AttachmentProgress) => Promise<unknown>
   onSelectGif?: (url: string) => void
+  extraActions?: ReactNode
+  toolbarHint?: ReactNode
 }) {
   const input = useRef<HTMLInputElement>(null)
   const localTarget = useRef<HTMLDivElement>(null)
@@ -230,7 +232,7 @@ export function AttachmentComposer({ owner = "", disabled = false, captureRef, p
   }
 
   const unavailable = disabled || busy || preparing || recording || requesting
-  return <div ref={localTarget} className={`min-w-0 space-y-2 rounded-lg p-1 ${dragging ? "bg-accent ring-2 ring-primary" : ""}`}>
+  return <div ref={localTarget} className={`min-w-0 space-y-2 rounded-lg ${dragging ? "bg-accent ring-2 ring-primary" : ""}`}>
     <input ref={input} type="file" multiple className="hidden" aria-label="Choose attachments" disabled={unavailable} onChange={event => { void chooseFiles(Array.from(event.target.files || [])); event.target.value = "" }} />
     <div className="flex flex-wrap items-center gap-1">
       <Button type="button" variant="ghost" size="icon" aria-label="Attach files" title="Attach files" disabled={unavailable} onClick={() => input.current?.click()}><Paperclip aria-hidden="true" className="size-4" /></Button>
@@ -238,9 +240,11 @@ export function AttachmentComposer({ owner = "", disabled = false, captureRef, p
       {owner && <FileBankPicker owner={owner} disabled={unavailable} onSelectFile={async file => { if (!await chooseFiles([file])) throw new Error("Unable to queue this file. Send or remove a queued file, then try again.") }} />}
       <Button type="button" variant="ghost" size="icon" aria-label="Record voice message" title="Record voice message" disabled={unavailable || queue.length > 0} onClick={() => void startRecording()}><Mic aria-hidden="true" className="size-4" /></Button>
       <Button type="button" variant="ghost" size="icon" aria-label="Attachment settings" title="Attachment settings" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(value => !value)}><Settings2 aria-hidden="true" className="size-4" /></Button>
+      {extraActions}
       {!!queue.length && <span className="ml-1 text-xs text-muted-foreground">{queue.length} queued</span>}
+      {toolbarHint && <div className="ml-auto text-xs text-muted-foreground">{toolbarHint}</div>}
     </div>
-    <div className={settingsOpen ? "space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/60 p-3" : "sr-only"}>
+    <div className={settingsOpen ? "space-y-2 rounded-lg border border-border bg-card p-3" : "sr-only"}>
       <p className="text-xs text-muted-foreground">Files up to {formatFileSize(MAX_FILE_BYTES)} each. You can also drop files into the chat or paste them into the message box.</p>
       <AutoCompactFilesSetting enabled={autoCompact} onChange={setAutoCompact} disabled={unavailable} />
     </div>

@@ -39,7 +39,7 @@ export function IdentitySecurity({ identity, onBusyChange }: { identity: Identit
       <p className="mb-1 font-medium">Address being retired</p>
       <p className="break-all font-mono select-all">{identity.publicKey}</p>
     </div>
-    {error && <p role="alert" className="rounded-md border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-300">{error}</p>}
+    {error && <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
     <label htmlFor={`${id}-confirm`} className="flex items-start gap-3 text-sm">
       <input id={`${id}-confirm`} type="checkbox" className="mt-1 size-4 shrink-0" checked={confirmed} disabled={busy} onChange={event => setConfirmed(event.target.checked)} />
       <span>I understand this permanently disables my old address on this server and my linked devices must use a new backup.</span>

@@ -10,7 +10,7 @@ export function IdentityIcon({ pubKey, size = 32 }: { pubKey: string, size?: num
   }, []);
 
   if (!mounted || !pubKey) {
-    return <div className="rounded-full bg-zinc-900 border border-zinc-800 flex-shrink-0" style={{ width: size, height: size }} />;
+    return <div className="rounded-full bg-muted border border-border flex-shrink-0" style={{ width: size, height: size }} />;
   }
   
   // Simple deterministic color generation from pubKey hex string
@@ -21,7 +21,7 @@ export function IdentityIcon({ pubKey, size = 32 }: { pubKey: string, size?: num
   
   return (
     <div 
-      className="rounded-full overflow-hidden border border-zinc-800 flex-shrink-0 shadow-sm flex items-center justify-center p-1"
+      className="rounded-full overflow-hidden border border-border flex-shrink-0 shadow-sm flex items-center justify-center p-1"
       style={{ 
         width: size, 
         height: size,

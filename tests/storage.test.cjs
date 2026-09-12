@@ -43,7 +43,7 @@ function harness() {
           },
         },
         get done() {
-          if (options.failCommit) reject(new Error('Transaction aborted'))
+          if (options.failCommit || options.failCommitForName === name) reject(new Error('Transaction aborted'))
           else {
             for (const key of removed) rows.delete(key)
             for (const [key, row] of staged) rows.set(key, row)
@@ -175,4 +175,70 @@ test('only the migration owner can remove matching old shared history and attach
   h.local.set('serotine_legacy_history_owner', owner)
   await h.deleteConversationHistoryFromStorage(owner, peer, 100)
   assert.deepEqual([...h.rows.values()], [fresh, unrelated])
+})
+
+test('deleting one message removes its files while preserving other owners, peers and senders with the same ID', async () => {
+  const h = harness(), other = '04' + 'c'.repeat(128)
+  const original = { ...message('sent'), attachments: [{ name: 'private.txt', type: 'text/plain', size: 1, data: 'YQ==' }] }
+  const received = { ...original, senderPubKey: peer, delivery: 'received' }
+  const unrelatedPeer = { ...original, peerPubKey: other }
+  const anotherMessage = message('sent')
+  await h.saveMessageToStorage(owner, original)
+  await h.saveMessageToStorage(owner, received)
+  await h.saveMessageToStorage(owner, unrelatedPeer)
+  await h.saveMessageToStorage(owner, anotherMessage)
+  await h.saveMessageToStorage(other, original)
+  h.notifications.length = 0
+  await h.deleteMessageHistoryFromStorage(owner, peer, owner, original.id)
+  assert.deepEqual([...h.rows.values()], [received, unrelatedPeer, anotherMessage, original])
+  assert.deepEqual(h.notifications, [[owner, peer]])
+  await h.deleteMessageHistoryFromStorage(owner, peer, owner, original.id)
+  assert.deepEqual(h.notifications, [[owner, peer]], 'repeating a deletion does not emit a spurious change')
+})
+
+test('single-message shared cleanup requires its migration owner and matches normalized sender, peer and ID', async () => {
+  const h = harness(), other = '04' + 'c'.repeat(128)
+  const original = { ...message('received'), senderPubKey: peer, peerPubKey: owner,
+    attachments: [{ name: 'old.txt', type: 'text/plain', size: 1, data: 'YQ==' }] }
+  const sent = { ...original, senderPubKey: owner, peerPubKey: peer, delivery: 'sent' }
+  const anotherPeer = { ...original, senderPubKey: other }
+  const anotherMessage = { ...original, id: crypto.randomUUID() }
+  // The original database used a different primary-key shape.
+  for (const [index, row] of [original, sent, anotherPeer, anotherMessage].entries()) h.rows.set('chat-storage:' + index, row)
+  await h.deleteMessageHistoryFromStorage(owner, peer, peer, original.id)
+  h.local.set('serotine_legacy_history_owner', other)
+  await h.deleteMessageHistoryFromStorage(owner, peer, peer, original.id)
+  assert.equal(h.opened.includes('chat-storage'), false)
+  assert.equal(h.rows.size, 4)
+  assert.deepEqual(h.notifications, [])
+  h.local.set('serotine_legacy_history_owner', owner)
+  await h.deleteMessageHistoryFromStorage(owner, peer, peer, original.id)
+  assert.deepEqual([...h.rows.values()], [sent, anotherPeer, anotherMessage])
+  assert.deepEqual(h.notifications, [[owner, peer]])
+  await h.deleteMessageHistoryFromStorage(owner, peer, owner, original.id)
+  assert.deepEqual([...h.rows.values()], [anotherPeer, anotherMessage])
+})
+
+test('a failed single-message commit leaves its bytes intact and emits no history change', async () => {
+  const h = harness(), original = { ...message('sent'), attachments: [{ name: 'private.txt', type: 'text/plain', size: 1, data: 'YQ==' }] }
+  await h.saveMessageToStorage(owner, original)
+  h.notifications.length = 0; h.options.failCommit = true
+  await assert.rejects(h.deleteMessageHistoryFromStorage(owner, peer, owner, original.id), /aborted/)
+  assert.deepEqual([...h.rows.values()], [original])
+  assert.deepEqual(h.notifications, [])
+})
+
+test('a failed shared single-message commit emits no success notification and can be retried', async () => {
+  const h = harness(), original = message('sent')
+  await h.saveMessageToStorage(owner, original)
+  h.rows.set('chat-storage:' + original.id, original)
+  h.local.set('serotine_legacy_history_owner', owner)
+  h.notifications.length = 0; h.options.failCommitForName = 'chat-storage'
+  await assert.rejects(h.deleteMessageHistoryFromStorage(owner, peer, owner, original.id), /aborted/)
+  assert.deepEqual([...h.rows.values()], [original])
+  assert.deepEqual(h.notifications, [])
+  h.options.failCommitForName = undefined
+  await h.deleteMessageHistoryFromStorage(owner, peer, owner, original.id)
+  assert.equal(h.rows.size, 0)
+  assert.deepEqual(h.notifications, [[owner, peer]])
 })

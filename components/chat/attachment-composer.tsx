@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
-import { Mic, Paperclip, Send, Square, X } from "lucide-react"
+import { Mic, Paperclip, Send, Settings2, Square, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { MAX_FILE_BYTES, attachmentPreviewKind, formatFileSize, safeFilename, validateAttachmentFile, type AttachmentKind, type AttachmentProgress } from "@/lib/attachments"
 import { bindFileInputEvents } from "./file-input-events"
@@ -40,6 +40,7 @@ export function AttachmentComposer({ disabled = false, captureRef, pasteRef, onS
   const [seconds, setSeconds] = useState(0)
   const [dragging, setDragging] = useState(false)
   const [preparing, setPreparing] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [autoCompact, setAutoCompact] = useAutoCompactFiles()
 
   function releaseMicrophone(expectedStream = stream.current) {
@@ -212,11 +213,15 @@ export function AttachmentComposer({ disabled = false, captureRef, pasteRef, onS
   return <div ref={localTarget} className={`min-w-0 space-y-2 rounded-lg p-1 ${dragging ? "bg-accent ring-2 ring-primary" : ""}`}>
     <input ref={input} type="file" multiple className="hidden" aria-label="Choose attachments" disabled={unavailable} onChange={event => { void chooseFiles(Array.from(event.target.files || [])); event.target.value = "" }} />
     <div className="flex flex-wrap items-center gap-1">
-      <Button type="button" variant="ghost" size="sm" disabled={unavailable} onClick={() => input.current?.click()}><Paperclip aria-hidden="true" />Attach</Button>
-      <Button type="button" variant="ghost" size="sm" disabled={unavailable || queue.length > 0} onClick={() => void startRecording()}><Mic aria-hidden="true" />Voice</Button>
-      <span className="text-xs text-muted-foreground">Up to {formatFileSize(MAX_FILE_BYTES)} each<span className="hidden sm:inline"> · drop files into the chat or paste into the message box</span></span>
+      <Button type="button" variant="ghost" size="icon" aria-label="Attach files" title="Attach files" disabled={unavailable} onClick={() => input.current?.click()}><Paperclip aria-hidden="true" className="size-4" /></Button>
+      <Button type="button" variant="ghost" size="icon" aria-label="Record voice message" title="Record voice message" disabled={unavailable || queue.length > 0} onClick={() => void startRecording()}><Mic aria-hidden="true" className="size-4" /></Button>
+      <Button type="button" variant="ghost" size="icon" aria-label="Attachment settings" title="Attachment settings" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(value => !value)}><Settings2 aria-hidden="true" className="size-4" /></Button>
+      {!!queue.length && <span className="ml-1 text-xs text-muted-foreground">{queue.length} queued</span>}
     </div>
-    <AutoCompactFilesSetting enabled={autoCompact} onChange={setAutoCompact} disabled={unavailable} />
+    <div className={settingsOpen ? "space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/60 p-3" : "sr-only"}>
+      <p className="text-xs text-muted-foreground">Files up to {formatFileSize(MAX_FILE_BYTES)} each. You can also drop files into the chat or paste them into the message box.</p>
+      <AutoCompactFilesSetting enabled={autoCompact} onChange={setAutoCompact} disabled={unavailable} />
+    </div>
     {preparing && <p role="status" className="text-xs text-muted-foreground">Preparing attachments…</p>}
     {dragging && <p role="status" className="text-sm font-medium">Drop files to preview before sending</p>}
     {(requesting || recording) && <div className="flex flex-wrap items-center gap-2 rounded-lg border p-2">

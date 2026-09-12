@@ -225,3 +225,50 @@ test('departed members cannot replace historical attachment chunks with old-epoc
   assert.equal(engine.authorizedKeys.has(eventStorageKey(replacement)), false)
   assert.deepEqual(engine.getAttachmentChunks(g.id, meta.id), [{ index: 0, data: 'QQ==' }])
 })
+
+test('old preferences remain readable and archived unknown groups stay out of requests', async () => {
+  const [alice, bob] = await Promise.all([identity(), identity()])
+  const g = await group(bob, [bob, alice]), incoming = await event(bob, g)
+  const old = { accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true }
+  const initial = model([incoming], alice, old)
+  assert.equal(initial.conversations.find(c => c.id === g.id).archived, false)
+  assert.equal(initial.requests.length, 1)
+  const archived = model([incoming], alice, { ...old, archived: [g.id] })
+  assert.equal(archived.conversations.find(c => c.id === g.id).archived, true)
+  assert.equal(archived.requests.length, 0)
+  assert.equal(archived.messages[0].id, incoming.id)
+})
+
+test('deletion hides retained contact shells, rejects old history, and reopens only for fresh content', async () => {
+  const [alice, bob] = await Promise.all([identity(), identity()])
+  const old = await event(bob, alice.publicKey), deletedAt = Date.now()
+  const p = { ...defaultMessagingPreferences(), accepted: [bob.publicKey], deleted: { [bob.publicKey]: { deletedAt, eventKeys: [eventStorageKey(old)] } } }
+  const contacts = [{ pub: bob.publicKey, alias: 'Bob' }]
+  const controls = await event(bob, alice.publicKey, 'receipt', { targetId: old.id, receipt: 'read' }, { timestamp: deletedAt + 1 })
+  const hidden = messaging.buildMessagingModel([record(old, alice), record(controls, alice)], alice.publicKey, contacts, p)
+  assert.equal(hidden.conversations.some(c => c.id === bob.publicKey), false)
+  assert.deepEqual(hidden.messages, [])
+  const fresh = await event(bob, alice.publicKey, 'message', { content: 'Fresh conversation' }, { timestamp: deletedAt + 2 })
+  const reopened = messaging.buildMessagingModel([record(old, alice), record(controls, alice), record(fresh, alice)], alice.publicKey, contacts, p)
+  assert.deepEqual(reopened.messages.map(m => m.id), [fresh.id])
+  assert.equal(reopened.conversations.find(c => c.id === bob.publicKey).name, 'Bob')
+  assert.deepEqual(contacts, [{ pub: bob.publicKey, alias: 'Bob' }])
+})
+
+test('deleted group checkpoints preserve departures and prevent administrator substitution', async () => {
+  const [alice, bob, mallory] = await Promise.all([identity(), identity(), identity()])
+  const g = await group(alice, [alice, bob]), deletedAt = Date.now()
+  const p = { ...defaultMessagingPreferences(), deleted: { [g.id]: { deletedAt, eventKeys: [], group: g, leftMembers: [bob.publicKey] } } }
+  const after = await event(alice, g, 'message', { content: 'After Bob left' }, { timestamp: deletedAt + 1 })
+  const hijack = await group(mallory, [mallory, bob], { id: g.id, epoch: 99 })
+  const forged = await event(mallory, hijack, 'message', { content: 'Wrong administrator' }, { timestamp: deletedAt + 2 })
+  const state = model([after, forged], bob, p)
+  assert.deepEqual(state.messages, [])
+  assert.equal(state.conversations.some(c => c.id === g.id), false)
+  assert.equal(state.groups.find(group => group.id === g.id).admin, alice.publicKey)
+  const rejoined = await group(alice, [alice, bob], { id: g.id, epoch: 2, updatedAt: deletedAt + 3 })
+  const welcome = await event(alice, rejoined, 'message', { content: 'Welcome back' }, { timestamp: deletedAt + 4 })
+  const restored = model([after, forged, welcome], bob, p)
+  assert.deepEqual(restored.messages.map(m => m.id), [welcome.id])
+  assert.ok(restored.conversations.find(c => c.id === g.id).members.includes(bob.publicKey))
+})

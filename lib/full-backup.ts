@@ -1,8 +1,8 @@
 import { base64ToArrayBuffer } from "./crypto"
 import { type Contact, type Identity, type RestoreIdentityOptions, loadContacts, restoreIdentityBackup, restoreValidatedIdentity, saveContacts, validateAddress, validateIdentity } from "./identity"
-import { exportAllMessagesFromStorage, importMessagesToStorage, migrateLegacyHistory, type StoredMessage, validateStoredMessages } from "./storage"
-import { exportMessagingSnapshot, importMessagingSnapshot, validateMessagingSnapshot } from "./messaging-store"
-import type { MessagingSnapshot } from "./messaging-types"
+import { deleteConversationHistoryFromStorage, exportAllMessagesFromStorage, importMessagesToStorage, migrateLegacyHistory, type StoredMessage, validateStoredMessages } from "./storage"
+import { exportMessagingSnapshot, getMessagingPreferences, importMessagingSnapshot, validateMessagingSnapshot } from "./messaging-store"
+import type { MessagingPreferences, MessagingSnapshot } from "./messaging-types"
 
 export const MAX_BACKUP_FILE_BYTES = 100 * 1024 * 1024
 const MAX_PLAINTEXT_BYTES = Math.floor((MAX_BACKUP_FILE_BYTES - 1024) * 3 / 4)
@@ -17,6 +17,13 @@ export interface FullBackupSnapshot {
   contacts: Contact[]
   messages: StoredMessage[]
   messaging: MessagingSnapshot
+}
+
+function retainedMessages(messages: StoredMessage[], preferences: MessagingPreferences): StoredMessage[] {
+  return messages.filter(row => {
+    const deletion = preferences.deleted?.[row.peerPubKey]
+    return !deletion || row.timestamp > deletion.deletedAt
+  })
 }
 
 // Chunk the conversion so attachment-heavy backups don't build a huge rope of
@@ -59,7 +66,8 @@ export async function validateFullBackupSnapshot(value: unknown): Promise<FullBa
   }
   const messages = validateStoredMessages(snapshot.messages, identity.publicKey)
   const messaging = await validateMessagingSnapshot(snapshot.messaging, identity.publicKey)
-  return { format: "serotine-full-snapshot", version: 1, createdAt: snapshot.createdAt, identity, contacts, messages, messaging }
+  return { format: "serotine-full-snapshot", version: 1, createdAt: snapshot.createdAt, identity, contacts,
+    messages: retainedMessages(messages, messaging.preferences), messaging }
 }
 
 export async function exportFullBackup(identity: Identity, password: string): Promise<string> {
@@ -106,7 +114,13 @@ export async function restoreBackup(text: string, password: string, options: Res
   return restoreValidatedIdentity(snapshot.identity, options, async identity => {
     try {
       await importMessagingSnapshot(identity.publicKey, snapshot.messaging)
-      await importMessagesToStorage(identity.publicKey, snapshot.messages)
+      // Both this device and the backup may contain deletion markers. Apply the
+      // merged markers to existing rows as well as incoming history and files.
+      const preferences = await getMessagingPreferences(identity.publicKey)
+      for (const [conversationId, deletion] of Object.entries(preferences.deleted ?? {})) {
+        await deleteConversationHistoryFromStorage(identity.publicKey, conversationId, deletion.deletedAt)
+      }
+      await importMessagesToStorage(identity.publicKey, retainedMessages(snapshot.messages, preferences))
       let current: Contact[] = []
       try { current = loadContacts(identity.publicKey) } catch { /* A validated backup repairs unreadable contacts. */ }
       const merged = new Map(snapshot.contacts.map(contact => [contact.pub, contact]))

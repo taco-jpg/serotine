@@ -46,6 +46,36 @@ export async function getMessagesFromStorage(owner: string, peerPubKey: string) 
   try { return await db.getAllFromIndex("messages", "by-peer", peerPubKey) } finally { db.close() }
 }
 
+/** Remove legacy history and its inline files after the deletion marker is saved. */
+export async function deleteConversationHistoryFromStorage(owner: string, peerPubKey: string, deletedAt = Infinity): Promise<void> {
+  const db = await initDB(owner)
+  try {
+    const tx = db.transaction("messages", "readwrite")
+    const rows = await tx.store.index("by-peer").getAll(peerPubKey)
+    for (const row of rows) {
+      if (row.timestamp <= deletedAt) await tx.store.delete([row.peerPubKey, row.senderPubKey, row.id])
+    }
+    await tx.done
+    if (rows.some(row => row.timestamp <= deletedAt)) notifyHistoryChanged(owner, peerPubKey)
+  } finally { db.close() }
+  // The migration source is shared, so only its recorded original owner may
+  // remove matching rows. Cursor deletion respects its older primary-key shape.
+  if (typeof localStorage === "undefined" || localStorage.getItem("serotine_legacy_history_owner") !== owner) return
+  const legacy = await openDB<ChatDB>("chat-storage", 2)
+  try {
+    if (!legacy.objectStoreNames.contains("messages")) return
+    const tx = legacy.transaction("messages", "readwrite")
+    let cursor = await tx.store.openCursor()
+    while (cursor) {
+      const row = cursor.value
+      const peer = row?.senderPubKey === owner ? row.peerPubKey : row?.senderPubKey
+      if (peer === peerPubKey && row.timestamp <= deletedAt) await cursor.delete()
+      cursor = await cursor.continue()
+    }
+    await tx.done
+  } finally { legacy.close() }
+}
+
 /** Export every conversation, including older history not yet opened this session. */
 export async function exportAllMessagesFromStorage(owner: string): Promise<StoredMessage[]> {
   const db = await initDB(owner)

@@ -13,10 +13,10 @@ const owner = 'alice'
 const message = { senderPubKey: 'bob' }
 const conversation = { blocked: false, request: false, notificationMode: 'all' }
 
-test('notification filters protect muted chats, requests, blocked senders and self-chat', () => {
+test('notification filters protect archived chats, muted chats, requests, blocked senders and self-chat', () => {
   assert.equal(shouldNotify(message, conversation, owner), true)
   assert.equal(shouldNotify({ senderPubKey: owner }, conversation, owner), false)
-  for (const override of [{ blocked: true }, { request: true }, { notificationMode: 'muted' }]) {
+  for (const override of [{ archived: true }, { blocked: true }, { request: true }, { notificationMode: 'muted' }]) {
     assert.equal(shouldNotify(message, { ...conversation, ...override }, owner), false)
   }
 })

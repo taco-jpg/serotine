@@ -1,7 +1,7 @@
 import type { ConversationRecord, MessageRecord } from "./messaging-types"
 
 export function shouldNotify(message: MessageRecord, conversation: ConversationRecord, owner: string) {
-  return message.senderPubKey !== owner && !conversation.blocked && !conversation.request
+  return message.senderPubKey !== owner && !conversation.blocked && !conversation.request && !conversation.archived
     && conversation.notificationMode !== "muted"
     && (conversation.notificationMode !== "mentions" || message.mentions?.includes(owner) === true)
 }

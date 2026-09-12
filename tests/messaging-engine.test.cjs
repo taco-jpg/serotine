@@ -10,7 +10,7 @@ const runtimeWindow = new EventTarget()
 let rejectRecipient, rateLimitRecipient, rejectError, failPersistence = false, historyReads = 0
 const retiredRecipient = "This contact's address has been permanently retired. Ask them for their new address."
 const retiredIdentity = 'This identity has been permanently retired. Use your new address; old backups and linked devices cannot access this relay.'
-const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true })
+const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true, archived: [], deleted: {} })
 const recordsFor = owner => { if (!stores.has(owner)) stores.set(owner, new Map()); return stores.get(owner) }
 const store = {
   defaultMessagingPreferences: defaults,
@@ -18,9 +18,23 @@ const store = {
   getStoredEvents: async owner => { historyReads++; return structuredClone([...recordsFor(owner).values()]) },
   saveStoredEvent: async (owner, record) => {
     if (failPersistence) throw new Error('Disk full')
+    if (history.isDeletedConversationEvent(record, owner, prefs.get(owner) || defaults())) return false
     const prior = recordsFor(owner).get(record.key)
     if (prior && JSON.stringify(prior.event) !== JSON.stringify(record.event)) throw new Error('Conflicting message identifier')
     recordsFor(owner).set(record.key, structuredClone(prior ? { ...prior, ...record, local: prior.local || record.local, receivedAt: Math.min(prior.receivedAt, record.receivedAt), delivered: [...new Set([...prior.delivered, ...record.delivered])] } : record))
+    return true
+  },
+  deleteStoredConversation: async (owner, cid) => {
+    const p = prefs.get(owner) || defaults()
+    const rows = [...recordsFor(owner).values()]
+    const model = messaging.buildMessagingModel(rows, owner, [], p, undefined, true)
+    const conversation = model.conversations.find(c => c.id === cid), group = model.groups.find(g => g.id === cid)
+    const removed = rows.filter(row => messaging.conversationForEvent(row.event, owner) === cid && !((row.event.kind === 'group' || row.event.kind === 'leave') && row.local && row.event.recipients.some(peer => !row.delivered.includes(peer))))
+    const prior = p.deleted[cid]
+    const attachmentIds = [...new Set([...(prior?.attachmentIds || []), ...removed.flatMap(row => { const id = row.event.payload.attachmentId || row.event.payload.attachment?.id; return id ? [id] : [] })])]
+    const deletion = { deletedAt: Math.max(Date.now(), prior?.deletedAt || 0), eventKeys: [...new Set([...(prior?.eventKeys || []), ...removed.map(row => row.key)])], attachmentIds, ...(group ? { group, leftMembers: group.members.filter(member => !conversation.members.includes(member)) } : {}) }
+    for (const row of removed) recordsFor(owner).delete(row.key)
+    prefs.set(owner, structuredClone({ ...p, archived: p.archived.filter(id => id !== cid), deleted: { ...p.deleted, [cid]: deletion } }))
   },
   getMessagingPreferences: async owner => structuredClone(prefs.get(owner) || defaults()),
   saveMessagingPreferences: async (owner, value) => { prefs.set(owner, structuredClone(value)) },
@@ -52,7 +66,7 @@ function load(filename) {
   function sourceRequire(specifier) {
     if (specifier === './messaging-store') return store
     if (specifier === './relay-client') return relay
-    if (specifier === './storage') return { exportAllMessagesFromStorage: async () => [], migrateLegacyHistory: async () => {} }
+    if (specifier === './storage') return { exportAllMessagesFromStorage: async () => [], migrateLegacyHistory: async () => {}, deleteConversationHistoryFromStorage: async () => {} }
     if (specifier === './message-notifications') return { notifyIncoming() {}, requestMessagingNotifications: async () => 'denied' }
     if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
     return require(specifier)
@@ -62,7 +76,9 @@ function load(filename) {
 }
 const cryptography = load(path.join(root, 'lib/crypto.ts'))
 const authentication = load(path.join(root, 'lib/request-auth.ts'))
-const { MessagingEngine } = load(path.join(root, 'lib/messaging.ts'))
+const messaging = load(path.join(root, 'lib/messaging.ts'))
+const { MessagingEngine } = messaging
+const history = load(path.join(root, 'lib/messaging-history.ts'))
 let alice, bob, charlie, dave
 before(async () => {
   async function identity() { const keys = await cryptography.generateEncryptionKeyPair(); return { version: 2, publicKey: await cryptography.exportPublicKeyToHex(keys.publicKey), privateKey: await cryptography.exportKey(keys.privateKey) } }
@@ -470,4 +486,137 @@ test('retrying an attachment retries failed chunks and retains successful pieces
   await receiver.synchronize()
   const message = receiver.instance.model.messages.find(m => m.id === id)
   assert.equal((await files.assembleAttachment(message.attachment, receiver.instance.getAttachmentChunks(alice.publicKey, id))).size, files.ATTACHMENT_CHUNK_BYTES * 5)
+})
+
+test('archiving survives reload and new direct messages without restoring the request list', async () => {
+  const receiver = await engine(alice), sender = await engine(bob)
+  await sender.instance.sendText(alice.publicKey, 'First request')
+  await sender.synchronize(); await receiver.synchronize()
+  assert.equal(receiver.instance.model.requests.length, 1)
+  await receiver.instance.archiveConversation(bob.publicKey)
+  const reloaded = await engine(alice)
+  assert.equal(reloaded.instance.model.requests.length, 0)
+  assert.equal(reloaded.instance.model.conversations.find(c => c.id === bob.publicKey).archived, true)
+  await sender.instance.sendText(alice.publicKey, 'Still archived')
+  await sender.synchronize(); await reloaded.synchronize()
+  assert.equal(reloaded.instance.model.messages.length, 2)
+  assert.equal(reloaded.instance.model.conversations.find(c => c.id === bob.publicKey).archived, true)
+  assert.equal(reloaded.instance.model.requests.length, 0)
+  await reloaded.instance.archiveConversation(bob.publicKey, false)
+  assert.equal(reloaded.instance.model.requests.length, 1)
+})
+
+test('delete removes history and files, cancels pending sends, and relay replay cannot restore them', async () => {
+  const files = load(path.join(root, 'lib/attachments.ts'))
+  const sender = await engine(alice)
+  await sender.instance.sendText(bob.publicKey, 'Previously delivered')
+  await sender.synchronize()
+  const id = await files.sendAttachment(sender.instance.sendEvent, bob.publicKey, new File(['Delete these bytes'], 'delete.txt'))
+  const count = attempts.length
+  await sender.instance.archiveConversation(bob.publicKey)
+  await sender.instance.deleteConversation(bob.publicKey)
+  assert.deepEqual(sender.instance.getAttachmentChunks(bob.publicKey, id), [])
+  assert.equal(recordsFor(alice.publicKey).size, 0)
+  assert.equal(sender.instance.model.conversations.some(c => c.id === bob.publicKey), false)
+  cursors.set(alice.publicKey, 0)
+  await sender.instance.retry(); await sender.synchronize()
+  assert.equal(attempts.length, count)
+  assert.equal(sender.instance.model.messages.length, 0)
+  assert.equal(sender.instance.model.conversations.some(c => c.id === bob.publicKey), false)
+  const fresh = await sender.instance.sendText(bob.publicKey, 'Reopen with a new message')
+  assert.deepEqual(sender.instance.model.messages.map(m => m.id), [fresh])
+  assert.equal(sender.instance.model.conversations.find(c => c.id === bob.publicKey).archived, false)
+  assert.ok(prefs.get(alice.publicKey).deleted[bob.publicKey], 'reopening retains the deletion boundary')
+})
+
+test('deletion during signing cancels the old send before it can recreate the chat', async t => {
+  const sender = await engine(alice)
+  await sender.instance.sendText(bob.publicKey, 'Delete this chat')
+  const entered = deferred(), release = deferred(), sign = crypto.subtle.sign
+  t.mock.method(crypto.subtle, 'sign', async function (...args) { entered.resolve(); await release.promise; return sign.apply(this, args) })
+  const send = sender.instance.sendText(bob.publicKey, 'Started before deletion')
+  const rejected = assert.rejects(send, /chat was deleted/i)
+  await entered.promise
+  await sender.instance.deleteConversation(bob.publicKey)
+  release.resolve(); await rejected
+  assert.equal(recordsFor(alice.publicKey).size, 0)
+  assert.equal(sender.instance.model.conversations.some(c => c.id === bob.publicKey), false)
+})
+
+test('deletion during encryption prevents the prepared request from reaching the relay', async t => {
+  const sender = await engine(alice)
+  await sender.instance.sendText(bob.publicKey, 'Pending send')
+  const entered = deferred(), release = deferred(), encrypt = cryptography.encryptForPeer
+  t.mock.method(cryptography, 'encryptForPeer', async (...args) => { entered.resolve(); await release.promise; return encrypt(...args) })
+  const sync = sender.synchronize()
+  await entered.promise
+  await sender.instance.deleteConversation(bob.publicKey)
+  release.resolve(); await sync
+  assert.equal(attempts.length, 0)
+  assert.equal(recordsFor(alice.publicKey).size, 0)
+})
+
+test('deleting a departed group retains membership authority across reload and relay replay', async () => {
+  const admin = await engine(alice), member = await engine(bob)
+  const cid = await admin.instance.createGroup('Leave then delete', [bob.publicKey, charlie.publicKey])
+  await admin.instance.sendText(cid, 'Old group history')
+  await admin.synchronize(); await member.synchronize()
+  await member.instance.leaveGroup(cid); await member.synchronize()
+  const count = attempts.length
+  await member.instance.archiveConversation(cid)
+  assert.equal(member.instance.model.conversations.find(c => c.id === cid).archived, true)
+  await member.instance.deleteConversation(cid)
+  const reloaded = await engine(bob)
+  cursors.set(bob.publicKey, 0)
+  await reloaded.synchronize()
+  assert.equal(attempts.length, count, 'local deletion sends no leave or delete command')
+  assert.equal(reloaded.instance.model.conversations.some(c => c.id === cid), false)
+  assert.equal(reloaded.instance.model.messages.length, 0)
+  assert.equal(reloaded.instance.model.groups.find(g => g.id === cid).admin, alice.publicKey)
+  assert.ok(prefs.get(bob.publicKey).deleted[cid].leftMembers.includes(bob.publicKey))
+  await assert.rejects(reloaded.instance.sendText(cid, 'Cannot rejoin by deleting'), /no longer a member/i)
+})
+
+test('a hidden administrator chat still reconciles departures so remaining members can send', async () => {
+  const admin = await engine(alice), departing = await engine(bob), remaining = await engine(charlie)
+  const cid = await admin.instance.createGroup('Deleted by admin', [bob.publicKey, charlie.publicKey])
+  await admin.instance.sendText(cid, 'Prior history')
+  await admin.synchronize(); await departing.synchronize(); await remaining.synchronize()
+  await admin.instance.deleteConversation(cid)
+  await departing.instance.leaveGroup(cid); await departing.synchronize()
+  await admin.synchronize(); await admin.synchronize(); await remaining.synchronize()
+  assert.equal(admin.instance.model.conversations.some(c => c.id === cid), false)
+  assert.ok(!remaining.instance.model.conversations.find(c => c.id === cid).members.includes(bob.publicKey))
+  const fresh = await remaining.instance.sendText(cid, 'The remaining group works')
+  await remaining.synchronize(); await admin.synchronize()
+  assert.deepEqual(admin.instance.model.messages.map(m => m.id), [fresh])
+})
+
+test('offline leave followed by delete still delivers the pending departure after reconnecting', async () => {
+  const admin = await engine(alice), member = await engine(bob)
+  const cid = await admin.instance.createGroup('Offline departure', [bob.publicKey, charlie.publicKey])
+  await admin.synchronize(); await member.synchronize()
+  await member.instance.leaveGroup(cid)
+  await member.instance.deleteConversation(cid)
+  assert.ok([...recordsFor(bob.publicKey).values()].some(record => record.event.kind === 'leave' && record.local))
+  await member.synchronize(); await admin.synchronize()
+  assert.ok(!admin.instance.model.conversations.find(c => c.id === cid).members.includes(bob.publicKey))
+  assert.equal(member.instance.model.conversations.some(c => c.id === cid), false)
+})
+
+test('deleting a chat during file preparation cancels later chunks and metadata for that transfer', async () => {
+  const files = load(path.join(root, 'lib/attachments.ts'))
+  const sender = await engine(alice)
+  let deleted = false
+  const send = async (cid, kind, payload) => {
+    const id = await sender.instance.sendEvent(cid, kind, payload)
+    if (!deleted && kind === 'attachment-chunk') { deleted = true; await sender.instance.deleteConversation(cid) }
+    return id
+  }
+  await assert.rejects(files.sendAttachment(send, bob.publicKey, new File([new Uint8Array(files.ATTACHMENT_CHUNK_BYTES * 3)], 'cancel.bin')), /chat was deleted/i)
+  assert.equal(recordsFor(alice.publicKey).size, 0)
+  assert.equal(sender.instance.model.conversations.some(c => c.id === bob.publicKey), false)
+  assert.equal(prefs.get(alice.publicKey).deleted[bob.publicKey].attachmentIds.length, 1)
+  const fresh = await files.sendAttachment(sender.instance.sendEvent, bob.publicKey, new File(['Fresh transfer'], 'new.txt'))
+  assert.equal(sender.instance.model.messages[0].id, fresh)
 })

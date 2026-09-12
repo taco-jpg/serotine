@@ -11,7 +11,7 @@ const unavailable = async (): Promise<never> => { throw new Error("Your identity
 const empty = {
   identity: null, contacts: [], ready: false, error: null, status: "connecting", conversations: [], messages: [], groups: [], requests: [], preferences: defaultMessagingPreferences(),
   sendText: unavailable, editMessage: unavailable, pinMessage: unavailable, createPoll: unavailable, vote: unavailable, createGroup: unavailable, updateGroup: unavailable, leaveGroup: unavailable,
-  acceptRequest: unavailable, blockContact: unavailable, markRead: unavailable, setNotificationMode: unavailable, setReadReceipts: unavailable, requestNotifications: unavailable, retry: unavailable, sync: unavailable, sendEvent: unavailable, refresh: unavailable,
+  acceptRequest: unavailable, blockContact: unavailable, markRead: unavailable, archiveConversation: unavailable, deleteConversation: unavailable, setNotificationMode: unavailable, setReadReceipts: unavailable, requestNotifications: unavailable, retry: unavailable, sync: unavailable, sendEvent: unavailable, refresh: unavailable,
   getAttachmentChunks: () => [],
 } satisfies MessagingContextValue
 
@@ -74,6 +74,7 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     identity: engine.identity, contacts: engine.contacts, ready, error: error ?? engine.error, status: engine.status, preferences: engine.preferences, ...engine.model,
     sendText: engine.sendText, editMessage: engine.editMessage, pinMessage: engine.pinMessage, createPoll: engine.createPoll, vote: engine.vote, createGroup: engine.createGroup,
     updateGroup: engine.updateGroup, leaveGroup: engine.leaveGroup, acceptRequest: engine.acceptRequest, blockContact: engine.blockContact, markRead: engine.markRead,
+    archiveConversation: engine.archiveConversation, deleteConversation: engine.deleteConversation,
     setNotificationMode: engine.setNotificationMode, setReadReceipts: engine.setReadReceipts, requestNotifications: engine.requestNotifications, retry: engine.retry, sync: engine.sync,
     sendEvent: engine.sendEvent, getAttachmentChunks: engine.getAttachmentChunks, refresh: engine.refresh,
   } : { ...empty, ready, error }, [engine, ready, error, revision])

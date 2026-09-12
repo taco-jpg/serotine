@@ -6,6 +6,7 @@ Browser-based, end-to-end encrypted messaging with device-local identities and a
 
 - **Group chats:** create a named group, add contacts, manage membership, and leave. The creator manages membership and the group name. Groups support up to twenty people.
 - **Inbox:** all conversations receive messages while Serotine is open, with unread counts and recent-message previews. Unknown people appear in message requests.
+- **Archive and delete chats:** open a chat's options menu in the inbox or conversation header, including for left groups and retired contacts. Archive hides the chat from the inbox and notifications while keeping its history; use the Archived view to restore it. Delete asks for confirmation and removes saved messages and files on this device, keeping contacts and group membership unchanged. New messages can start the chat again; sync and old-backup imports do not bring back deleted history. These preferences travel in full backups but do not automatically sync to other devices.
 - **Notifications:** explicitly enable browser notifications, then choose all messages, mentions only, or muted for each conversation. Notifications use a generic preview. Serotine must remain open; this release does not include closed-app push delivery.
 - **Mentions:** type `@` in the message box to search conversation members. Use arrow keys and Enter/Tab, or click a result, to insert a mention. Editing or deleting its text removes that notification target.
 - **Replies and pins:** reply to a particular message, jump to the original, and keep important messages in the pinned panel.
@@ -61,6 +62,8 @@ npm run build
 ```
 
 For browser integration, run `npx playwright install chromium` once, then `npm run test:browser`. The smoke test starts a local server and uses synthetic identities to exercise actual D1 traffic, groups, attachments, voice recording, backups, linked browsers, and the mobile layout. `SEROTINE_CHROMIUM_PATH` can point to an existing Chromium executable.
+
+Run `npm run test:cleanup` for desktop and mobile archive/restore/delete controls, reload persistence, deletion confirmation, and protection against replay or old-backup imports restoring deleted history.
 
 Run `npm run test:recovery` separately to exercise the real mobile restore confirmation, identity archives, permanent retirement, and old-device denial with synthetic identities. Each browser suite starts its own development server; run them sequentially.
 

@@ -1,12 +1,16 @@
-# SIP-6: Private chat plugin
+---
+sip: 6
+title: Private chat plugin
+author: louisliu
+status: Draft
+created: 2026-09-12
+---
 
-- Status: Draft
-- Type: Plugin / Privacy
-- Requires: SIP-5
+# SIP-6: Private chat plugin
 
 ## Summary
 
-Move the idea of Lark-style private or self-destructing chat into the plugin system rather than making it a permanently special core conversation type.
+Move the idea of Lark-style private or self-destructing chat into the plugin system rather than making it a permanently special core conversation type. This proposal depends on SIP-5.
 
 ## Motivation
 
@@ -21,12 +25,28 @@ Private chat is useful, but it is optional behavior with stronger semantics than
 - Private-chat messages should still use Serotine's normal authenticated and encrypted transport underneath unless a future SIP specifies otherwise.
 - Entering private mode should be explicit to both sides and visibly distinct from an ordinary chat.
 
-## Safety semantics
+## Security & Privacy
 
 The UI must not promise impossible guarantees. Expiration cannot erase screenshots, copied plaintext, downloaded files, compromised devices, or messages already captured by another participant.
 
-Any destructive behavior should be narrowly defined: what disappears, from which device, and at what time.
+Any destructive behavior should be narrowly defined: what disappears, from which device, and at what time. Plugin negotiation must not weaken the underlying authenticated and encrypted transport.
 
-## Migration
+## Compatibility
 
 Serotine already has private-chat functionality in main. A future implementation may migrate that behavior behind the plugin interface rather than deleting it outright. Compatibility with existing private-chat messages should be preserved where practical.
+
+Clients without a compatible plugin must continue to handle ordinary conversation history safely and must not falsely present private-chat guarantees.
+
+## Alternatives
+
+Keep private chat as a permanently special core conversation type. This avoids plugin negotiation but makes the behavior harder to evolve independently. Another alternative is local-only message hiding, which is simpler but does not provide shared expiration semantics.
+
+## Open Questions
+
+- Which private-chat behaviors belong in the first plugin version?
+- How should existing private-chat conversations migrate to the plugin model?
+- How are expiration and deletion states synchronized across linked devices?
+
+## Implementation Notes
+
+Requires SIP-5. Reuse existing private-chat behavior where it maps cleanly, but place new shared semantics behind explicit plugin capability negotiation.

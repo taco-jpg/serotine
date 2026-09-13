@@ -17,7 +17,7 @@
   --secondary-foreground: #171b14;
   --muted: #e6e8e0;
   --muted-foreground: #5d6655;
-  --accent: #e0e5d6;
+  --accent: #d1d9c6;
   --accent-foreground: #3c5f22;
   --destructive: #b91c1c;
   --destructive-foreground: #ffffff;
@@ -30,17 +30,17 @@
   --chart-4: #698353;
   --chart-5: #95a785;
   --radius: 0.375rem;
-  --sidebar: #e5e8dd;
+  --sidebar: #dfe7d2;
   --sidebar-foreground: #171b14;
   --sidebar-primary: #3c5f22;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #cad2bf;
-  --sidebar-accent-foreground: #3c5f22;
-  --sidebar-border: #c8cbc1;
+  --sidebar-accent: #b8c6a8;
+  --sidebar-accent-foreground: #000000;
+  --sidebar-border: #c3cab7;
   --sidebar-ring: #3c5f22;
   --message-incoming: #f3f4ec;
   --message-incoming-foreground: #171b14;
-  --message-outgoing: #dce8ce;
+  --message-outgoing: #d5ebba;
   --message-outgoing-foreground: #233019;
   --theme-chrome: #eeefe7;
 }
@@ -58,7 +58,7 @@
   --secondary-foreground: #eeefe7;
   --muted: #222721;
   --muted-foreground: #a1aa99;
-  --accent: #293420;
+  --accent: #38462a;
   --accent-foreground: #ccff89;
   --destructive: #fb7185;
   --destructive-foreground: #000000;
@@ -70,17 +70,17 @@
   --chart-3: #ddf7b8;
   --chart-4: #9cc36a;
   --chart-5: #6c874a;
-  --sidebar: #0f130e;
+  --sidebar: #17200e;
   --sidebar-foreground: #eeefe7;
   --sidebar-primary: #ccff89;
   --sidebar-primary-foreground: #000000;
-  --sidebar-accent: #2d3922;
+  --sidebar-accent: #42562c;
   --sidebar-accent-foreground: #ccff89;
-  --sidebar-border: #2e322c;
+  --sidebar-border: #353d2c;
   --sidebar-ring: #ccff89;
   --message-incoming: #171d14;
   --message-incoming-foreground: #eeefe7;
-  --message-outgoing: #24301c;
+  --message-outgoing: #30411d;
   --message-outgoing-foreground: #eff5e7;
   --theme-chrome: #0b0e0b;
 }
@@ -230,23 +230,27 @@
 /* App-only vocabulary. The landing page keeps its independent module styles. */
 .app-eyebrow {
   color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 400;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
   line-height: 1.6;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.045em;
   text-transform: uppercase;
 }
 
 .chat-shell [data-slot="dropdown-menu-label"],
 .serotine-dialog [data-slot="label"] {
-  font-size: 11px;
-  letter-spacing: 0.025em;
+  font-size: 12px;
+  letter-spacing: 0;
 }
 
 .app-surface, .chat-shell, .serotine-dialog,
-[data-slot="dropdown-menu-content"], [data-slot="dropdown-menu-sub-content"] {
-  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+[data-slot="dropdown-menu-content"], [data-slot="dropdown-menu-sub-content"],
+[data-slot="popover-content"], [data-slot="tooltip-content"],
+[data-slot="context-menu-content"], [data-slot="context-menu-sub-content"],
+[data-slot="select-content"], [data-slot="alert-dialog-content"] {
+  /* One UI family across conversations and portaled controls; codes keep mono. */
+  font-family: var(--font-sans);
 }
 .app-surface :where(h1, h2, h3, h4, h5, h6),
 .chat-shell :where(h1, h2, h3, h4, h5, h6),

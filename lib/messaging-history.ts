@@ -17,10 +17,20 @@ export function isDeletedConversationEvent(record: StoredEvent, owner: string, p
 
 /** Individual deletions match IDs, never a time boundary or later messages. */
 export function isDeletedMessageEvent(record: StoredEvent, owner: string, preferences: Pick<MessagingPreferences, "deletedMessages">) {
-  if (["group", "leave", "private-settings", "private-destroy", "community"].includes(record.event.kind)) return false
+  if (["group", "leave", "private-settings", "private-destroy"].includes(record.event.kind)) return false
   const deletion = preferences.deletedMessages?.[storedConversationId(record, owner)]
   if (!deletion) return false
   const event = record.event
+  if (event.kind === "community") {
+    const data = event.payload.community
+    // A local message deletion must never remove membership, ownership, join
+    // decisions or moderation proofs, even if an imported tombstone names them.
+    if (!data || !["message", "poll", "attachment", "attachment-chunk", "edit", "pin", "vote", "receipt"].includes(data.type)) return false
+    const targetId = "targetId" in data ? data.targetId : undefined
+    const attachmentId = "attachmentId" in data ? data.attachmentId : "attachment" in data ? data.attachment.id : undefined
+    return deletion.messageIds.includes(event.id) || !!(targetId && deletion.messageIds.includes(targetId))
+      || deletion.eventKeys.includes(record.key) || !!(attachmentId && "channelId" in data && deletion.attachmentKeys?.includes(communityAttachmentKey(event.author, data.channelId, attachmentId)))
+  }
   const attachmentId = event.payload.attachmentId ?? event.payload.attachment?.id
   return deletion.messageIds.includes(event.id) || !!(event.payload.targetId && deletion.messageIds.includes(event.payload.targetId))
     || deletion.eventKeys.includes(record.key) || !!(attachmentId && deletion.attachmentKeys?.includes(legacyMessageKey(event.author, attachmentId)))
@@ -31,6 +41,7 @@ export function isDeletedStoredEvent(record: StoredEvent, owner: string, prefere
 }
 
 export function legacyMessageKey(senderPubKey: string, id: string) { return JSON.stringify([senderPubKey, id]) }
+export function communityAttachmentKey(senderPubKey: string, channelId: string, id: string) { return JSON.stringify([senderPubKey, channelId, id]) }
 
 export function isDeletedLegacyMessage(row: { peerPubKey: string; senderPubKey: string; id: string; timestamp: number }, preferences: MessagingPreferences) {
   const conversation = preferences.deleted?.[row.peerPubKey]

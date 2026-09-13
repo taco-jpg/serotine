@@ -1,5 +1,6 @@
 import type { Identity } from "./identity"
-import type { MessagingEvent, MessagingPreferences, StoredEvent } from "./messaging-types"
+import type { EventKind, EventPayload, MessagingEvent, MessagingPreferences, StoredEvent } from "./messaging-types"
+import { ATTACHMENT_CHUNK_BYTES } from "./attachments"
 import type { CommunityAdmission, CommunityChannel, CommunityCommand, CommunityEventData, CommunityJoinRequest, CommunityModel, CommunityRecord, CommunityState } from "./community-types"
 import { buildCommunityInviteUrl, buildCommunityModel, canPostToCommunityChannel, communityStateReference, isCommunityAdmin, isCommunityCoOwner, isCommunityId, isCommunityModerator, parseCommunityInvite, signCommunityInvite, signCommunityState, signCommunityTransfer, validateCommunityEvent, validateCommunityInvite, validateCommunityState } from "./community-protocol"
 
@@ -52,11 +53,11 @@ export class CommunityService {
   }
   private get address() { return this.host.identity.publicKey }
   private assertActive() { this.host.assertActive?.() }
-  private async locked<T>(id: string, action: () => Promise<T>): Promise<T> {
+  private async locked<T>(id: string, action: () => Promise<T>, refresh = true): Promise<T> {
     if (!isCommunityId(id)) throw new Error("This community address is invalid.")
     return mutate(`serotine:community:${this.address}:${id}`, async () => {
       this.assertActive()
-      await this.host.refresh()
+      if (refresh) await this.host.refresh()
       this.assertActive()
       return action()
     })
@@ -94,15 +95,24 @@ export class CommunityService {
     return event
   }
   private async recheck(prior: CommunityRecord, data: CommunityEventData) {
-    await this.host.refresh()
+    // File pieces have no visible message yet. Avoid rereading the entire
+    // history per piece; metadata still refreshes, and delivery always checks
+    // each immutable piece's epoch again before encryption and transmission.
+    if (data.type !== "attachment-chunk") await this.host.refresh()
     this.assertActive()
     const current = this.community(prior.id, false)
     if (current.epoch !== prior.epoch || current.signature !== prior.signature ||
       current.effectiveMembers.length !== prior.effectiveMembers.length || current.effectiveMembers.some(address => !prior.effectiveMembers.includes(address)))
       throw new Error("The community changed while this action was being prepared. Review it and try again.")
     if (!current.joined && !(data.type === "decision" && current.owner === this.address)) throw new Error("You are no longer a member of this community.")
-    if (data.type === "message" && !canPostToCommunityChannel(current, this.address, data.channelId))
+    if (["message", "attachment", "attachment-chunk", "edit", "pin", "poll"].includes(data.type) && "channelId" in data && !canPostToCommunityChannel(current, this.address, data.channelId))
       throw new Error("You cannot post in this channel.")
+    if (["edit", "pin", "vote", "receipt"].includes(data.type) && "targetId" in data && "channelId" in data)
+      this.actionTarget(prior.id, data.channelId, data.type as EventKind, data)
+    if ("replyTo" in data && data.replyTo && !this.model.messages.some(message => message.id === data.replyTo && message.conversationId === prior.id && message.channelId === data.channelId && !message.hidden))
+      throw new Error("The message you are replying to is no longer available.")
+    if (data.type === "attachment" && this.attachmentChunks(prior.id, data.channelId, this.address, data).length !== data.attachment.chunks)
+      throw new Error("The community changed or this upload is incomplete. Attach the file again to restart the transfer.")
     if (data.type === "state" && data.state.owner !== prior.owner && this.model.requests.some(request => request.communityId === prior.id && request.status === "pending"))
       throw new Error("A new join request arrived. Try transferring ownership again so it can be resolved first.")
   }
@@ -364,17 +374,64 @@ export class CommunityService {
     if (community.owner === this.address) throw new Error("Transfer ownership or delete the community before leaving.")
     await this.publish(id, { type: "leave", epoch: community.epoch }, this.recipients(community.members), community)
   })
-  sendMessage = async (id: string, channelId: string, text: string, replyTo?: string, mentions?: string[]): Promise<string> => this.locked(id, async () => {
+  private actionTarget(id: string, channelId: string, kind: EventKind, payload: EventPayload) {
+    const target = this.model.messages.find(message => message.id === payload.targetId && message.conversationId === id && message.channelId === channelId && !message.hidden)
+    if (!target) throw new Error("This message is no longer available in this channel.")
+    const original = this.host.records().find(record => record.event.id === target.id && record.event.conversationId === id && record.event.author === target.senderPubKey)?.event
+    if (!original || (original.author !== this.address && !original.recipients.includes(this.address))) throw new Error("This message is not part of your community history.")
+    if (kind === "edit" && (target.senderPubKey !== this.address || target.attachment || target.poll)) throw new Error("You can edit your own ordinary text messages.")
+    if (kind === "vote" && (!target.poll || !Number.isInteger(payload.option) || payload.option! < 0 || payload.option! >= target.poll.options.length)) throw new Error("Choose an available poll option.")
+    if (kind === "receipt" && target.senderPubKey === this.address) throw new Error("You cannot acknowledge your own message.")
+    return target
+  }
+  sendEvent = async (id: string, channelId: string, kind: EventKind, payload: EventPayload): Promise<string> => this.locked(id, async () => {
     const community = this.community(id)
-    if (!canPostToCommunityChannel(community, this.address, channelId)) throw new Error("Only moderators can post in this channel, or it is no longer available.")
-    const content = text.trim()
-    if (!content) throw new Error("Write a message before sending.")
-    if (replyTo && !this.model.messages.some(message => message.id === replyTo && message.conversationId === id && message.channelId === channelId && !message.hidden))
+    if (!["message", "attachment", "attachment-chunk", "edit", "pin", "poll", "vote", "receipt"].includes(kind)) throw new Error("This feature is not available in community channels.")
+    if (!payload || typeof payload !== "object" || Array.isArray(payload) || ["type", "epoch", "channelId", "stateRef"].some(key => key in payload)) throw new Error("This community message is invalid.")
+    if (!community.channels.some(channel => channel.id === channelId)) throw new Error("This channel is no longer available.")
+    if (!["vote", "receipt"].includes(kind) && !canPostToCommunityChannel(community, this.address, channelId)) throw new Error("Only moderators can post in this channel, or it is no longer available.")
+    if (["edit", "pin", "vote", "receipt"].includes(kind)) this.actionTarget(id, channelId, kind, payload)
+    if (payload.replyTo && !this.model.messages.some(message => message.id === payload.replyTo && message.conversationId === id && message.channelId === channelId && !message.hidden))
       throw new Error("The message you are replying to is no longer available.")
-    const activeMentions = mentions?.filter(address => community.effectiveMembers.includes(address))
-    return this.publish(id, { type: "message", epoch: community.epoch, channelId, content,
-      ...(replyTo ? { replyTo } : {}), ...(activeMentions?.length ? { mentions: [...new Set(activeMentions)] } : {}) }, this.recipients(community.effectiveMembers), community)
-  })
+    const data = { ...payload, type: kind, epoch: community.epoch, channelId } as CommunityEventData
+    if ("content" in data && typeof data.content === "string") data.content = data.content.trim()
+    if ("mentions" in data && Array.isArray(data.mentions)) data.mentions = [...new Set(data.mentions.filter(address => community.effectiveMembers.includes(address)))]
+    // Routine chat sends use the current snapshot initially. publish() always
+    // refreshes and checks the signed epoch immediately before durable queueing.
+    return this.publish(id, data, this.recipients(community.effectiveMembers), community)
+  }, false)
+  sendMessage = (id: string, channelId: string, text: string, replyTo?: string, mentions?: string[]): Promise<string> =>
+    this.sendEvent(id, channelId, "message", { content: text, ...(replyTo ? { replyTo } : {}), ...(mentions?.length ? { mentions } : {}) })
+  editMessage = async (id: string, channelId: string, messageId: string, text: string): Promise<void> => { await this.sendEvent(id, channelId, "edit", { targetId: messageId, content: text }) }
+  pinMessage = async (id: string, channelId: string, messageId: string, pinned: boolean): Promise<void> => { await this.sendEvent(id, channelId, "pin", { targetId: messageId, pinned }) }
+  createPoll = (id: string, channelId: string, question: string, options: string[]): Promise<string> => this.sendEvent(id, channelId, "poll", { question: question.trim(), options: options.map(option => option.trim()) })
+  vote = async (id: string, channelId: string, messageId: string, option: number): Promise<void> => { await this.sendEvent(id, channelId, "vote", { targetId: messageId, option }) }
+  receipt = async (id: string, channelId: string, messageId: string, receipt: "delivered" | "read"): Promise<void> => { await this.sendEvent(id, channelId, "receipt", { targetId: messageId, receipt }) }
+  getAttachmentChunks = (id: string, channelId: string, messageId: string): Array<{ index: number; data: string }> => {
+    const model = this.model
+    const message = model.messages.find(item => item.id === messageId && item.conversationId === id && item.channelId === channelId && !item.hidden)
+    if (!message?.attachment) return []
+    const accepted = new Set(model.acceptedKeys)
+    const records = this.host.records()
+    const metadata = records.find(record => record.event.id === messageId && record.event.author === message.senderPubKey && record.event.conversationId === id && accepted.has(record.key))?.event.payload.community
+    if (metadata?.type !== "attachment") return []
+    return this.attachmentChunks(id, channelId, message.senderPubKey, metadata)
+  }
+  private attachmentChunks(id: string, channelId: string, sender: string, metadata: Extract<CommunityEventData, { type: "attachment" }>): Array<{ index: number; data: string }> {
+    const accepted = new Set(this.model.acceptedKeys)
+    const chunks = new Map<number, string>()
+    for (const { event, key } of this.host.records()) {
+      const data = event.payload.community
+      if (event.kind !== "community" || !accepted.has(key) || event.author !== sender || event.conversationId !== id || data?.type !== "attachment-chunk"
+        || data.channelId !== channelId || data.attachmentId !== metadata.attachment.id || data.epoch !== metadata.epoch || data.stateRef !== metadata.stateRef || data.index >= metadata.attachment.chunks) continue
+      const expected = Math.min(ATTACHMENT_CHUNK_BYTES, metadata.attachment.size - data.index * ATTACHMENT_CHUNK_BYTES)
+      const binary = atob(data.data)
+      if (binary.length !== expected || btoa(binary) !== data.data) continue
+      if (chunks.has(data.index) && chunks.get(data.index) !== data.data) return []
+      chunks.set(data.index, data.data)
+    }
+    return [...chunks].map(([index, data]) => ({ index, data })).sort((a, b) => a.index - b.index)
+  }
   hideMessage = async (id: string, messageId: string): Promise<void> => this.locked(id, async () => {
     const community = this.moderator(id)
     const message = this.model.messages.find(item => item.id === messageId && item.conversationId === id)

@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Plus, Copy, Check, Loader2, Search, Pencil, Users, QrCode, Archive, UserRound, Settings2, Bell, Ban, Trash2, Inbox, RefreshCw, PanelLeftClose, PanelLeftOpen, CircleAlert, Hash } from "lucide-react"
 import { AppLogo } from "@/components/ui/app-logo"
 import { IdentityIcon } from "@/components/ui/identity-icon"
@@ -16,18 +16,22 @@ import { LocalNicknameSetting } from "@/components/local-nickname-setting"
 import { useLocalNickname } from "@/hooks/use-local-nickname"
 import { AccountTools } from "@/components/account-tools"
 import { ModeToggle } from "@/components/mode-toggle"
-import { ConversationRow, messagePreview } from "@/components/conversation-sidebar"
+import { CommunityInboxActions, CommunityRow, ConversationRow, messagePreview } from "@/components/conversation-sidebar"
 import { ConversationActions } from "@/components/conversation-actions"
 import { QrCodeCard } from "@/components/qr-code"
 import { QrScanner } from "@/components/qr-scanner"
 import { loadContacts, saveContacts, shortAddress, type Contact } from "@/lib/identity"
 import { parseContactCode } from "@/lib/contact-code"
 import type { ConversationRecord } from "@/lib/messaging-types"
+import type { CommunityRecord } from "@/lib/community-types"
 import { requestMessagingNotifications } from "@/lib/message-notifications"
-import { conversationFromPathname, conversationHref } from "@/lib/conversation-route"
+import { communityHref, conversationFromPathname, conversationHref } from "@/lib/conversation-route"
+import { useNavigationPreferences } from "@/hooks/use-navigation-preferences"
+import { loadNavigationPreferences, rememberNavigation, restoredChatHref, sortByRecentActivity } from "@/lib/navigation-preferences"
 
 function errorMessage(cause: unknown) { return cause instanceof Error ? cause.message : "Something went wrong. Please try again." }
 const SIDEBAR_STORAGE_KEY = "serotine_sidebar_collapsed"
+type InboxEntry = ConversationRecord | (CommunityRecord & { kind: "community"; archived: boolean })
 
 export default function ChatLayoutClient({ children }: { children: React.ReactNode }) {
   return <MessagingProvider><InboxLayout>{children}</InboxLayout></MessagingProvider>
@@ -39,8 +43,11 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
   const selectedConversation = conversationFromPathname(pathname)
   const messaging = useMessaging()
   const communityContext = useCommunities()
-  const communityUnread = communityContext.model.communities.reduce((sum, item) => sum + item.unreadCount, 0)
   const { identity, contacts, conversations, messages, requests, preferences, ready, status } = messaging
+  const navigationPreferences = useNavigationPreferences(identity?.publicKey || "")
+  const selectedCommunity = pathname === "/chat/communities" && navigationPreferences.lastView?.kind === "community" ? navigationPreferences.lastView.id : null
+  const initialNavigation = useRef<{ owner: string; explicit: boolean; restored: boolean } | null>(null)
+  const recordedConversation = useRef("")
   const nickname = useLocalNickname(identity?.publicKey || "")
   const displayName = (pub: string) => pub === identity?.publicKey ? nickname || "You" : contacts.find(contact => contact.pub === pub)?.alias || shortAddress(pub)
   const [error, setError] = useState("")
@@ -74,6 +81,31 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">("default")
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const inConversation = pathname !== "/chat"
+
+  useEffect(() => {
+    if (!identity) return
+    if (initialNavigation.current?.owner !== identity.publicKey) {
+      let pendingInvite = false
+      try { pendingInvite = !!(sessionStorage.getItem("serotine_pending_invite") || sessionStorage.getItem("serotine_pending_community_invite")) } catch { /* Direct links still take priority. */ }
+      initialNavigation.current = { owner: identity.publicKey, explicit: pathname !== "/chat" || !!window.location.hash || !!window.location.search || pendingInvite, restored: false }
+    }
+    const initial = initialNavigation.current
+    if (!ready || initial.restored) return
+    initial.restored = true
+    if (initial.explicit || pathname !== "/chat") return
+    const href = restoredChatHref(loadNavigationPreferences(identity.publicKey), conversations, communityContext.model.communities, identity.publicKey, preferences.archived)
+    if (href) router.replace(href)
+  }, [identity, ready, pathname, conversations, communityContext.model.communities, preferences.archived, router])
+
+  useEffect(() => {
+    if (!ready || !identity) return
+    if (!selectedConversation) { recordedConversation.current = ""; return }
+    const conversation = conversations.find(item => item.id === selectedConversation)
+    const visit = `${identity.publicKey}:${selectedConversation}`
+    if (!conversation || conversation.blocked || conversation.request || recordedConversation.current === visit) return
+    recordedConversation.current = visit
+    rememberNavigation(identity.publicKey, { kind: "conversation", id: selectedConversation })
+  }, [identity, ready, selectedConversation, conversations])
 
   useEffect(() => {
     try { setSidebarCollapsed(localStorage.getItem(SIDEBAR_STORAGE_KEY) === "true") } catch { /* The sidebar still works when storage is unavailable. */ }
@@ -135,19 +167,23 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener("keydown", onKey)
   }, [])
 
-  const listedConversations = useMemo(() => conversations.filter(item => item.kind !== "self" && (item.archived || (!item.blocked && !item.request))).sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name)), [conversations])
-  const activeConversations = listedConversations.filter(item => !item.archived)
-  const archivedConversations = listedConversations.filter(item => item.archived)
-  const visibleConversations = conversationView === "archived" ? archivedConversations : activeConversations
+  const listedConversations = useMemo(() => sortByRecentActivity(conversations.filter(item => item.kind !== "self" && (item.archived || (!item.blocked && !item.request))), navigationPreferences), [conversations, navigationPreferences])
+  const joinedCommunities = useMemo(() => communityContext.model.communities.filter(item => item.joined && !item.deleted), [communityContext.model.communities])
+  const allConversations = sortByRecentActivity<InboxEntry>([...listedConversations, ...joinedCommunities.map(item => ({ ...item, kind: "community" as const, archived: preferences.archived.includes(item.id) }))], navigationPreferences)
+  const archivedConversations = allConversations.filter(item => item.archived)
+  const inboxConversations = allConversations.filter(item => !item.archived)
+  const visibleConversations = conversationView === "archived" ? archivedConversations : inboxConversations
   const filteredConversations = visibleConversations.filter(item => `${item.name} ${item.id}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()))
   const selfConversation = conversations.find(item => item.kind === "self")
-  const totalUnread = activeConversations.reduce((count, item) => count + item.unreadCount, 0)
+  const totalUnread = inboxConversations.reduce((count, item) => count + item.unreadCount, 0)
   const searchResults = useMemo(() => {
     const query = searchQuery.trim().toLocaleLowerCase()
     if (!query) return []
     const allowed = new Set(conversations.filter(item => !item.blocked && !item.request).map(item => item.id))
-    return messages.filter(message => !message.private && allowed.has(message.conversationId) && [message.content, message.attachment?.name, message.poll?.question, ...(message.poll?.options || [])].filter(Boolean).join(" ").toLocaleLowerCase().includes(query)).sort((a, b) => b.timestamp - a.timestamp)
-  }, [searchQuery, messages, conversations])
+    const allowedCommunityChannels = new Map(joinedCommunities.map(item => [item.id, new Set(item.channels.map(channel => channel.id))]))
+    const communityMessages = communityContext.model.messages.filter(message => !message.hidden && allowedCommunityChannels.get(message.conversationId)?.has(message.channelId))
+    return [...messages.filter(message => allowed.has(message.conversationId)), ...communityMessages].filter(message => !message.private && [message.content, message.attachment?.name, message.poll?.question, ...(message.poll?.options || [])].filter(Boolean).join(" ").toLocaleLowerCase().includes(query)).sort((a, b) => b.timestamp - a.timestamp)
+  }, [searchQuery, messages, conversations, joinedCommunities, communityContext.model.messages])
 
   const copy = async (value: string) => {
     try { await navigator.clipboard.writeText(value); setCopied(true); setTimeout(() => setCopied(false), 2500) }
@@ -214,18 +250,18 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
         <Button variant="ghost" size="icon" className="hidden size-11 shrink-0 text-muted-foreground md:inline-flex md:size-8" title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!sidebarCollapsed} aria-controls="serotine-sidebar" onClick={() => changeSidebar(!sidebarCollapsed)}>{sidebarCollapsed ? <PanelLeftOpen className="size-[18px]" /> : <PanelLeftClose className="size-[18px]" />}</Button>
       </div>
       <div className={`px-3 pt-3 ${sidebarCollapsed ? "md:hidden" : ""}`}>
-        <Button variant="outline" className="h-11 w-full justify-start gap-2 border-border bg-background px-2.5 text-xs text-muted-foreground shadow-none md:h-8" onClick={() => setSearchOpen(true)}><Search className="size-3.5" /> Search all messages<span className="ml-auto hidden font-mono text-[9px] text-muted-foreground lg:inline">Ctrl ⇧ F</span></Button>
+        <Button variant="outline" className="h-11 w-full justify-start gap-2 border-border bg-background px-2.5 text-xs text-muted-foreground shadow-none md:h-8" onClick={() => setSearchOpen(true)}><Search className="size-3.5" /> Search all messages<span className="ml-auto hidden text-[11px] text-muted-foreground lg:inline">Ctrl ⇧ F</span></Button>
       </div>
-      <Link href="/chat/communities" aria-current={pathname === "/chat/communities" ? "page" : undefined} title="Communities" className={`mx-3 mt-2 flex min-h-11 shrink-0 items-center gap-2 rounded-[4px] border-l-2 px-2 text-[13px] font-medium hover:bg-accent md:min-h-9 ${pathname === "/chat/communities" ? "border-primary bg-primary/10 text-primary" : "border-transparent text-muted-foreground"} ${sidebarCollapsed ? "md:mx-2 md:justify-center md:px-0" : ""}`}><Hash className="size-4 shrink-0" /><span className={sidebarCollapsed ? "md:sr-only" : ""}>Communities</span>{communityUnread > 0 && <span className="ml-auto rounded-[3px] bg-primary px-1.5 text-[10px] text-primary-foreground">{communityUnread}</span>}</Link>
+
       <div className={`min-h-0 flex-1 overflow-y-auto overscroll-contain ${sidebarCollapsed ? "md:hidden" : ""}`}>
         <div className="px-3 pt-1">{selfConversation ? <ConversationRow conversation={selfConversation} selected={selectedConversation === identity.publicKey} owner={identity.publicKey} displayName={displayName} /> : <Link href={conversationHref(identity.publicKey)} className="flex min-h-12 items-center gap-2 rounded-[4px] px-2 py-1 text-[13px] font-medium text-primary hover:bg-accent"><UserRound className="size-4" /> Message yourself</Link>}</div>
         <div className="mb-2 mt-3 flex items-center gap-1 border-y border-border px-3 py-1">
           <h2 className="sr-only">Chats{totalUnread > 0 ? ` · ${totalUnread} unread` : ""}</h2>
           <div className="flex min-w-0 flex-1 gap-0.5" role="group" aria-label="Conversation view">
-            <button type="button" aria-pressed={conversationView === "inbox"} title={`${activeConversations.length} chats${totalUnread ? ` · ${totalUnread} unread` : ""}`} onClick={() => { setConversationView("inbox"); setFilter(""); setNotice("") }} className={`flex min-h-11 flex-1 items-center justify-center gap-1 rounded-[3px] px-1.5 font-mono text-[10px] uppercase tracking-wide focus-visible:outline-2 focus-visible:outline-ring md:min-h-7 ${conversationView === "inbox" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground"}`}>Inbox<span className="text-muted-foreground/80">{activeConversations.length}</span>{totalUnread > 0 && <span className="sr-only"> · {totalUnread} unread</span>}</button>
-            <button type="button" aria-pressed={conversationView === "archived"} onClick={() => { setConversationView("archived"); setFilter(""); setNotice("") }} className={`flex min-h-11 flex-1 items-center justify-center gap-1 rounded-[3px] px-1.5 font-mono text-[10px] uppercase tracking-wide focus-visible:outline-2 focus-visible:outline-ring md:min-h-7 ${conversationView === "archived" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground"}`}>Archived<span className="text-muted-foreground">{archivedConversations.length}</span></button>
+            <button type="button" aria-pressed={conversationView === "inbox"} title={`${inboxConversations.length} conversations${totalUnread ? ` · ${totalUnread} unread` : ""}`} onClick={() => { setConversationView("inbox"); setFilter(""); setNotice("") }} className={`flex min-h-11 flex-1 items-center justify-center gap-1 rounded-[3px] px-1.5 font-medium text-[11px] focus-visible:outline-2 focus-visible:outline-ring md:min-h-7 ${conversationView === "inbox" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground"}`}>Inbox<span className="text-muted-foreground/80">{inboxConversations.length}</span>{totalUnread > 0 && <span className="sr-only"> · {totalUnread} unread</span>}</button>
+            <button type="button" aria-pressed={conversationView === "archived"} onClick={() => { setConversationView("archived"); setFilter(""); setNotice("") }} className={`flex min-h-11 flex-1 items-center justify-center gap-1 rounded-[3px] px-1.5 font-medium text-[11px] focus-visible:outline-2 focus-visible:outline-ring md:min-h-7 ${conversationView === "archived" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground"}`}>Archived<span className="text-muted-foreground">{archivedConversations.length}</span></button>
           </div>
-          <div className="flex shrink-0"><Button size="icon" variant="ghost" className="size-11 text-muted-foreground md:size-8" aria-label="Create group chat" title="Create group chat" onClick={() => { setGroupError(""); setGroupOpen(true) }}><Users className="size-4" /></Button><Button size="icon" variant="ghost" className="size-11 text-muted-foreground md:size-8" aria-label="Add contact" title="Add contact" onClick={() => { setAddError(""); setAddOpen(true) }}><Plus className="size-4" /></Button></div>
+          <div className="flex shrink-0"><Button asChild size="icon" variant="ghost" className="size-11 text-muted-foreground md:size-8"><Link href="/chat/communities" aria-label="Create or join a community" title="Create or join a community"><Hash className="size-4" /></Link></Button><Button size="icon" variant="ghost" className="size-11 text-muted-foreground md:size-8" aria-label="Create group chat" title="Create group chat" onClick={() => { setGroupError(""); setGroupOpen(true) }}><Users className="size-4" /></Button><Button size="icon" variant="ghost" className="size-11 text-muted-foreground md:size-8" aria-label="Add contact" title="Add contact" onClick={() => { setAddError(""); setAddOpen(true) }}><Plus className="size-4" /></Button></div>
         </div>
         {conversationView === "archived" && <p className="mx-5 mb-3 text-xs leading-relaxed text-muted-foreground">Hidden from your inbox. Messages stay saved until you delete the chat.</p>}
         {conversationView === "inbox" && requests.length > 0 && <button type="button" onClick={() => { setRequestError(""); setRequestsOpen(true) }} className="mx-4 mb-3 flex w-[calc(100%-2rem)] items-center gap-3 rounded-[4px] border border-primary/20 bg-primary/5 px-3 py-3 text-left text-sm text-primary"><Inbox className="size-4" /><span className="flex-1">Message requests</span><span className="rounded-[3px] bg-primary/15 px-2 py-0.5 text-xs">{requests.length}</span></button>}
@@ -234,10 +270,11 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
         {notice && <p role="status" className="mx-5 mb-4 text-sm text-primary">{notice}</p>}
         <nav className="space-y-0.5 px-3 pb-2" aria-label={conversationView === "archived" ? "Archived conversations" : "Conversations"}>
           {!ready && <p role="status" className="px-4 py-6 text-sm text-muted-foreground">Loading conversations…</p>}
-          {ready && conversationView === "inbox" && activeConversations.length === 0 && <div className="px-2 py-6 text-left"><Inbox className="mb-4 size-6 text-primary" /><p className="text-base font-medium tracking-tight text-foreground">Your next conversation starts here.</p><p className="mt-2 text-xs leading-6 text-muted-foreground">{archivedConversations.length ? "Open Archived to restore a chat, or start a new one." : "Add a friend or create a group to start talking."}</p><div className="mt-4 flex flex-wrap gap-2"><Button size="sm" onClick={() => setAddOpen(true)}><Plus className="size-3.5" /> Add contact</Button><Button size="sm" variant="outline" onClick={() => setGroupOpen(true)}><Users className="size-3.5" /> New group</Button></div></div>}
+          {ready && conversationView === "inbox" && inboxConversations.length === 0 && <div className="px-2 py-6 text-left"><Inbox className="mb-4 size-6 text-primary" /><p className="text-base font-medium tracking-tight text-foreground">Your next conversation starts here.</p><p className="mt-2 text-xs leading-6 text-muted-foreground">{archivedConversations.length ? "Open Archived to restore a chat, or start a new one." : "Add a friend or create a group to start talking."}</p><div className="mt-4 flex flex-wrap gap-2"><Button size="sm" onClick={() => setAddOpen(true)}><Plus className="size-3.5" /> Add contact</Button><Button size="sm" variant="outline" onClick={() => setGroupOpen(true)}><Users className="size-3.5" /> New group</Button></div></div>}
           {ready && conversationView === "archived" && archivedConversations.length === 0 && <div className="px-2 py-6 text-left"><Archive className="mb-4 size-6 text-primary" /><p className="text-sm text-muted-foreground">No archived chats.</p><p className="mt-2 text-xs leading-6 text-muted-foreground">Open a chat’s options and choose Archive chat to hide it here.</p></div>}
           {visibleConversations.length > 0 && filteredConversations.length === 0 && <p role="status" className="px-2 py-6 text-left text-sm text-muted-foreground">No conversations match your filter.</p>}
           {filteredConversations.map(conversation => {
+            if (conversation.kind === "community") return <CommunityRow key={conversation.id} community={conversation} archived={conversation.archived} selected={selectedCommunity === conversation.id} owner={identity.publicKey} displayName={displayName} actions={<CommunityInboxActions community={conversation} archived={conversation.archived} selected={selectedCommunity === conversation.id} onError={setError} onNotice={setNotice} />} />
             const contact = contacts.find(item => item.pub === conversation.id)
             return <ConversationRow key={conversation.id} conversation={conversation} selected={selectedConversation === conversation.id} owner={identity.publicKey} displayName={displayName} actions={<ConversationActions conversation={conversation} onError={setError} onNotice={setNotice}>{conversation.kind === "direct" && <>{contact ? <DropdownMenuItem onSelect={() => { setEditing(contact); setEditAlias(contact.alias); setEditError("") }}><Pencil /> Rename contact</DropdownMenuItem> : <DropdownMenuItem onSelect={() => { setNewPub(conversation.id); setNewAlias(""); setAddError(""); setAddOpen(true) }}><Plus /> Add to contacts</DropdownMenuItem>}<DropdownMenuItem onSelect={() => void copy(conversation.id)}><Copy /> Copy address</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => { void messaging.blockContact(conversation.id).catch(cause => setError(errorMessage(cause))) }}><Ban /> Block messages</DropdownMenuItem>{contact && <DropdownMenuItem variant="destructive" onSelect={() => setRemove(contact)}><Trash2 /> Remove contact</DropdownMenuItem>}</>}</ConversationActions>} />
           })}
@@ -248,25 +285,26 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
         <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="size-11 text-muted-foreground" aria-label="Start a chat" title="Start a chat"><Plus className="size-[18px]" /></Button></DropdownMenuTrigger><DropdownMenuContent side="right" align="start">
           <DropdownMenuItem onSelect={() => { setAddError(""); setAddOpen(true) }}><Plus />Add contact</DropdownMenuItem>
           <DropdownMenuItem onSelect={() => { setGroupError(""); setGroupOpen(true) }}><Users />Create group chat</DropdownMenuItem>
+          <DropdownMenuItem asChild><Link href="/chat/communities"><Hash />Create or join a community</Link></DropdownMenuItem>
           <DropdownMenuItem onSelect={() => { setCopied(false); setShareOpen(true) }}><QrCode />Invite a friend</DropdownMenuItem>
         </DropdownMenuContent></DropdownMenu>
         <Button variant="ghost" size="icon" className={`size-11 ${conversationView === "archived" ? "bg-primary/10 text-primary" : "text-muted-foreground"}`} aria-label={conversationView === "archived" ? "Show inbox" : "Show archived chats"} title={conversationView === "archived" ? "Show inbox" : "Show archived chats"} onClick={() => { setConversationView(current => current === "archived" ? "inbox" : "archived"); setFilter(""); setNotice("") }}>{conversationView === "archived" ? <Inbox className="size-[18px]" /> : <Archive className="size-[18px]" />}</Button>
-        {requests.length > 0 && <Button variant="ghost" size="icon" className="relative size-11 text-primary" aria-label={`${requests.length} message requests`} title="Message requests" onClick={() => { setRequestError(""); setRequestsOpen(true) }}><Inbox className="size-[18px]" /><span aria-hidden="true" className="absolute right-0 top-0 rounded-[3px] bg-primary px-1 text-[9px] leading-4 text-primary-foreground">{requests.length > 99 ? "99+" : requests.length}</span></Button>}
+        {requests.length > 0 && <Button variant="ghost" size="icon" className="relative size-11 text-primary" aria-label={`${requests.length} message requests`} title="Message requests" onClick={() => { setRequestError(""); setRequestsOpen(true) }}><Inbox className="size-[18px]" /><span aria-hidden="true" className="absolute right-0 top-0 rounded-[3px] bg-primary px-1 text-[11px] leading-4 text-primary-foreground">{requests.length > 99 ? "99+" : requests.length}</span></Button>}
         <div className="my-1 h-px w-7 shrink-0 bg-border" />
         {selfConversation ? <ConversationRow collapsed conversation={selfConversation} selected={selectedConversation === identity.publicKey} owner={identity.publicKey} displayName={displayName} /> : <Link href={conversationHref(identity.publicKey)} title="Message yourself" aria-label="Message yourself" className="flex size-11 shrink-0 items-center justify-center rounded-[4px] text-primary hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"><UserRound className="size-[18px]" /></Link>}
         <nav aria-label={conversationView === "archived" ? "Archived conversations" : "Conversations"} className="flex flex-col items-center gap-1 pt-1">
-          {visibleConversations.map(conversation => <ConversationRow key={conversation.id} collapsed conversation={conversation} selected={selectedConversation === conversation.id} owner={identity.publicKey} displayName={displayName} />)}
+          {visibleConversations.map(conversation => conversation.kind === "community" ? <CommunityRow key={conversation.id} collapsed community={conversation} archived={conversation.archived} selected={selectedCommunity === conversation.id} owner={identity.publicKey} displayName={displayName} /> : <ConversationRow key={conversation.id} collapsed conversation={conversation} selected={selectedConversation === conversation.id} owner={identity.publicKey} displayName={displayName} />)}
         </nav>
         {(error || messaging.error) && <Button variant="ghost" size="icon" className="size-11 text-destructive" aria-label={`Show inbox error: ${error || messaging.error}`} title={error || messaging.error || undefined} onClick={() => changeSidebar(false)}><CircleAlert className="size-[18px]" /></Button>}
       </div>
       <div className={`chat-bottom shrink-0 border-t border-border bg-sidebar px-3 py-2 text-muted-foreground ${sidebarCollapsed ? "md:px-2" : ""}`}>
         <button type="button" onClick={() => void copy(identity.publicKey)} title={`My identity · ${shortAddress(identity.publicKey)} · Copy public address`} aria-label="Copy your public address" className={`mb-1 flex min-h-10 w-full items-center gap-2 rounded-[4px] text-left hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring ${sidebarCollapsed ? "md:justify-center" : ""}`}>
           {copied ? <Check className="m-1 size-5 shrink-0 text-primary" /> : <IdentityIcon pubKey={identity.publicKey} size={28} />}
-          <span className={`min-w-0 ${sidebarCollapsed ? "md:hidden" : ""}`}><span className="block truncate text-xs font-medium text-foreground">{nickname || "Your identity"}</span><span className="block truncate font-mono text-[9px] text-muted-foreground">{copied ? "Address copied" : shortAddress(identity.publicKey)}</span></span>
+          <span className={`min-w-0 ${sidebarCollapsed ? "md:hidden" : ""}`}><span className="block truncate text-xs font-medium text-foreground">{nickname || "Your identity"}</span><span className="block truncate font-mono text-[11px] text-muted-foreground">{copied ? "Address copied" : shortAddress(identity.publicKey)}</span></span>
           <Copy className={`ml-auto mr-1 size-3 shrink-0 ${sidebarCollapsed ? "md:hidden" : ""}`} />
         </button>
         <div className={`flex items-center justify-between gap-1 ${sidebarCollapsed ? "md:flex-col" : ""}`}>
-          <span className={`flex min-w-0 flex-1 items-center gap-1.5 font-mono text-[9px] uppercase tracking-wide ${sidebarCollapsed ? "md:py-1" : ""}`} role="status" title={status === "online" ? "Inbox connected" : status === "connecting" ? "Connecting inbox…" : "Inbox sync unavailable"}><span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${status === "online" ? "bg-primary" : status === "connecting" ? "animate-pulse bg-muted-foreground motion-reduce:animate-none" : "bg-muted-foreground"}`} /><span className={sidebarCollapsed ? "truncate md:sr-only" : "truncate"}>{status === "online" ? "Connected" : status === "connecting" ? "Connecting…" : "Offline"}</span></span>
+          <span className={`flex min-w-0 flex-1 items-center gap-1.5 font-medium text-[11px] ${sidebarCollapsed ? "md:py-1" : ""}`} role="status" title={status === "online" ? "Inbox connected" : status === "connecting" ? "Connecting inbox…" : "Inbox sync unavailable"}><span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${status === "online" ? "bg-primary" : status === "connecting" ? "animate-pulse bg-muted-foreground motion-reduce:animate-none" : "bg-muted-foreground"}`} /><span className={sidebarCollapsed ? "truncate md:sr-only" : "truncate"}>{status === "online" ? "Connected" : status === "connecting" ? "Connecting…" : "Offline"}</span></span>
           {status === "offline" && <Button variant="ghost" size="icon" className="size-11 md:size-8" aria-label="Reconnect inbox" title="Reconnect inbox" onClick={() => void messaging.sync().catch(cause => setError(errorMessage(cause)))}><RefreshCw className="size-3.5" /></Button>}
           <div className={`flex items-center [&>button]:size-11 md:[&>button]:size-9 ${sidebarCollapsed ? "md:flex-col" : ""}`}>
             <AccountTools identity={identity} />
@@ -288,7 +326,7 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
       <QrCodeCard value={identity.publicKey} title="Your address QR code" />
       <div className="space-y-2"><Label htmlFor="invite-link">Your invite link</Label><div className="flex gap-2"><Input id="invite-link" readOnly value={inviteLink} onFocus={event => event.target.select()} className="font-mono text-xs" /><Button aria-label="Copy invite link" onClick={() => void copy(inviteLink)}>{copied ? <Check className="size-4" /> : <Copy className="size-4" />}</Button></div><p aria-live="polite" className="min-h-4 text-xs text-primary">{copied ? "Copied to clipboard" : ""}</p></div><details className="text-xs text-muted-foreground"><summary className="cursor-pointer">View full public address</summary><p className="mt-2 select-all break-all rounded-[4px] bg-muted p-3 font-mono leading-relaxed text-muted-foreground">{identity.publicKey}</p></details></DialogContent></Dialog>
 
-    <Dialog open={searchOpen} onOpenChange={setSearchOpen}><DialogContent className="max-h-[90dvh] sm:max-w-2xl"><DialogHeader><DialogTitle>Search all messages</DialogTitle><DialogDescription>Find messages, links, filenames, and polls across your conversations.</DialogDescription></DialogHeader><div className="relative"><Search className="pointer-events-none absolute left-3 top-3 size-4 text-muted-foreground" /><Input autoFocus aria-label="Search messages, links, and files" placeholder="Search messages, links, and files" value={searchQuery} onChange={event => setSearchQuery(event.target.value)} className="pl-9" /></div><div className="max-h-[55dvh] space-y-2 overflow-y-auto" aria-live="polite">{!searchQuery.trim() ? <p className="py-8 text-center text-sm text-muted-foreground">Enter a word, phrase, or filename.</p> : searchResults.length === 0 ? <p className="py-8 text-center text-sm text-muted-foreground">No matching messages.</p> : <><p className="text-xs text-muted-foreground">{searchResults.length} result{searchResults.length === 1 ? "" : "s"}{searchResults.length > 100 ? " · showing the latest 100" : ""}</p>{searchResults.slice(0, 100).map(message => { const conversation = conversations.find(item => item.id === message.conversationId); return <Link key={message.id} href={`${conversationHref(message.conversationId)}#message-${message.id}`} onClick={() => setSearchOpen(false)} className="block rounded-[4px] border border-border p-3 hover:border-primary/40 hover:bg-muted"><span className="flex gap-3 text-xs"><span className="truncate font-medium text-primary">{conversation?.kind === "self" ? "Message yourself" : conversation?.name || shortAddress(message.conversationId)}</span><time className="ml-auto shrink-0 text-muted-foreground" dateTime={new Date(message.timestamp).toISOString()}>{new Date(message.timestamp).toLocaleDateString()}</time></span><p className="mt-2 line-clamp-3 break-words text-sm text-foreground">{messagePreview(message, displayName)}</p></Link> })}</>}</div></DialogContent></Dialog>
+    <Dialog open={searchOpen} onOpenChange={setSearchOpen}><DialogContent className="max-h-[90dvh] sm:max-w-2xl"><DialogHeader><DialogTitle>Search all messages</DialogTitle><DialogDescription>Find messages, links, filenames, and polls across chats and community channels.</DialogDescription></DialogHeader><div className="relative"><Search className="pointer-events-none absolute left-3 top-3 size-4 text-muted-foreground" /><Input autoFocus aria-label="Search messages, links, and files" placeholder="Search messages, links, and files" value={searchQuery} onChange={event => setSearchQuery(event.target.value)} className="pl-9" /></div><div className="max-h-[55dvh] space-y-2 overflow-y-auto" aria-live="polite">{!searchQuery.trim() ? <p className="py-8 text-center text-sm text-muted-foreground">Enter a word, phrase, or filename.</p> : searchResults.length === 0 ? <p className="py-8 text-center text-sm text-muted-foreground">No matching messages.</p> : <><p className="text-xs text-muted-foreground">{searchResults.length} result{searchResults.length === 1 ? "" : "s"}{searchResults.length > 100 ? " · showing the latest 100" : ""}</p>{searchResults.slice(0, 100).map(message => { const conversation = conversations.find(item => item.id === message.conversationId); const community = joinedCommunities.find(item => item.id === message.conversationId); const channelId = "channelId" in message && typeof message.channelId === "string" ? message.channelId : undefined; const channel = community?.channels.find(item => item.id === channelId); const href = community ? communityHref(community.id, channelId, message.id) : `${conversationHref(message.conversationId)}#message-${message.id}`; return <Link key={`${message.conversationId}:${message.id}`} href={href} onClick={() => setSearchOpen(false)} className="block rounded-[4px] border border-border p-3 hover:border-primary/40 hover:bg-muted"><span className="flex gap-3 text-xs"><span className="truncate font-medium text-primary">{conversation?.kind === "self" ? "Message yourself" : conversation?.name || (community ? `${community.name}${channel ? ` · #${channel.name}` : ""}` : shortAddress(message.conversationId))}</span><time className="ml-auto shrink-0 text-muted-foreground" dateTime={new Date(message.timestamp).toISOString()}>{new Date(message.timestamp).toLocaleDateString()}</time></span><p className="mt-2 line-clamp-3 break-words text-sm text-foreground">{messagePreview(message, displayName)}</p></Link> })}</>}</div></DialogContent></Dialog>
 
     <Dialog open={requestsOpen} onOpenChange={setRequestsOpen}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>Message requests</DialogTitle><DialogDescription>Accept a request to start talking. Blocking stops messages from that sender.</DialogDescription></DialogHeader>{requestError && <p role="alert" className="text-sm text-destructive">{requestError}</p>}{requests.length === 0 && <p className="py-6 text-center text-sm text-muted-foreground">No pending requests.</p>}<div className="space-y-3">{requests.map(request => <div key={request.id} className="rounded-[4px] border border-border p-4"><div className="flex items-center gap-3">{request.kind === "group" ? <Users className="size-7 text-primary" /> : <IdentityIcon pubKey={request.id} size={32} />}<span className="min-w-0"><span className="block truncate text-sm font-medium">{request.name}</span><span className="block text-xs text-muted-foreground">{request.kind === "group" ? `Group invitation · ${request.members.length} members` : shortAddress(request.id)}</span></span></div><p className="mt-3 line-clamp-3 break-words text-sm text-muted-foreground">{messagePreview(request.lastMessage, displayName)}</p><div className="mt-4 flex justify-end gap-2"><Button size="sm" variant="outline" disabled={busyRequest !== null} onClick={() => void requestAction(request, false)}><Ban className="size-3.5" />{request.kind === "group" ? "Block sender" : "Block"}</Button><Button size="sm" disabled={busyRequest !== null} onClick={() => void requestAction(request, true)}>{busyRequest === request.id ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />} Accept</Button></div></div>)}</div></DialogContent></Dialog>
 

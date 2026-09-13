@@ -44,26 +44,26 @@ function preset(id: string, name: string, light: string[], dark: string[]): Colo
 }
 
 export const PRESET_THEMES: ColorTheme[] = [
-  // A shared ink-and-paper foundation, with one considered accent per palette.
+  // Each palette carries its hue through the canvas, sidebar, and conversation.
   // Keep the default colors and derived tokens in sync with globals.css.
   preset('default', 'Default',
-    ['#eeefe7', '#171b14', '#f6f7ef', '#e5e8dd', '#3c5f22', '#5d6655', '#f3f4ec', '#171b14', '#dce8ce', '#233019'],
-    ['#0b0e0b', '#eeefe7', '#131812', '#0f130e', '#ccff89', '#a1aa99', '#171d14', '#eeefe7', '#24301c', '#eff5e7']),
+    ['#eeefe7', '#171b14', '#f6f7ef', '#dfe7d2', '#3c5f22', '#5d6655', '#f3f4ec', '#171b14', '#d5ebba', '#233019'],
+    ['#0b0e0b', '#eeefe7', '#131812', '#17200e', '#ccff89', '#a1aa99', '#171d14', '#eeefe7', '#30411d', '#eff5e7']),
   preset('forest', 'Forest',
-    ['#eaefe7', '#17251c', '#f3f6ee', '#e0e7dc', '#285c3b', '#56665a', '#f0f4eb', '#17251c', '#d7e5d6', '#1d3525'],
-    ['#0b100d', '#e8eee5', '#121b15', '#0e1510', '#a6deb3', '#9eafa2', '#18221a', '#e8eee5', '#243629', '#e8f3e8']),
+    ['#e4f5eb', '#102d21', '#f4fcf7', '#c7ead5', '#075b38', '#3e6351', '#effbf3', '#102d21', '#ace1c2', '#103b26'],
+    ['#061a13', '#e3fff0', '#0c2b20', '#073424', '#64f5ae', '#9accb1', '#103d2b', '#e3fff0', '#155738', '#e7fff0']),
   preset('ocean', 'Ocean',
-    ['#e9efed', '#18272b', '#f2f6f2', '#dfe7e4', '#245c6b', '#57676b', '#eef4f0', '#18272b', '#d5e6e5', '#20383d'],
-    ['#0b1012', '#e6eeeb', '#121b1e', '#0d1518', '#9ddde9', '#9bafb2', '#172327', '#e6eeeb', '#22363c', '#e6f2f1']),
+    ['#e5efff', '#132849', '#f4f8ff', '#c9ddff', '#164aa6', '#435c82', '#edf4ff', '#132849', '#b3d1ff', '#12376b'],
+    ['#071630', '#e9f2ff', '#10264a', '#0c2145', '#86c3ff', '#a2b9dc', '#15325a', '#e9f2ff', '#1d467c', '#f0f7ff']),
   preset('lavender', 'Lavender',
-    ['#eeecef', '#28222f', '#f6f3f5', '#e5e1e8', '#614578', '#68606f', '#f2eef3', '#28222f', '#e3daeb', '#352a42'],
-    ['#100e13', '#eee9ee', '#1a161f', '#151118', '#ceb7f4', '#ada2b6', '#221c29', '#eee9ee', '#32283e', '#f0e9f7']),
+    ['#f1eaff', '#2e1746', '#fbf6ff', '#e2d1fa', '#643198', '#6a507f', '#f6edff', '#2e1746', '#d4b8f0', '#3c1e55'],
+    ['#1c0c30', '#f5eaff', '#2c1446', '#321850', '#d5adff', '#bca3d8', '#392057', '#f5eaff', '#532d7b', '#fbf2ff']),
   preset('rose', 'Rose',
-    ['#f0ece8', '#302225', '#f7f3ed', '#e9e1dc', '#824553', '#756064', '#f4efe9', '#302225', '#ebdcd9', '#432b31'],
-    ['#130e10', '#f0e9e5', '#201719', '#181214', '#eeb6c5', '#b9a4a7', '#281e21', '#f0e9e5', '#3d2b30', '#f7ebec']),
+    ['#fff0f5', '#4b1730', '#fff8fb', '#f8d2e2', '#94234e', '#80516b', '#fff1f7', '#4b1730', '#f5b9d0', '#5e1936'],
+    ['#2a0c1b', '#ffedf4', '#40142a', '#49132e', '#ff9bc6', '#d4a2b9', '#511c36', '#ffedf4', '#702446', '#fff0f6']),
   preset('monochrome', 'Monochrome',
-    ['#eeeee8', '#22231f', '#f6f6f0', '#e3e4dc', '#494c41', '#616458', '#f2f3ec', '#22231f', '#dee0d6', '#2b2e25'],
-    ['#0e0f0d', '#eeefe7', '#181a16', '#121410', '#e5e7dc', '#a5aa9b', '#1f221c', '#eeefe7', '#30352a', '#f2f3eb']),
+    ['#ededed', '#171717', '#fafafa', '#dadada', '#242424', '#575757', '#ffffff', '#171717', '#bfbfbf', '#151515'],
+    ['#101010', '#f7f7f7', '#1c1c1c', '#242424', '#f5f5f5', '#b7b7b7', '#292929', '#f7f7f7', '#454545', '#ffffff']),
 ]
 
 const hexColor = /^#[\da-f]{6}$/i
@@ -225,8 +225,8 @@ function readable(background: string, preferred?: string): string {
 export function themeVariables(colors: ThemeColors): Record<string, string> {
   const c = readColors(colors, PRESET_THEMES[0].light, 'Colors')
   const muted = mix(c.surface, c.foreground, 0.07)
-  const accent = mix(c.surface, c.accent, 0.12)
-  const sidebarAccent = mix(c.sidebar, c.accent, 0.16)
+  const accent = mix(c.surface, c.accent, 0.2)
+  const sidebarAccent = mix(c.sidebar, c.accent, 0.24)
   const border = mix(c.background, c.foreground, 0.14)
   const destructive = luminance(c.background) < 0.3 ? '#fb7185' : '#b91c1c'
   return {

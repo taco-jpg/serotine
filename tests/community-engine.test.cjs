@@ -6,16 +6,24 @@ const { test, before, beforeEach, afterEach } = require('node:test')
 const ts = require('typescript')
 const root = path.join(__dirname, '..')
 const modules = new Map(), stores = new Map(), prefs = new Map(), cursors = new Map()
-const packets = [], attempts = [], engines = []
+const packets = [], attempts = [], engines = [], notifications = []
 const runtimeWindow = new EventTarget()
 runtimeWindow.location = { origin: 'https://serotine.chat' }
-let rejectRecipient
+let rejectRecipient, historyReads = 0
 const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true, archived: [], deleted: {}, deletedMessages: {} })
 const recordsFor = owner => { if (!stores.has(owner)) stores.set(owner, new Map()); return stores.get(owner) }
 const store = {
   defaultMessagingPreferences: defaults,
   eventStorageKey: event => `${event.author}:${event.conversationId}:${event.id}`,
-  getStoredEvents: async owner => structuredClone([...recordsFor(owner).values()]),
+  getStoredEvents: async owner => { historyReads++; return structuredClone([...recordsFor(owner).values()]) },
+  deleteStoredCommunityMessage: async (owner, cid, channelId, messageId) => {
+    const values = recordsFor(owner)
+    const record = [...values.values()].find(item => item.event.conversationId === cid && item.event.id === messageId && item.event.payload.community?.channelId === channelId)
+    if (!record) throw new Error('Message missing')
+    const p = prefs.get(owner) || defaults()
+    prefs.set(owner, { ...p, deletedMessages: { ...p.deletedMessages, [cid]: { messageIds: [messageId], eventKeys: [record.key], attachmentIds: [], legacyMessageKeys: [] } } })
+    values.delete(record.key)
+  },
   saveStoredEvent: async (owner, record) => {
     const prior = recordsFor(owner).get(record.key)
     if (prior && JSON.stringify(prior.event) !== JSON.stringify(record.event)) throw new Error('Conflicting message identifier')
@@ -60,7 +68,7 @@ function load(filename) {
     if (specifier === './messaging-store') return store
     if (specifier === './relay-client') return relay
     if (specifier === './storage') return { exportAllMessagesFromStorage: async () => [], migrateLegacyHistory: async () => {}, deleteConversationHistoryFromStorage: async () => {} }
-    if (specifier === './message-notifications') return { notifyIncoming() {}, requestMessagingNotifications: async () => 'denied' }
+    if (specifier === './message-notifications') return { notifyIncoming(...args) { notifications.push(args) }, requestMessagingNotifications: async () => 'denied' }
     if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
     return require(specifier)
   }
@@ -79,7 +87,7 @@ before(async () => {
   }
   ;[alice, bob, charlie] = await Promise.all([identity(), identity(), identity()])
 })
-beforeEach(() => { stores.clear(); prefs.clear(); cursors.clear(); packets.length = attempts.length = 0; rejectRecipient = undefined })
+beforeEach(() => { stores.clear(); prefs.clear(); cursors.clear(); packets.length = attempts.length = notifications.length = 0; rejectRecipient = undefined; historyReads = 0 })
 afterEach(() => { for (const engine of engines.splice(0)) engine.dispose() })
 async function engine(identity) {
   const instance = new messaging.MessagingEngine(identity)
@@ -287,7 +295,8 @@ test('a full 20-member community delivers each new text once to all 19 encrypted
   const delivered = packets.filter(packet => packet.id === sent)
   assert.equal(delivered.length, 19)
   assert.equal(new Set(delivered.map(packet => packet.recipientPubKey)).size, 19)
-  assert.equal(message(owner, sent)?.delivery, 'sent')
+  assert.equal(message(owner, sent)?.delivery, 'delivered')
+  assert.equal(message(owner, sent)?.deliveredTo.length, 19)
   for (const guest of guests) {
     assert.equal(guest.service.model.messages.filter(message => message.id === sent).length, 1)
     assert.equal(message(guest, sent)?.content, 'One message for twenty participants')
@@ -341,4 +350,235 @@ test('blocking the owner does not disable their authorized moderation of another
   await owner.service.hideMessage(id, sent)
   await sync(owner, viewer)
   assert.equal(message(viewer, sent)?.hidden, true)
+})
+
+test('community text, polls and complete files receive delivery and optional read receipts', async () => {
+  const owner = await engine(alice), guest = await engine(bob)
+  const { id, invite, channel } = await create(owner)
+  await join(owner, guest, invite)
+  const text = await owner.service.sendMessage(id, channel, 'Receipts work here too')
+  const poll = await owner.service.createPoll(id, channel, 'Which day?', ['Monday', 'Tuesday'])
+  const attachmentId = crypto.randomUUID()
+  await owner.service.sendEvent(id, channel, 'attachment-chunk', { attachmentId, index: 0, data: 'SGk=' })
+  const sha256 = Buffer.from(await crypto.subtle.digest('SHA-256', Buffer.from('Hi'))).toString('hex')
+  const file = await owner.service.sendEvent(id, channel, 'attachment', { attachment: { id: attachmentId, name: 'note.txt', mime: 'text/plain', size: 2, chunks: 1, sha256, kind: 'file' } })
+  await sync(owner, guest, owner)
+  for (const messageId of [text, poll, file]) {
+    assert.deepEqual(message(owner, messageId).deliveredTo, [bob.publicKey])
+    assert.equal(message(owner, messageId).delivery, 'delivered')
+  }
+  assert.deepEqual(guest.service.getAttachmentChunks(id, channel, file), [{ index: 0, data: 'SGk=' }])
+  await guest.instance.markCommunityRead(id, channel)
+  await sync(guest, owner)
+  for (const messageId of [text, poll, file]) assert.deepEqual(message(owner, messageId).readBy, [bob.publicKey])
+  assert.ok(notifications.some(([row]) => row.id === poll), 'polls enter the notification pipeline')
+  assert.ok(notifications.some(([row]) => row.id === file), 'files enter the notification pipeline')
+
+  await guest.instance.setReadReceipts(false)
+  const silent = await owner.service.sendMessage(id, channel, 'Read locally without a read receipt')
+  await sync(owner, guest)
+  await guest.instance.markCommunityRead(id, channel)
+  await sync(guest, owner)
+  assert.equal(community(guest, id).channelUnread[channel], 0)
+  assert.deepEqual(message(owner, silent).readBy, [])
+})
+
+test('hidden tabs and moderated messages do not advance community read state', async t => {
+  const owner = await engine(alice), guest = await engine(bob)
+  const { id, invite, channel } = await create(owner)
+  await join(owner, guest, invite)
+  const text = await owner.service.sendMessage(id, channel, 'Visible only after focus')
+  await sync(owner, guest)
+  const originalDocument = globalThis.document
+  globalThis.document = { visibilityState: 'hidden', hasFocus: () => false }
+  t.after(() => { if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument })
+  await guest.instance.markCommunityRead(id, channel)
+  assert.equal(guest.instance.preferences.readAt[protocol.communityChannelKey(id, channel)], undefined)
+  await owner.service.hideMessage(id, text)
+  await sync(owner, guest)
+  globalThis.document = { visibilityState: 'visible', hasFocus: () => true }
+  await guest.instance.markCommunityRead(id, channel)
+  assert.equal(guest.instance.preferences.readAt[protocol.communityChannelKey(id, channel)], undefined)
+  const readReceipts = guest.instance.records.filter(row => row.event.payload.community?.type === 'receipt' && row.event.payload.community.receipt === 'read')
+  assert.equal(readReceipts.length, 0)
+})
+
+test('archive and local message deletion preserve community membership and other channels', async () => {
+  const owner = await engine(alice), guest = await engine(bob)
+  const { id, invite, channel } = await create(owner)
+  await join(owner, guest, invite)
+  const text = await owner.service.sendMessage(id, channel, 'Remove this from my view')
+  const otherChannel = community(owner, id).channels.find(item => item.name === 'help').id
+  const retained = await owner.service.sendMessage(id, otherChannel, 'Keep the other channel')
+  await sync(owner, guest)
+  await assert.rejects(guest.instance.deleteCommunityMessage(id, otherChannel, text), /no longer available/)
+  await guest.instance.deleteCommunityMessage(id, channel, text)
+  assert.equal(message(guest, text), undefined)
+  assert.equal(message(guest, retained).content, 'Keep the other channel')
+  assert.equal(message(owner, text).content, 'Remove this from my view')
+  await guest.instance.archiveCommunity(id)
+  assert.ok(guest.instance.preferences.archived.includes(id))
+  assert.equal(community(guest, id).joined, true)
+  const later = await owner.service.sendMessage(id, channel, 'A message while archived')
+  await sync(owner, guest)
+  assert.equal(notifications.find(([row]) => row.id === later)?.[1].archived, true)
+  await guest.instance.archiveCommunity(id, false)
+  assert.equal(guest.instance.preferences.archived.includes(id), false)
+})
+
+test('routine community sends use one signature and only one extra history read versus a direct send', async t => {
+  const owner = await engine(alice), guest = await engine(bob)
+  const { id, invite, channel } = await create(owner)
+  await join(owner, guest, invite)
+  let signatures = 0
+  const sign = crypto.subtle.sign.bind(crypto.subtle)
+  t.mock.method(crypto.subtle, 'sign', async (...args) => { signatures++; return sign(...args) })
+  historyReads = 0
+  const startedDirect = performance.now()
+  const direct = await owner.instance.sendText(bob.publicKey, 'Comparable text')
+  const directMs = performance.now() - startedDirect
+  const directReads = historyReads, directSignatures = signatures
+  historyReads = signatures = 0
+  const startedCommunity = performance.now()
+  const server = await owner.service.sendMessage(id, channel, 'Comparable text')
+  const communityMs = performance.now() - startedCommunity
+  assert.deepEqual(outgoing(alice.publicKey, direct).event.recipients, outgoing(alice.publicKey, server).event.recipients)
+  assert.equal(directSignatures, 1)
+  assert.equal(signatures, 1)
+  assert.equal(directReads, 1)
+  assert.equal(historyReads, 2, 'one post-signing membership check plus the durable message view refresh')
+  t.diagnostic(`Local preparation with one recipient: direct ${directMs.toFixed(2)} ms / ${directReads} history read / ${directSignatures} signature; community ${communityMs.toFixed(2)} ms / ${historyReads} history reads / ${signatures} signature. Transport is excluded.`)
+})
+
+test('a send queued while sync finishes is flushed immediately without waiting for the polling interval', async t => {
+  const owner = await engine(alice)
+  const { id, channel } = await create(owner)
+  await sync(owner)
+  let enterLegacy, releaseLegacy, finishFollowup
+  const entered = new Promise(resolve => { enterLegacy = resolve })
+  const release = new Promise(resolve => { releaseLegacy = resolve })
+  const followup = new Promise(resolve => { finishFollowup = resolve })
+  let first = true
+  const legacy = relay.getLegacyInbox
+  t.mock.method(relay, 'getLegacyInbox', async (...args) => {
+    if (first) { first = false; enterLegacy(); await release }
+    return legacy(...args)
+  })
+  owner.instance.sync = async () => { await owner.synchronize(); finishFollowup() }
+  const initial = owner.synchronize()
+  await entered
+  const sent = await owner.service.sendMessage(id, channel, 'Queued after this pass drained its outbox')
+  assert.equal(attempts.some(item => item.id === sent), false)
+  releaseLegacy()
+  await initial
+  await followup
+  assert.equal(attempts.filter(item => item.id === sent).length, 1)
+})
+
+test('file pieces avoid history reads until metadata performs its membership check and view refresh', async () => {
+  const owner = await engine(alice)
+  const { id, channel } = await create(owner)
+  const attachmentId = crypto.randomUUID()
+  const bytes = Buffer.alloc(30 * 1024 + 2, 65)
+  const sha256 = Buffer.from(await crypto.subtle.digest('SHA-256', bytes)).toString('hex')
+  historyReads = 0
+  await owner.service.sendEvent(id, channel, 'attachment-chunk', { attachmentId, index: 0, data: bytes.subarray(0, 30 * 1024).toString('base64') })
+  await owner.service.sendEvent(id, channel, 'attachment-chunk', { attachmentId, index: 1, data: bytes.subarray(30 * 1024).toString('base64') })
+  assert.equal(historyReads, 0)
+  const file = await owner.service.sendEvent(id, channel, 'attachment', { attachment: { id: attachmentId, name: 'pieces.txt', mime: 'text/plain', size: bytes.length, chunks: 2, sha256, kind: 'file' } })
+  assert.equal(historyReads, 2)
+  assert.equal(owner.service.getAttachmentChunks(id, channel, file).length, 2)
+})
+
+test('membership changed during encryption cancels the stale community packet before relay publication', async t => {
+  const owner = await engine(alice), sender = await engine(bob), removed = await engine(charlie)
+  const { id, invite, channel } = await create(owner)
+  await join(owner, sender, invite)
+  await join(owner, removed, invite)
+  await sync(sender)
+  const stale = await sender.service.sendMessage(id, channel, 'Must not reach a removed member')
+  await owner.service.moderate(id, 'remove', charlie.publicKey)
+  const removal = [...recordsFor(alice.publicKey).values()].filter(row => row.event.conversationId === id && row.event.payload.community?.type === 'state').sort((a, b) => b.event.payload.community.state.epoch - a.event.payload.community.state.epoch)[0]
+  const encrypt = cryptography.encryptForPeer
+  let injected = false
+  t.mock.method(cryptography, 'encryptForPeer', async (...args) => {
+    const encrypted = await encrypt(...args)
+    if (!injected && JSON.parse(args[0]).id === stale) {
+      injected = true
+      await store.saveStoredEvent(bob.publicKey, { ...structuredClone(removal), local: false, delivered: [] })
+    }
+    return encrypted
+  })
+  await sync(sender)
+  assert.equal(injected, true)
+  assert.equal(attempts.filter(item => item.id === stale).length, 0)
+  assert.equal(community(sender, id).members.includes(charlie.publicKey), false)
+  assert.equal(outgoing(bob.publicKey, stale).delivered.length, 0)
+})
+
+test('overlapping permission refreshes do not finish until the latest membership snapshot is applied', async t => {
+  const owner = await engine(alice), guest = await engine(bob)
+  const { id, invite } = await create(owner)
+  await join(owner, guest, invite)
+  const prior = structuredClone([...recordsFor(bob.publicKey).values()])
+  await owner.service.moderate(id, 'remove', bob.publicKey)
+  const removal = [...recordsFor(alice.publicKey).values()].filter(row => row.event.conversationId === id && row.event.payload.community?.type === 'state').sort((a, b) => b.event.payload.community.state.epoch - a.event.payload.community.state.epoch)[0]
+  const current = [...prior, { ...structuredClone(removal), local: false, delivered: [] }]
+  let releaseFirst, releaseSecond, reads = 0, firstFinished = false
+  const firstReady = new Promise(resolve => { releaseFirst = resolve })
+  const secondReady = new Promise(resolve => { releaseSecond = resolve })
+  t.mock.method(store, 'getStoredEvents', async () => {
+    if (++reads === 1) { await firstReady; return prior }
+    await secondReady; return current
+  })
+  const first = guest.instance.refresh().then(() => { firstFinished = true })
+  const second = guest.instance.refresh()
+  releaseFirst()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(firstFinished, false, 'an obsolete read cannot release the permission-check caller early')
+  releaseSecond()
+  await Promise.all([first, second])
+  assert.equal(community(guest, id).joined, false)
+})
+
+test('files receive one read receipt when late chunks arrive after local unread state was cleared', async () => {
+  const owner = await engine(alice), guest = await engine(bob)
+  const { id, invite, channel } = await create(owner)
+  await join(owner, guest, invite)
+  const attachmentId = crypto.randomUUID()
+  const sha256 = Buffer.from(await crypto.subtle.digest('SHA-256', Buffer.from('Hi'))).toString('hex')
+  const chunk = await owner.service.sendEvent(id, channel, 'attachment-chunk', { attachmentId, index: 0, data: 'SGk=' })
+  const file = await owner.service.sendEvent(id, channel, 'attachment', { attachment: { id: attachmentId, name: 'late.txt', mime: 'text/plain', size: 2, chunks: 1, sha256, kind: 'file' } })
+  await store.saveStoredEvent(bob.publicKey, { ...structuredClone(outgoing(alice.publicKey, file)), local: false, delivered: [] })
+  await guest.instance.refresh()
+  await guest.instance.markCommunityRead(id, channel)
+  const receiptCount = () => guest.instance.records.filter(row => row.event.author === bob.publicKey && row.event.payload.community?.type === 'receipt' && row.event.payload.community.targetId === file && row.event.payload.community.receipt === 'read').length
+  assert.equal(community(guest, id).channelUnread[channel], 0, 'metadata clears the local badge')
+  assert.equal(receiptCount(), 0, 'missing bytes cannot receive a read acknowledgement')
+  await store.saveStoredEvent(bob.publicKey, { ...structuredClone(outgoing(alice.publicKey, chunk)), local: false, delivered: [] })
+  await guest.instance.refresh()
+  await guest.instance.markCommunityRead(id, channel)
+  assert.equal(receiptCount(), 1)
+  historyReads = 0
+  await guest.instance.markCommunityRead(id, channel)
+  assert.equal(receiptCount(), 1, 'the accepted receipt makes later render checks no-ops')
+  assert.equal(historyReads, 0)
+})
+
+test('retrying a community file leaves failed chunks with the same attachment ID in another channel untouched', async () => {
+  const owner = await engine(alice)
+  const { id, channel } = await create(owner)
+  const otherChannel = community(owner, id).channels.find(item => item.name === 'help').id
+  const attachmentId = crypto.randomUUID()
+  const sha256 = Buffer.from(await crypto.subtle.digest('SHA-256', Buffer.from('Hi'))).toString('hex')
+  const meta = { id: attachmentId, name: 'file.txt', mime: 'text/plain', size: 2, chunks: 1, sha256, kind: 'file' }
+  const chunk = await owner.service.sendEvent(id, channel, 'attachment-chunk', { attachmentId, index: 0, data: 'SGk=' })
+  const file = await owner.service.sendEvent(id, channel, 'attachment', { attachment: meta })
+  const otherChunk = await owner.service.sendEvent(id, otherChannel, 'attachment-chunk', { attachmentId, index: 0, data: 'SGk=' })
+  await owner.service.sendEvent(id, otherChannel, 'attachment', { attachment: meta })
+  for (const messageId of [chunk, otherChunk]) await store.saveStoredEvent(alice.publicKey, { ...outgoing(alice.publicKey, messageId), error: 'Failed file piece', failedRecipients: [alice.publicKey] })
+  await owner.instance.refresh()
+  await owner.instance.retry(file)
+  assert.equal(outgoing(alice.publicKey, chunk).error, undefined)
+  assert.equal(outgoing(alice.publicKey, otherChunk).error, 'Failed file piece')
 })

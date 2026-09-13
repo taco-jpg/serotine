@@ -2,7 +2,7 @@ import { isCommunityId } from "./community-protocol"
 import { openDB, type DBSchema, type IDBPTransaction } from "idb"
 import { ID_PATTERN, PUBLIC_KEY_PATTERN } from "./protocol"
 import type { MessagingPreferences, MessagingSnapshot, StoredEvent } from "./messaging-types"
-import { isDeletedStoredEvent, legacyMessageKey, mergeConversationDeletions, mergeMessageDeletions, storedConversationId } from "./messaging-history"
+import { communityAttachmentKey, isDeletedStoredEvent, legacyMessageKey, mergeConversationDeletions, mergeMessageDeletions, storedConversationId } from "./messaging-history"
 import { isPrivateEventExpired, privateDestroyCutoffs, privateMessageTarget } from "./private-messaging"
 export { isDeletedConversationEvent } from "./messaging-history"
 
@@ -224,22 +224,36 @@ export async function deleteStoredConversation(owner: string, cid: string) {
 
 /** Commit the tombstone and payload removal together, including pending outbox pieces. */
 export async function deleteStoredMessage(owner: string, cid: string, messageId: string, legacyRows: Array<{ senderPubKey: string; id: string }> = []) {
+  if (isCommunityId(cid)) throw new Error("Choose a community channel to delete this message.")
+  return deleteStoredMessageTarget(owner, cid, messageId, legacyRows)
+}
+
+/** Community deletion retains signed authority and checks the selected channel. */
+export async function deleteStoredCommunityMessage(owner: string, cid: string, channelId: string, messageId: string) {
+  if (!isCommunityId(cid) || !ID_PATTERN.test(channelId)) throw new Error("Choose a valid community channel.")
+  return deleteStoredMessageTarget(owner, cid, messageId, [], channelId)
+}
+
+async function deleteStoredMessageTarget(owner: string, cid: string, messageId: string, legacyRows: Array<{ senderPubKey: string; id: string }>, channelId?: string) {
   if (!validConversation(cid) || !ID_PATTERN.test(messageId)) throw new Error("Choose a valid message.")
   const { buildMessagingModel } = await import("./messaging")
+  const { buildCommunityModel } = await import("./community-protocol")
   const db = await database(owner)
   try {
     const tx = db.transaction(["events", "metadata"], "readwrite")
     try {
       const preferences = withDefaults(await tx.objectStore("metadata").get("preferences") as Partial<MessagingPreferences> | undefined)
       const records = await tx.objectStore("events").getAll()
-      const model = buildMessagingModel(records, owner, [], preferences)
-      const target = model.messages.find(message => message.conversationId === cid && message.id === messageId)
+      const messages = channelId === undefined ? buildMessagingModel(records, owner, [], preferences).messages
+        : buildCommunityModel(records, owner, preferences).messages.filter(message => message.channelId === channelId)
+      const target = messages.find(message => message.conversationId === cid && message.id === messageId)
       const prior = preferences.deletedMessages[cid]
       if (!target && !prior?.messageIds.includes(messageId)) throw new Error("This message is no longer available.")
       const deletion = {
         deletedAt: Math.max(Date.now(), prior?.deletedAt ?? 0), eventKeys: [...(prior?.eventKeys ?? [])],
         messageIds: [...new Set([...(prior?.messageIds ?? []), messageId])],
-        attachmentKeys: [...new Set([...(prior?.attachmentKeys ?? []), ...(target?.attachment ? [legacyMessageKey(target.senderPubKey, target.attachment.id)] : [])])],
+        attachmentKeys: [...new Set([...(prior?.attachmentKeys ?? []), ...(target?.attachment ? [channelId === undefined
+          ? legacyMessageKey(target.senderPubKey, target.attachment.id) : communityAttachmentKey(target.senderPubKey, channelId, target.attachment.id)] : [])])],
         legacyKeys: [...new Set([...(prior?.legacyKeys ?? []), ...legacyRows.map(row => legacyMessageKey(row.senderPubKey, row.id))])],
         groupEvents: [...(prior?.groupEvents ?? [])],
       }
@@ -266,12 +280,15 @@ function validPreferenceKey(value: string) {
   return !!match && isCommunityId(match[1]) && ID_PATTERN.test(match[2])
 }
 function validEventKey(key: string, cid: string, owner: string) {
-  const match = key.match(/^(04[0-9a-f]{128}):(group:[^:]+|04[0-9a-f]{128}):([^:]+)$/)
-  return !!match && ID_PATTERN.test(match[3]) && validConversation(match[2]) && (match[2].startsWith("group:") ? match[2] : match[1] === owner ? match[2] : match[1]) === cid
+  const match = key.match(/^(04[0-9a-f]{128}):(community:04[0-9a-f]{128}:[^:]+|group:[^:]+|04[0-9a-f]{128}):([^:]+)$/)
+  return !!match && ID_PATTERN.test(match[3]) && validConversation(match[2]) && (match[2].startsWith("group:") || isCommunityId(match[2]) ? match[2] : match[1] === owner ? match[2] : match[1]) === cid
 }
 function validMessageKey(key: string, cid: string, owner: string, legacy: boolean) {
   try {
     const value = JSON.parse(key)
+    if (isCommunityId(cid)) return !legacy && Array.isArray(value) && value.length === 3
+      && typeof value[0] === "string" && PUBLIC_KEY_PATTERN.test(value[0]) && typeof value[1] === "string" && ID_PATTERN.test(value[1])
+      && typeof value[2] === "string" && ID_PATTERN.test(value[2]) && key === communityAttachmentKey(value[0], value[1], value[2])
     return Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && PUBLIC_KEY_PATTERN.test(value[0])
       && (cid.startsWith("group:") ? !legacy : value[0] === owner || value[0] === cid)
       && typeof value[1] === "string" && (legacy ? value[1].length > 0 && value[1].length <= 160 : ID_PATTERN.test(value[1]))

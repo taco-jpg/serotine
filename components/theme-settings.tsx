@@ -91,12 +91,12 @@ function ThemePreview({ colors }: { colors: ThemeColors }) {
       <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] text-xs sm:grid-cols-[7rem_minmax(0,1fr)]">
         <div className="space-y-3 border-r border-border bg-sidebar p-2 text-sidebar-foreground">
           <p className="py-1 text-sm font-semibold tracking-tight">serotine<span className="text-primary">.</span></p>
-          <p className="font-mono text-[9px] uppercase tracking-widest text-muted-foreground">Messages</p>
+          <p className="text-[11px] font-medium text-muted-foreground">Messages</p>
           <div className="border-l-2 border-sidebar-ring bg-sidebar-accent px-2 py-1.5 text-sidebar-accent-foreground">Study group</div>
           <p className="px-2 text-muted-foreground">Saved notes</p>
         </div>
         <div className="min-w-0 space-y-3 p-3">
-          <p className="border-b border-border pb-2 font-medium">Study group <span className="block pt-1 font-mono text-[9px] font-normal uppercase tracking-wider text-muted-foreground">Today</span></p>
+          <p className="border-b border-border pb-2 font-medium">Study group <span className="block pt-1 text-[11px] font-normal text-muted-foreground">Today</span></p>
           <div className="w-fit max-w-[92%] rounded-sm border border-border bg-message-incoming px-3 py-2 text-message-incoming-foreground">How does this look?</div>
           <div className="ml-auto w-fit max-w-[92%] rounded-sm border-l-2 border-primary bg-message-outgoing px-3 py-2 text-message-outgoing-foreground">Feels like Serotine.</div>
           <p><a href="#" onClick={(event) => event.preventDefault()} className="text-primary underline underline-offset-2">Shared notes</a></p>
@@ -202,7 +202,7 @@ function ThemeSettingsContent({ onClose, initialError }: { onClose: () => void; 
   return (
     <DialogContent className="grid-cols-[minmax(0,1fr)] gap-5 sm:max-w-3xl" style={safeThemeStyle(appearance)}>
       <DialogHeader className="border-b border-border pb-4 text-left">
-        <p className="mb-1 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground"><Palette className="size-3 text-primary" aria-hidden="true" />Appearance</p>
+        <p className="mb-1 flex items-center gap-2 text-xs font-semibold text-muted-foreground"><Palette className="size-3 text-primary" aria-hidden="true" />Appearance</p>
         <DialogTitle className="text-2xl font-medium tracking-tight">{draft ? "Edit custom theme" : "Palettes & custom themes"}</DialogTitle>
         <DialogDescription>
           {draft ? "Make it yours. Preview both variants, then save your colors." : "One familiar space, in your colors. Every palette includes a light and dark variant."}
@@ -221,7 +221,7 @@ function ThemeSettingsContent({ onClose, initialError }: { onClose: () => void; 
           }, "Custom theme saved and applied.")
         }} className="min-w-0 space-y-4">
           <div className="space-y-1.5">
-            <label htmlFor={`${id}-name`} className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Theme name</label>
+            <label htmlFor={`${id}-name`} className="text-xs font-medium text-muted-foreground">Theme name</label>
             <input id={`${id}-name`} autoFocus required maxLength={MAX_THEME_NAME_LENGTH} value={draft.name}
               onChange={(event) => setDraft({ ...draft, name: event.target.value })}
               className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring" />
@@ -233,7 +233,7 @@ function ThemeSettingsContent({ onClose, initialError }: { onClose: () => void; 
                 {(["light", "dark"] as const).map((mode) => (
                   <label key={mode} className="relative flex-1 cursor-pointer">
                     <input type="radio" name={`${id}-variant`} value={mode} checked={previewMode === mode} onChange={() => setPreviewMode(mode)} className="peer sr-only" />
-                    <span className="block rounded-sm px-2 py-2 text-center font-mono text-[10px] uppercase tracking-wider text-muted-foreground peer-checked:bg-primary peer-checked:text-primary-foreground peer-focus-visible:ring-2 peer-focus-visible:ring-ring">{mode === "light" ? "Light variant" : "Dark variant"}</span>
+                    <span className="block rounded-sm px-2 py-2 text-center text-xs font-medium text-muted-foreground peer-checked:bg-primary peer-checked:text-primary-foreground peer-focus-visible:ring-2 peer-focus-visible:ring-ring">{mode === "light" ? "Light variant" : "Dark variant"}</span>
                   </label>
                 ))}
               </fieldset>
@@ -255,7 +255,7 @@ function ThemeSettingsContent({ onClose, initialError }: { onClose: () => void; 
               }}><RotateCcw aria-hidden="true" />Reset colors to {basePreset?.name}</Button>
             </div>
             <div className="min-w-0 space-y-3">
-              <p className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Live preview · {previewMode}</p>
+              <p className="text-xs font-medium text-muted-foreground">Live preview · {previewMode}</p>
               <ThemePreview colors={draft[previewMode]} />
               <p className="text-xs text-muted-foreground">Edit both variants so your theme also works when the system appearance changes.</p>
               {warnings.length > 0 ? (
@@ -282,8 +282,8 @@ function ThemeSettingsContent({ onClose, initialError }: { onClose: () => void; 
         <>
           <section aria-labelledby={`${id}-presets`} className="min-w-0 space-y-3">
             <div className="flex items-center justify-between gap-2">
-              <h3 id={`${id}-presets`} className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Presets</h3>
-              <span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">{appearance} appearance</span>
+              <h3 id={`${id}-presets`} className="text-xs font-medium text-muted-foreground">Presets</h3>
+              <span className="text-[11px] text-muted-foreground">{appearance} appearance</span>
             </div>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {PRESET_THEMES.map((preset, index) => (
@@ -292,7 +292,7 @@ function ThemeSettingsContent({ onClose, initialError }: { onClose: () => void; 
                   className="group min-w-0 space-y-2.5 rounded-sm border border-border bg-background p-2 text-left outline-none transition-colors hover:border-primary/60 focus-visible:ring-2 focus-visible:ring-ring aria-pressed:border-primary aria-pressed:bg-accent disabled:opacity-50">
                   <ThemeSwatches theme={preset} mode={appearance} />
                   <span className="flex items-center justify-between gap-2 px-0.5 pb-0.5 text-xs font-medium">
-                    <span className="flex min-w-0 items-center gap-2"><span className="font-mono text-[9px] text-muted-foreground" aria-hidden="true">0{index + 1}</span>{preset.name}</span>
+                    <span className="flex min-w-0 items-center gap-2"><span className="tabular-nums text-[11px] text-muted-foreground" aria-hidden="true">0{index + 1}</span>{preset.name}</span>
                     {palette.id === preset.id && <Check className="size-3.5 shrink-0 text-primary" aria-hidden="true" />}
                   </span>
                 </button>
@@ -301,7 +301,7 @@ function ThemeSettingsContent({ onClose, initialError }: { onClose: () => void; 
           </section>
           <section aria-labelledby={`${id}-custom`} className="min-w-0 space-y-3 border-t border-border pt-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 id={`${id}-custom`} className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Your themes <span className="font-normal">({preferences.customThemes.length}/{MAX_CUSTOM_THEMES})</span></h3>
+              <h3 id={`${id}-custom`} className="text-xs font-medium text-muted-foreground">Your themes <span className="font-normal">({preferences.customThemes.length}/{MAX_CUSTOM_THEMES})</span></h3>
               <div className="flex gap-1.5">
                 <input ref={inputRef} type="file" accept=".json,application/json" aria-label="Import theme file" className="sr-only" tabIndex={-1} onChange={importFile} />
                 <Button variant="outline" size="sm" disabled={!ready || importing} onClick={() => inputRef.current?.click()}><Upload aria-hidden="true" />{importing ? "Importing…" : "Import"}</Button>

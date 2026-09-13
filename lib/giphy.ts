@@ -18,8 +18,52 @@ export type GiphyGif = {
 
 export type GiphyPage = { gifs: GiphyGif[]; nextOffset: number | null }
 
-export function hasGiphyApiKey(): boolean {
-  return Boolean(process.env.NEXT_PUBLIC_GIPHY_API_KEY?.trim())
+type ConfigRequest = { controller: AbortController; promise: Promise<string>; users: number }
+let runtimeKey = ""
+let configRequest: ConfigRequest | null = null
+
+async function fetchRuntimeKey(signal: AbortSignal): Promise<string> {
+  // This endpoint exposes only the public app key. GIF IDs and searches still
+  // go directly to GIPHY, never through Serotine's server.
+  const response = await fetch("/api/giphy/config", { signal, credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store", redirect: "error" })
+  if (!response.ok) throw new Error("Unable to load GIF settings. Please try again.")
+  const body = object(await response.json())
+  const key = typeof body?.apiKey === "string" ? body.apiKey.trim() : ""
+  if (!key) throw new Error("GIFs haven’t been enabled on this site yet. Try again after the site settings are updated.")
+  if (key.length > 512) throw new Error("Unable to load GIF settings. Please try again.")
+  if (!signal.aborted) runtimeKey = key
+  return key
+}
+
+function getRuntimeKey(signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) return Promise.reject(signal.reason)
+  if (runtimeKey) return Promise.resolve(runtimeKey)
+  if (!configRequest) {
+    const controller = new AbortController()
+    const shared: ConfigRequest = { controller, promise: fetchRuntimeKey(controller.signal), users: 0 }
+    shared.promise = shared.promise.finally(() => { if (configRequest === shared) configRequest = null })
+    configRequest = shared
+  }
+  const shared = configRequest
+  shared.users++
+  return new Promise((resolve, reject) => {
+    let finished = false
+    const finish = (settle: () => void) => {
+      if (finished) return
+      finished = true
+      signal?.removeEventListener("abort", abort)
+      shared.users--
+      // One hidden card must not cancel configuration for another visible card.
+      if (!shared.users && configRequest === shared) {
+        configRequest = null
+        shared.controller.abort()
+      }
+      settle()
+    }
+    const abort = () => finish(() => reject(signal?.reason))
+    signal?.addEventListener("abort", abort, { once: true })
+    shared.promise.then(key => finish(() => resolve(key)), error => finish(() => reject(error)))
+  })
 }
 
 export function giphyPageUrl(id: string): string {
@@ -83,8 +127,8 @@ function parseGif(value: unknown): GiphyGif {
 }
 
 async function request(path: string, params: Record<string, string>, signal?: AbortSignal): Promise<Record<string, unknown>> {
-  const key = process.env.NEXT_PUBLIC_GIPHY_API_KEY?.trim()
-  if (!key) throw new Error("GIF search has not been enabled on this site yet.")
+  const key = process.env.NEXT_PUBLIC_GIPHY_API_KEY?.trim() || await getRuntimeKey(signal)
+  signal?.throwIfAborted()
   const url = new URL(`${GIPHY_API}${path}`)
   url.search = new URLSearchParams({ api_key: key, ...params, rating: "g" }).toString()
   const response = await fetch(url, { signal, credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store", redirect: "error" })

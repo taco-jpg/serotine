@@ -252,7 +252,7 @@ test('event send requests are rate limited independently of legacy messages', as
   assert.equal((await h.call('storeEncryptedMessage', 'message:send', legacy, alice)).success, true)
 })
 
-test('a 10 MiB file traverses signed group events, encrypted HTTP relay pages and verified assembly', async t => {
+test('a 12 MiB file traverses signed group events, encrypted HTTP relay pages and verified assembly', async t => {
   const h = harness(t)
   const participants = await Promise.all(Array.from({ length: 20 }, () => h.identity()))
   const [alice, bob] = participants
@@ -260,7 +260,7 @@ test('a 10 MiB file traverses signed group events, encrypted HTTP relay pages an
   const files = h.load(path.join(root, 'lib/attachments.ts'))
   const messaging = h.load(path.join(root, 'lib/messaging.ts'))
   const { MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT, MAX_EVENT_PACKET_LENGTH } = h.load(path.join(root, 'lib/protocol.ts'))
-  const original = Uint8Array.from({ length: files.MAX_FILE_BYTES }, (_, i) => i % 251)
+  const original = Uint8Array.from({ length: 12 * 1024 * 1024 }, (_, i) => i % 251)
   const group = await messaging.signGroup({ id: `group:${crypto.randomUUID()}`, admin: alice.publicKey,
     members: participants.map(p => p.publicKey), name: 'A complete twenty-member group', epoch: 1, updatedAt: Date.now() }, signer)
   let totalCiphertext = 0, count = 0
@@ -274,8 +274,8 @@ test('a 10 MiB file traverses signed group events, encrypted HTTP relay pages an
     totalCiphertext += Buffer.byteLength(sent.data.encryptedData)
     count++
     return event.id
-  }, group.id, new File([original], 'large-project.zip', { type: 'application/zip' }))
-  assert.equal(count, files.MAX_ATTACHMENT_CHUNKS + 1)
+  }, group.id, new File([original], 'large-project.zip', { type: 'application/zip' }), 'file', undefined, undefined, group)
+  assert.equal(count, Math.ceil(original.length / files.ATTACHMENT_CHUNK_BYTES) + 1)
   assert.ok(totalCiphertext * 19 < MAX_RETAINED_EVENT_BYTES, 'all nineteen encrypted copies fit the sender budget')
   assert.ok(count * 19 < MAX_RETAINED_EVENT_COUNT)
   let after = 0, metadata, hasMore = true
@@ -292,7 +292,7 @@ test('a 10 MiB file traverses signed group events, encrypted HTTP relay pages an
     after = page.nextCursor
     hasMore = page.hasMore
   }
-  assert.equal(metadata.size, 10 * 1024 * 1024)
+  assert.equal(metadata.size, 12 * 1024 * 1024)
   assert.deepEqual(new Uint8Array(await (await files.assembleAttachment(metadata, chunks.toReversed())).arrayBuffer()), original)
   const invalid = await messaging.signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: alice.publicKey,
     conversationId: bob.publicKey, recipients: [bob.publicKey], timestamp: Date.now(), kind: 'attachment-chunk',

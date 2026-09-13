@@ -15,9 +15,10 @@ const RECORDING_LIMIT_SECONDS = 300
 const MAX_QUEUED_FILES = 8
 type PendingFile = { file: File; kind: AttachmentKind; originalBytes?: number }
 
-export function AttachmentComposer({ owner = "", disabled = false, captureRef, pasteRef, onSend, onSelectGif, extraActions, toolbarHint, toolbarVisible = true, toolbarId }: {
+export function AttachmentComposer({ owner = "", disabled = false, maxFileBytes = MAX_FILE_BYTES, captureRef, pasteRef, onSend, onSelectGif, extraActions, toolbarHint, toolbarVisible = true, toolbarId }: {
   owner?: string
   disabled?: boolean
+  maxFileBytes?: number
   captureRef?: RefObject<HTMLDivElement | null>
   pasteRef?: RefObject<HTMLTextAreaElement | null>
   onSend: (file: File, kind: AttachmentKind, onProgress?: AttachmentProgress) => Promise<unknown>
@@ -105,9 +106,10 @@ export function AttachmentComposer({ owner = "", disabled = false, captureRef, p
       if (queueRef.current.length + files.length > MAX_QUEUED_FILES) throw new Error(`You can queue up to ${MAX_QUEUED_FILES} files. Send or remove a file before adding more.`)
       const prepared: PendingFile[] = []
       for (const original of files) {
+        validateAttachmentFile(original, autoCompact ? MAX_FILE_BYTES : maxFileBytes)
         const result = await compactAttachment(original, autoCompact)
         if (!mounted.current || preparationId.current !== attempt) return false
-        validateAttachmentFile(result.file)
+        validateAttachmentFile(result.file, maxFileBytes)
         prepared.push({ file: result.file, kind: "file", ...(result.compacted ? { originalBytes: result.originalBytes } : {}) })
       }
       replaceQueue([...queueRef.current, ...prepared])
@@ -122,7 +124,7 @@ export function AttachmentComposer({ owner = "", disabled = false, captureRef, p
         if (mounted.current) setPreparing(false)
       }
     }
-  }, [disabled, recording, requesting, autoCompact, replaceQueue])
+  }, [disabled, recording, requesting, autoCompact, replaceQueue, maxFileBytes])
 
   useEffect(() => {
     const target = captureRef?.current || localTarget.current
@@ -162,14 +164,14 @@ export function AttachmentComposer({ owner = "", disabled = false, captureRef, p
       instance.ondataavailable = event => {
         if (requestId.current !== attempt || !mounted.current || discardRecording.current || !event.data.size) return
         totalBytes += event.data.size
-        if (totalBytes > MAX_FILE_BYTES) {
+        if (totalBytes > maxFileBytes) {
           discardRecording.current = true
-          if (mounted.current) setError(`The recording reached ${formatFileSize(MAX_FILE_BYTES)}. Please record a shorter message.`)
+          if (mounted.current) setError(`The recording reached ${formatFileSize(maxFileBytes)}. Please record a shorter message.`)
           if (instance.state === "recording") instance.stop()
           return
         }
         pieces.push(event.data)
-        if (totalBytes > MAX_FILE_BYTES - 64 * 1024 && instance.state === "recording") instance.stop()
+        if (totalBytes > maxFileBytes - 64 * 1024 && instance.state === "recording") instance.stop()
       }
       instance.onerror = () => {
         releaseMicrophone(media)
@@ -214,6 +216,7 @@ export function AttachmentComposer({ owner = "", disabled = false, captureRef, p
     setProgress(0)
     setError("")
     try {
+      validateAttachmentFile(selected.file, maxFileBytes)
       await onSend(selected.file, selected.kind, percent => { if (mounted.current) setProgress(percent) })
       if (mounted.current) replaceQueue(queueRef.current.filter(item => item !== selected))
     } catch (cause) {
@@ -246,7 +249,8 @@ export function AttachmentComposer({ owner = "", disabled = false, captureRef, p
       {toolbarHint && <div className="ml-auto text-xs text-muted-foreground">{toolbarHint}</div>}
     </div>
     <div className={settingsOpen && toolbarVisible ? "space-y-2 rounded-lg border border-border bg-card p-3" : "hidden"}>
-      <p className="text-xs text-muted-foreground">Files up to {formatFileSize(MAX_FILE_BYTES)} each. You can also drop files into the chat or paste them into the message box.</p>
+      <p className="text-xs text-muted-foreground">Files up to {formatFileSize(maxFileBytes)} each{maxFileBytes < MAX_FILE_BYTES ? " in this group" : ""}. You can also drop files into the chat or paste them into the message box.</p>
+      {maxFileBytes < MAX_FILE_BYTES && <p className="text-xs text-muted-foreground">Larger groups have a smaller limit because files are sent separately to each member. Direct chats support {formatFileSize(MAX_FILE_BYTES)}.</p>}
       <AutoCompactFilesSetting enabled={autoCompact} onChange={setAutoCompact} disabled={unavailable} />
     </div>
     {preparing && <p role="status" className="text-xs text-muted-foreground">Preparing attachments…</p>}

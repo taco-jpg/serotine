@@ -1,11 +1,30 @@
-import type { AttachmentMeta, MessagingContextValue } from "./messaging-types"
+import type { AttachmentMeta, GroupState, MessagingContextValue } from "./messaging-types"
+import { MAX_EVENT_PACKET_LENGTH, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT } from "./protocol"
 
-export const MAX_FILE_BYTES = 10 * 1024 * 1024
+export const MAX_FILE_BYTES = 50 * 1024 * 1024
 export const ATTACHMENT_CHUNK_BYTES = 30 * 1024
 export const MAX_ATTACHMENT_CHUNKS = Math.ceil(MAX_FILE_BYTES / ATTACHMENT_CHUNK_BYTES)
 export type AttachmentChunk = { index: number; data: string }
 export type AttachmentKind = "file" | "voice"
 export type AttachmentProgress = (percent: number) => void
+
+/** Keep one transfer within the existing relay budget, including group fanout. */
+export function attachmentFileLimit(group?: GroupState): number {
+  if (!group) return MAX_FILE_BYTES
+  if (!Array.isArray(group.members) || group.members.length < 1 || group.members.length > 20) return 0
+  const recipients = Math.max(1, group.members.length - 1)
+  // Measure the signed group, including any extra fields accepted by an older
+  // client. 4 KiB covers recipients and the remaining generated event fields.
+  const envelopeBytes = 4096 + new TextEncoder().encode(JSON.stringify(group)).byteLength
+  const plainBytes = ATTACHMENT_CHUNK_BYTES * 4 / 3 + envelopeBytes
+  const packetBytes = 4 * Math.ceil((plainBytes + 16) / 3) + 44
+  // Existing signed-event and relay bounds still apply to each individual chunk.
+  if (plainBytes > 60000 || packetBytes > MAX_EVENT_PACKET_LENGTH) return 0
+  // Reserve another full packet for metadata and round down for a clear UI cap.
+  const chunks = Math.min(Math.floor(MAX_RETAINED_EVENT_COUNT / recipients), Math.floor(MAX_RETAINED_EVENT_BYTES / (recipients * packetBytes))) - 1
+  const mib = 1024 * 1024
+  return Math.min(MAX_FILE_BYTES, Math.floor(chunks * ATTACHMENT_CHUNK_BYTES / mib) * mib)
+}
 
 export function safeFilename(name: string): string {
   const leaf = name.replace(/\\/g, "/").split("/").pop() || "attachment"
@@ -26,9 +45,12 @@ function normalizeMime(mime: string): string {
   return /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(bare) && bare.length <= 100 ? bare : "application/octet-stream"
 }
 
-export function validateAttachmentFile(file: Pick<File, "size" | "name">): void {
+export function validateAttachmentFile(file: Pick<File, "size" | "name">, maxBytes = MAX_FILE_BYTES): void {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("This group's details are too large to attach files. Ask the group owner to update the group.")
   if (!Number.isSafeInteger(file.size) || file.size < 0) throw new Error("This file has an invalid size.")
-  if (file.size > MAX_FILE_BYTES) throw new Error("Choose a file up to 10 MB.")
+  if (file.size > Math.min(MAX_FILE_BYTES, maxBytes)) throw new Error(maxBytes < MAX_FILE_BYTES
+    ? `This group supports files up to ${formatFileSize(maxBytes)} each. Choose a smaller file or send it in a direct chat.`
+    : "Choose a file up to 50 MB.")
   if (typeof file.name !== "string") throw new Error("Choose a valid file.")
 }
 
@@ -77,7 +99,10 @@ export async function prepareAttachment(file: File, kind: AttachmentKind = "file
 export async function sendAttachment(
   sendEvent: MessagingContextValue["sendEvent"], conversationId: string, file: File,
   kind: AttachmentKind = "file", onProgress?: AttachmentProgress, replyTo?: string,
+  group?: GroupState,
 ): Promise<string> {
+  if (conversationId.startsWith("group:") && group?.id !== conversationId) throw new Error("Group details are unavailable. Reopen this conversation before attaching a file.")
+  validateAttachmentFile(file, attachmentFileLimit(group))
   const { metadata, chunks } = await prepareAttachment(file, kind, percent => onProgress?.(Math.round(percent * 0.1)))
   // Queue content first: a storage error cannot publish a permanently truncated attachment.
   for (let index = 0; index < chunks.length; index++) {

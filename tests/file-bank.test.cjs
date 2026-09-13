@@ -99,7 +99,7 @@ test('rename preserves content, normalizes unsafe filenames, and deletion is ide
 
 test('invalid batches and failed writes never leave partial saved files', async () => {
   const h = harness(), good = new File(['keep me'], 'good.txt')
-  await assert.rejects(h.saveBankFiles(owner, [good, new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'too-big.bin')]), /10 MB/)
+  await assert.rejects(h.saveBankFiles(owner, [good, { size: 50 * 1024 * 1024 + 1, name: 'too-big.bin' }]), /50 MB/)
   assert.equal(h.databases.size, 0)
   h.options.failAddAt = 2
   await assert.rejects(h.saveBankFiles(owner, [good, new File(['other'], 'other.txt')]), /Write failed/)

@@ -27,7 +27,7 @@ function cameraError(cause: unknown) {
   return "The camera could not start. Try again or upload a QR image."
 }
 
-export function QrScanner({ onScan, disabled = false }: { onScan: (value: string) => void | Promise<void>; disabled?: boolean }) {
+export function QrScanner({ onScan, disabled = false, parseValue = parseContactCode, description = "Scan a Serotine contact QR code with your camera or choose an image. Images are read on this device.", successMessage = "QR code read. Review the address, then choose Add." }: { onScan: (value: string) => void | Promise<void>; disabled?: boolean; parseValue?: (value: string) => string | Promise<string>; description?: string; successMessage?: string }) {
   const id = useId()
   const [expanded, setExpanded] = useState(false)
   const [camera, setCamera] = useState<"idle" | "starting" | "live">("idle")
@@ -61,12 +61,12 @@ export function QrScanner({ onScan, disabled = false }: { onScan: (value: string
   }, [disabled, stop])
   const active = (ticket: number) => mounted.current && generation.current === ticket
   const accept = async (data: string, ticket: number) => {
-    const address = await parseContactCode(data)
+    const address = await parseValue(data)
     if (!active(ticket)) return
     await onScan(address)
     if (!active(ticket)) return
     stop(); setCamera("idle"); setReading(false); setExpanded(false); setError(null)
-    setStatus("QR code read. Review the address, then choose Add.")
+    setStatus(successMessage)
   }
 
   const startCamera = async () => {
@@ -136,7 +136,7 @@ export function QrScanner({ onScan, disabled = false }: { onScan: (value: string
   return <div className="min-w-0 space-y-2">
     {!expanded ? <Button type="button" size="sm" variant="outline" disabled={disabled} aria-expanded={false} aria-controls={`${id}-scanner`} onClick={() => { setExpanded(true); setError(null); setStatus(null) }}><QrCode className="size-4" />Scan QR code</Button>
       : <div id={`${id}-scanner`} className="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
-        <p className="text-xs text-muted-foreground">Scan a Serotine contact QR code with your camera or choose an image. Images are read on this device.</p>
+        <p className="text-xs text-muted-foreground">{description}</p>
         <video ref={video} playsInline muted aria-label="QR camera preview" className={camera === "idle" ? "hidden" : "aspect-video w-full rounded-md bg-black object-cover"} />
         <div className="flex flex-wrap gap-2">
           {camera === "idle" ? <Button type="button" size="sm" variant="outline" disabled={disabled || reading} onClick={() => void startCamera()}><Camera className="size-4" />Use camera</Button>

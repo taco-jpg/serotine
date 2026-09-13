@@ -3,14 +3,14 @@
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
 import { useEffect, useMemo, useState } from "react"
-import { Plus, Copy, Check, Loader2, Search, Pencil, Users, QrCode, Archive, UserRound, Settings2, Bell, Ban, Trash2, Inbox, RefreshCw, PanelLeftClose, PanelLeftOpen, CircleAlert } from "lucide-react"
+import { Plus, Copy, Check, Loader2, Search, Pencil, Users, QrCode, Archive, UserRound, Settings2, Bell, Ban, Trash2, Inbox, RefreshCw, PanelLeftClose, PanelLeftOpen, CircleAlert, Hash } from "lucide-react"
 import { IdentityIcon } from "@/components/ui/identity-icon"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
-import { MessagingProvider, useMessaging } from "@/components/messaging-provider"
+import { MessagingProvider, useMessaging, useCommunities } from "@/components/messaging-provider"
 import { LocalNicknameSetting } from "@/components/local-nickname-setting"
 import { useLocalNickname } from "@/hooks/use-local-nickname"
 import { AccountTools } from "@/components/account-tools"
@@ -37,6 +37,8 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const selectedConversation = conversationFromPathname(pathname)
   const messaging = useMessaging()
+  const communityContext = useCommunities()
+  const communityUnread = communityContext.model.communities.reduce((sum, item) => sum + item.unreadCount, 0)
   const { identity, contacts, conversations, messages, requests, preferences, ready, status } = messaging
   const nickname = useLocalNickname(identity?.publicKey || "")
   const displayName = (pub: string) => pub === identity?.publicKey ? nickname || "You" : contacts.find(contact => contact.pub === pub)?.alias || shortAddress(pub)
@@ -91,6 +93,10 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
     if (invite) {
       try { sessionStorage.setItem("serotine_pending_invite", invite.slice(0, 150)) } catch { /* The public invitation can still be pasted after signing in. */ }
     }
+    const communityInvite = new URLSearchParams(window.location.hash.slice(1)).get("community")
+    if (communityInvite) {
+      try { sessionStorage.setItem("serotine_pending_community_invite", communityInvite.slice(0, 8192)) } catch { /* The invite can be pasted after signing in. */ }
+    }
     router.replace("/login")
   }, [ready, identity, router])
   useEffect(() => {
@@ -98,6 +104,9 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
   }, [])
   useEffect(() => {
     if (!identity) return
+    try {
+      if (pathname !== "/chat/communities" && sessionStorage.getItem("serotine_pending_community_invite")) router.replace("/chat/communities")
+    } catch { /* Session storage may be unavailable. */ }
     setInviteLink(`${window.location.origin}/chat#invite=${identity.publicKey}`)
     const readInvite = () => {
       const hashAddress = new URLSearchParams(window.location.hash.slice(1)).get("invite")
@@ -114,7 +123,7 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
     readInvite()
     window.addEventListener("hashchange", readInvite)
     return () => window.removeEventListener("hashchange", readInvite)
-  }, [identity, pathname])
+  }, [identity, pathname, router])
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "f") {
@@ -207,6 +216,7 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
       <div className={`px-2 pt-2 ${sidebarCollapsed ? "md:hidden" : ""}`}>
         <Button variant="outline" className="h-11 w-full justify-start gap-2 border-border bg-background/60 px-2.5 text-xs text-muted-foreground shadow-none md:h-8" onClick={() => setSearchOpen(true)}><Search className="size-3.5" /> Search all messages<span className="ml-auto hidden text-[9px] text-muted-foreground lg:inline">Ctrl ⇧ F</span></Button>
       </div>
+      <Link href="/chat/communities" aria-current={pathname === "/chat/communities" ? "page" : undefined} title="Communities" className={`mx-2 mt-2 flex min-h-11 shrink-0 items-center gap-2 rounded-lg px-2 text-[13px] font-medium hover:bg-accent md:min-h-9 ${pathname === "/chat/communities" ? "bg-primary/10 text-primary" : "text-muted-foreground"} ${sidebarCollapsed ? "md:justify-center md:px-0" : ""}`}><Hash className="size-4 shrink-0" /><span className={sidebarCollapsed ? "md:sr-only" : ""}>Communities</span>{communityUnread > 0 && <span className="ml-auto rounded-full bg-primary px-1.5 text-[10px] text-primary-foreground">{communityUnread}</span>}</Link>
       <div className={`min-h-0 flex-1 overflow-y-auto overscroll-contain ${sidebarCollapsed ? "md:hidden" : ""}`}>
         <div className="px-2 pt-1">{selfConversation ? <ConversationRow conversation={selfConversation} selected={selectedConversation === identity.publicKey} owner={identity.publicKey} displayName={displayName} /> : <Link href={conversationHref(identity.publicKey)} className="flex min-h-12 items-center gap-2 rounded-lg px-2 py-1 text-[13px] font-medium text-primary hover:bg-accent"><UserRound className="size-4" /> Message yourself</Link>}</div>
         <div className="mb-1 flex items-center gap-1 px-2 pt-1">

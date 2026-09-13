@@ -1,6 +1,6 @@
 import { MAX_FILE_BYTES, safeFilename, validateAttachmentFile } from "./attachments"
 
-/** Keep compression work bounded even when a very compressible input is larger than the send limit. */
+/** Keep browser compression work bounded independently of conversation limits. */
 export const MAX_COMPACT_INPUT_BYTES = 50 * 1024 * 1024
 
 export type CompactedAttachment = { file: File; compacted: boolean; originalBytes: number }

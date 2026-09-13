@@ -44,7 +44,7 @@ function harness(getUserMedia, options = {}) {
     new Function('require', 'module', 'exports', 'navigator', 'MediaRecorder', 'setInterval', 'clearInterval', code)(specifier => {
       if (specifier === 'react') return react
       if (specifier === '@/components/ui/button') return { Button: 'button' }
-      if (specifier === './use-auto-compact-files') return { useAutoCompactFiles: () => [false, () => {}], AutoCompactFilesSetting: 'compact-setting' }
+      if (specifier === './use-auto-compact-files') return { useAutoCompactFiles: () => [options.autoCompact ?? false, () => {}], AutoCompactFilesSetting: 'compact-setting' }
       if (specifier === '@/lib/compact-attachment' && options.compact) return { compactAttachment: options.compact }
       if (specifier.startsWith('@/')) return load(path.join(root, specifier.slice(2)))
       if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
@@ -54,7 +54,7 @@ function harness(getUserMedia, options = {}) {
     return module.exports
   }
   const { AttachmentComposer } = load(path.join(root, 'components/chat/attachment-composer.tsx'))
-  function view() { cursor = 0; tree = AttachmentComposer({ onSend: options.onSend || (async (...args) => sends.push(args)) }); while (pendingEffects.length) pendingEffects.shift()(); return tree }
+  function view() { cursor = 0; tree = AttachmentComposer({ maxFileBytes: options.maxFileBytes, onSend: options.onSend || (async (...args) => sends.push(args)) }); while (pendingEffects.length) pendingEffects.shift()(); return tree }
   function walk(node, fn) { if (!node) return; if (Array.isArray(node)) return node.forEach(child => walk(child, fn)); if (typeof node === 'object') { fn(node); walk(node.props?.children, fn) } }
   function label(node) { if (Array.isArray(node)) return node.map(label).join(''); if (typeof node === 'string' || typeof node === 'number') return String(node); return node?.props ? label(node.props.children) : '' }
   function click(name) { view(); let found; walk(tree, node => { if (node.type === 'button' && (node.props['aria-label'] || label(node)) === name) found = node }); assert.ok(found, 'button: ' + name); assert.ok(!found.props.disabled); found.props.onClick() }
@@ -179,4 +179,32 @@ test('late attachment preparation cannot update an unmounted composer', async ()
   await tick()
   assert.equal(h.lateUpdates, 0)
   assert.equal(h.sends.length, 0)
+})
+
+test('group size limit is visible and rejects file selection and stale queued files before sending', async () => {
+  const options = { maxFileBytes: 12 * 1024 * 1024 }
+  const h = harness(undefined, options)
+  assert.match(h.text(), /Files up to 12.0 MB each in this group/)
+  h.select([{ name: 'too-large.bin', size: options.maxFileBytes + 1, arrayBuffer() { assert.fail('must not read') } }]); await tick()
+  assert.match(h.text(), /This group supports files up to 12.0 MB/)
+  assert.doesNotMatch(h.text(), /Send file/)
+  h.select([new File(['data'], 'fits.bin')]); await tick()
+  options.maxFileBytes = 3
+  h.click('Send file'); await tick()
+  assert.equal(h.sends.length, 0, 'membership change is checked again when sending')
+  assert.match(h.text(), /This group supports files up to 3 B/)
+  h.unmount()
+})
+
+test('auto compact can shrink a source above the group cap before queueing', async () => {
+  const result = new File(['small'], 'large.txt.gz')
+  let attempts = 0
+  const h = harness(undefined, { maxFileBytes: 12 * 1024 * 1024, autoCompact: true,
+    compact: async original => { attempts++; return { file: result, compacted: true, originalBytes: original.size } } })
+  h.select([{ name: 'large.txt', size: 13 * 1024 * 1024 }]); await tick()
+  assert.equal(attempts, 1)
+  assert.match(h.text(), /Send file/)
+  h.click('Send file'); await tick()
+  assert.equal(h.sends[0][0], result)
+  h.unmount()
 })

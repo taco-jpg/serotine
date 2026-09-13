@@ -44,6 +44,7 @@ function harness() {
       if (specifier === 'lucide-react') return { Download: 'download-icon', FileText: 'file-icon', LoaderCircle: 'loader-icon', Maximize2: 'enlarge-icon' }
       if (specifier === '@/components/ui/dialog') return Object.fromEntries(['Dialog', 'DialogTrigger', 'DialogContent', 'DialogHeader', 'DialogTitle', 'DialogDescription'].map(name => [name, name]))
       if (specifier.startsWith('@/')) return load(path.join(__dirname, '..', specifier.slice(2)))
+      if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
       return require(specifier)
     }, module, module.exports, URL)
     cache.set(filename, module.exports)

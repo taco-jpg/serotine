@@ -26,15 +26,15 @@ function source(filename) {
 const files = source(path.join(root, 'lib/attachments.ts'))
 const { RichMessage } = source(path.join(root, 'components/chat/rich-message.tsx'))
 
-test('10 MiB binary file survives out-of-order attachment chunk assembly', async () => {
-  assert.equal(files.MAX_FILE_BYTES, 10 * 1024 * 1024)
-  const data = Uint8Array.from({ length: files.MAX_FILE_BYTES }, (_, index) => index % 251)
+test('12 MiB binary file survives out-of-order attachment chunk assembly', async () => {
+  assert.equal(files.MAX_FILE_BYTES, 50 * 1024 * 1024)
+  const data = Uint8Array.from({ length: 12 * 1024 * 1024 }, (_, index) => index % 251)
   const file = new File([data], 'homework.zip', { type: 'application/zip' })
   const { metadata, chunks } = await files.prepareAttachment(file)
   assert.equal(files.isAttachmentMeta(metadata), true)
-  assert.equal(chunks.length, 342)
+  assert.equal(chunks.length, 410)
   assert.ok(chunks.every(chunk => chunk.data.length <= 40960))
-  assert.equal(files.attachmentProgress(metadata, chunks.slice(0, 4)), 1)
+  assert.equal(files.attachmentProgress(metadata, chunks.slice(0, 5)), 1)
   const blob = await files.assembleAttachment(metadata, chunks.toReversed())
   assert.equal(blob.type, 'application/octet-stream')
   assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), data)
@@ -44,7 +44,31 @@ test('zero-byte files round-trip and files above the cap are rejected before rea
   const { metadata, chunks } = await files.prepareAttachment(new File([], 'empty.txt'))
   assert.equal(chunks.length, 1)
   assert.equal((await files.assembleAttachment(metadata, chunks)).size, 0)
-  await assert.rejects(files.prepareAttachment({ size: files.MAX_FILE_BYTES + 1, name: 'large.zip', arrayBuffer() { assert.fail('must not read oversized file') } }), /10 MB/)
+  await assert.rejects(files.prepareAttachment({ size: files.MAX_FILE_BYTES + 1, name: 'large.zip', arrayBuffer() { assert.fail('must not read oversized file') } }), /50 MB/)
+  const maximum = { ...metadata, size: files.MAX_FILE_BYTES, chunks: files.MAX_ATTACHMENT_CHUNKS }
+  assert.equal(files.isAttachmentMeta(maximum), true, 'receivers accept metadata for the exact 50 MiB cap')
+  assert.equal(files.MAX_ATTACHMENT_CHUNKS, 1707)
+  assert.equal(files.isAttachmentMeta({ ...maximum, size: maximum.size + 1 }), false)
+  assert.doesNotThrow(() => files.validateAttachmentFile({ name: 'maximum.bin', size: files.MAX_FILE_BYTES }))
+})
+
+test('group preflight respects member fanout and rejects excess bytes before reading or queuing', async () => {
+  const group = { id: `group:${crypto.randomUUID()}`, members: Array.from({ length: 20 }, (_, i) => '04' + i.toString(16).padStart(128, '0')),
+    name: 'Project group', admin: '04' + '0'.repeat(128), epoch: 1, updatedAt: Date.now(), signature: '0'.repeat(128) }
+  assert.equal(files.attachmentFileLimit(), 50 * 1024 * 1024)
+  let previous = files.MAX_FILE_BYTES
+  for (let count = 1; count <= 20; count++) {
+    const limit = files.attachmentFileLimit({ ...group, members: group.members.slice(0, count) })
+    assert.ok(limit <= previous && limit >= 10 * 1024 * 1024)
+    previous = limit
+  }
+  const limit = files.attachmentFileLimit(group)
+  assert.equal(limit, 12 * 1024 * 1024)
+  assert.doesNotThrow(() => files.validateAttachmentFile({ size: limit, name: 'maximum.bin' }, limit))
+  const oversized = { size: limit + 1, name: 'oversized.bin', arrayBuffer() { assert.fail('preflight must not read file') } }
+  await assert.rejects(files.sendAttachment(() => assert.fail('preflight must not queue events'), group.id, oversized, 'file', undefined, undefined, group), /This group supports files up to 12.0 MB/)
+  await assert.rejects(files.sendAttachment(() => assert.fail('must not queue'), group.id, oversized), /Group details are unavailable/)
+  assert.equal(files.attachmentFileLimit({ ...group, extra: 'x'.repeat(20000) }), 0, 'oversized signed group details cannot create invalid chunk packets')
 })
 
 test('missing, tampered, conflicting and oversized chunks never produce a download', async () => {

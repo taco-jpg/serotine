@@ -55,7 +55,7 @@ test('disabled, tiny, incompressible and already compressed files keep their ori
   }
 })
 
-test('source size is bounded before reading and oversized files must fit after compression', async () => {
+test('source size is bounded before reading and files at the send cap may be compacted', async () => {
   const tooBig = { size: MAX_COMPACT_INPUT_BYTES + 1, name: 'huge.txt', stream() { assert.fail('must not read oversized file') } }
   await assert.rejects(compactAttachment(tooBig, true), /50 MB/)
   const large = new File([new Uint8Array(MAX_COMPACT_INPUT_BYTES)], 'large.dat')
@@ -66,9 +66,9 @@ test('source size is bounded before reading and oversized files must fit after c
   const decoded = await new Response(compacted.file.stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer()
   assert.equal(decoded.byteLength, MAX_COMPACT_INPUT_BYTES)
   assert.equal(new Uint8Array(decoded).every(byte => byte === 0), true)
-  await assert.rejects(compactAttachment(large, false), /10 MB/)
-  await assert.rejects(compactAttachment(new File([randomBytes(MAX_FILE_BYTES + 1)], 'random.bin'), true), /10 MB/)
-  await assert.rejects(compactAttachment(new File([new Uint8Array(MAX_FILE_BYTES + 1)], 'photo.png'), true), /10 MB/)
+  assert.equal((await compactAttachment(large, false)).file, large)
+  await assert.rejects(compactAttachment({ size: MAX_FILE_BYTES + 1, name: 'random.bin', stream() { assert.fail('must not read oversized file') } }, true), /50 MB/)
+  await assert.rejects(compactAttachment({ size: MAX_FILE_BYTES + 1, name: 'photo.png', stream() { assert.fail('must not read oversized file') } }, true), /50 MB/)
   const exactCap = new File([new Uint8Array(MAX_FILE_BYTES)], 'archive.zip')
   assert.equal((await compactAttachment(exactCap, true)).file, exactCap)
 })
@@ -76,12 +76,12 @@ test('source size is bounded before reading and oversized files must fit after c
 test('unsupported or failing browser compression falls back only within the ordinary file limit', async () => {
   const available = globalThis.CompressionStream
   const ordinary = new File(['x'.repeat(100000)], 'notes.txt')
-  const oversized = new File([new Uint8Array(MAX_FILE_BYTES + 1)], 'large.dat')
+  const oversized = { size: MAX_FILE_BYTES + 1, name: 'large.dat', stream() { assert.fail('must not read oversized file') } }
   try {
     for (const unsupported of [undefined, class BrokenCompression { constructor() { throw new Error('Unavailable') } }]) {
       globalThis.CompressionStream = unsupported
       assert.equal((await compactAttachment(ordinary, true)).file, ordinary)
-      await assert.rejects(compactAttachment(oversized, true), /10 MB/)
+      await assert.rejects(compactAttachment(oversized, true), /50 MB/)
     }
   } finally { globalThis.CompressionStream = available }
 })

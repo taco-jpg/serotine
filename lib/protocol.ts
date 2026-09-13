@@ -11,7 +11,7 @@ export const MESSAGE_PAGE_SIZE = 4
 export const MAX_EVENT_CONTENT_LENGTH = 48000
 export const MAX_EVENT_PACKET_LENGTH = 128000
 export const EVENT_FEED_PAGE_SIZE = 50
-// One 10 MiB file must fit a twenty-member group's independently encrypted fanout.
+// Shared retained-history budgets; attachment preflight accounts for group fanout.
 export const MAX_RETAINED_EVENT_COUNT = 16000
 export const MAX_RETAINED_EVENT_BYTES = 512 * 1024 * 1024
 export const MAX_EVENT_SENDS_PER_MINUTE = 2000

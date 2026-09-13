@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 import { ExternalLink, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { fetchGiphyGif, giphyPageUrl, hasGiphyApiKey, type GiphyGif } from "@/lib/giphy"
+import { fetchGiphyGif, giphyPageUrl, type GiphyGif } from "@/lib/giphy"
 import { GiphyAttribution } from "./giphy-attribution"
 
 export function GifMessage({ id }: { id: string }) {
@@ -18,11 +18,10 @@ function GiphyCard({ id }: { id: string }) {
   const [gif, setGif] = useState<GiphyGif | null>(null)
   const [error, setError] = useState("")
   const [attempt, setAttempt] = useState(0)
-  const configured = hasGiphyApiKey()
   const load = nearViewport && !hidden
 
   useEffect(() => {
-    if (!configured || !card.current) return
+    if (!card.current) return
     // Resolve only GIFs approaching the viewport, not an entire chat history.
     if (typeof IntersectionObserver === "undefined") {
       setNearViewport(true)
@@ -36,10 +35,10 @@ function GiphyCard({ id }: { id: string }) {
     }, { rootMargin: "200px" })
     observer.observe(card.current)
     return () => observer.disconnect()
-  }, [configured])
+  }, [])
 
   useEffect(() => {
-    if (!load || !configured) return
+    if (!load) return
     const controller = new AbortController()
     setGif(null)
     setError("")
@@ -49,14 +48,14 @@ function GiphyCard({ id }: { id: string }) {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Unable to load this GIF.")
     })
     return () => controller.abort()
-  }, [id, load, configured, attempt])
+  }, [id, load, attempt])
 
   return <div ref={card} className="w-96 max-w-full overflow-hidden rounded-lg">
     {load && gif && !error ? <>
       <img src={gif.imageUrl} alt={gif.alt} width={gif.width} height={gif.height} referrerPolicy="no-referrer" decoding="async" onError={() => setError("This GIF could not be displayed. Try again or open it on GIPHY.")} className="max-h-[min(16rem,35dvh)] w-full rounded-md object-contain" />
     </> : <div className="space-y-2 p-2">
       <p className="text-sm font-medium">GIF from GIPHY</p>
-      {configured ? hidden ? <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => setHidden(false)}>Show GIF</Button> : !error && <p role="status" className="flex items-center gap-2 text-xs">{load ? <><Loader2 className="size-4 animate-spin" aria-hidden="true" />Loading GIF…</> : "GIF loads automatically when in view."}</p> : <p className="text-xs text-muted-foreground">Inline GIF viewing hasn’t been enabled on this site yet.</p>}
+      {hidden ? <Button type="button" variant="outline" size="sm" className="min-h-11" onClick={() => setHidden(false)}>Show GIF</Button> : !error && <p role="status" className="flex items-center gap-2 text-xs">{load ? <><Loader2 className="size-4 animate-spin" aria-hidden="true" />Loading GIF…</> : "GIF loads automatically when in view."}</p>}
       {error && <div role="alert" className="space-y-2"><p className="text-xs text-destructive">{error}</p><Button type="button" size="sm" variant="outline" className="min-h-11" onClick={() => { setGif(null); setError(""); setAttempt(value => value + 1) }}>Try again</Button></div>}
     </div>}
     <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">

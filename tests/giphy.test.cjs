@@ -13,6 +13,7 @@ function sample(id = 'abc123', overrides = {}) {
 function response(data, total = data.length) {
   return { ok: true, status: 200, json: async () => ({ data, meta: { status: 200 }, pagination: { total_count: total } }) }
 }
+function configResponse(apiKey) { return { ok: true, status: 200, json: async () => ({ apiKey }) } }
 function text(node) {
   if (Array.isArray(node)) return node.map(text).join('')
   return typeof node === 'string' || typeof node === 'number' ? String(node) : text(node?.props?.children || [])
@@ -23,7 +24,7 @@ function nodes(node, predicate) {
   return [...(predicate(node) ? [node] : []), ...nodes(node.props?.children, predicate)]
 }
 
-function runtime(fetch, key = 'test-only-key', supportsObserver = true) {
+function runtime(fetch, key = 'test-only-key', supportsObserver = true, cloudflareContext = async () => ({ env: {} })) {
   let active
   const cache = new Map()
   const observers = []
@@ -40,6 +41,7 @@ function runtime(fetch, key = 'test-only-key', supportsObserver = true) {
     const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { fileName: filename, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText
     new Function('require', 'module', 'exports', 'fetch', 'process', 'IntersectionObserver', code)(specifier => {
       if (specifier === 'react') return react
+      if (specifier === '@opennextjs/cloudflare') return { getCloudflareContext: cloudflareContext }
       if (specifier === '@/components/ui/button') return { Button: 'button' }
       if (specifier === '@/components/ui/input') return { Input: 'input' }
       if (specifier === '@/components/ui/dialog') return Object.fromEntries(['Dialog', 'DialogContent', 'DialogDescription', 'DialogHeader', 'DialogTitle', 'DialogTrigger'].map(name => [name, name]))
@@ -141,12 +143,115 @@ test('trending pagination stops at the provider limit and preserves provider ord
   assert.equal(calls.length, 1)
 })
 
-test('missing keys make no request and provider rate/auth failures are actionable', async () => {
-  const missing = runtime(() => { throw Error('must not fetch') }, '').lib
-  assert.equal(missing.hasGiphyApiKey(), false)
-  await assert.rejects(missing.fetchGiphyPage({}), /not been enabled/)
+test('missing build keys consult only public configuration and provider rate/auth failures are actionable', async () => {
+  const missing = runtime(async url => { assert.equal(url, '/api/giphy/config'); return configResponse(null) }, '').lib
+  await assert.rejects(missing.fetchGiphyPage({}), /haven’t been enabled/)
   await assert.rejects(runtime(async () => ({ ok: false, status: 429 })).lib.fetchGiphyPage({}), /search limit/)
   await assert.rejects(runtime(async () => ({ ok: false, status: 403 })).lib.fetchGiphyPage({}), /current GIPHY key/)
+})
+
+test('runtime public configuration enables direct GIF requests when the build has no key', async () => {
+  const calls = [], controller = new AbortController()
+  const { lib } = runtime(async (url, options) => {
+    calls.push({ url, options })
+    return typeof url === 'string' ? configResponse(' runtime-public-key ') : response(sample())
+  }, '')
+  assert.equal((await lib.fetchGiphyGif('abc123', controller.signal)).id, 'abc123')
+  assert.equal(calls[0].url, '/api/giphy/config')
+  assert.equal(calls[0].options.credentials, 'omit')
+  assert.equal(calls[0].options.cache, 'no-store')
+  assert.equal(calls[0].options.referrerPolicy, 'no-referrer')
+  assert.equal(calls[0].options.body, undefined)
+  assert.equal(calls[1].url.origin, 'https://api.giphy.com')
+  assert.equal(calls[1].url.searchParams.get('api_key'), 'runtime-public-key')
+  assert.equal(calls[1].options.signal, controller.signal)
+  await lib.fetchGiphyGif('abc123')
+  assert.equal(calls.length, 3, 'successful public key is reused without caching any GIF metadata')
+})
+
+test('concurrent GIFs share configuration while each caller cancels independently', async () => {
+  const calls = [], first = new AbortController(), second = new AbortController()
+  const { lib } = runtime((url, options) => {
+    if (typeof url === 'string') return new Promise(resolve => calls.push({ url, options, resolve }))
+    calls.push({ url, options })
+    return Promise.resolve(response(sample(url.pathname.split('/').at(-1))))
+  }, '')
+  const hidden = lib.fetchGiphyGif('first', first.signal)
+  const rejected = assert.rejects(hidden, { name: 'AbortError' })
+  const visible = lib.fetchGiphyGif('second', second.signal)
+  assert.equal(calls.length, 1)
+  first.abort()
+  await rejected
+  assert.equal(calls[0].options.signal.aborted, false)
+  calls[0].resolve(configResponse('runtime-key'))
+  assert.equal((await visible).id, 'second')
+  assert.equal(calls.length, 2)
+  assert.equal(calls[1].url.pathname, '/v1/gifs/second')
+})
+
+test('all callers cancelling aborts shared configuration and an abandoned response cannot poison retry', async () => {
+  const calls = [], controller = new AbortController()
+  const { lib } = runtime((url, options) => {
+    if (typeof url === 'string') return new Promise(resolve => calls.push({ url, options, resolve }))
+    calls.push({ url, options })
+    return Promise.resolve(response(sample()))
+  }, '')
+  const pending = lib.fetchGiphyGif('abc123', controller.signal)
+  const rejected = assert.rejects(pending, { name: 'AbortError' })
+  controller.abort()
+  await rejected
+  assert.equal(calls[0].options.signal.aborted, true)
+  calls[0].resolve(configResponse('abandoned-key'))
+  await tick()
+  const retry = lib.fetchGiphyGif('abc123')
+  assert.equal(calls.length, 2)
+  calls[1].resolve(configResponse('current-key'))
+  await retry
+  assert.equal(calls[2].url.searchParams.get('api_key'), 'current-key')
+})
+
+test('absent or temporarily unavailable runtime configuration can recover on retry', async () => {
+  for (const firstResponse of [configResponse(null), { ok: false, status: 503 }]) {
+    let lookups = 0
+    const { lib } = runtime(async url => typeof url === 'string'
+      ? ++lookups === 1 ? firstResponse : configResponse('fixed-key')
+      : response(sample()), '')
+    await assert.rejects(lib.fetchGiphyGif('abc123'), /haven’t been enabled|Unable to load GIF settings/)
+    assert.equal((await lib.fetchGiphyGif('abc123')).id, 'abc123')
+    assert.equal(lookups, 2)
+  }
+})
+
+test('public config route reads a runtime binding, disables caching, and exposes no other environment fields', async () => {
+  const env = { NEXT_PUBLIC_GIPHY_API_KEY: ' runtime-only-key ', GIPHY_API_KEY: 'private-secret', CLOUDFLARE_API_TOKEN: 'private-token' }
+  const r = runtime(() => { throw Error('must not fetch') }, '', true, async options => {
+    assert.deepEqual(options, { async: true })
+    return { env }
+  })
+  const route = r.load(path.join(root, 'app/api/giphy/config/route.ts'))
+  assert.equal(route.dynamic, 'force-dynamic')
+  const result = await route.GET()
+  assert.equal(result.status, 200)
+  assert.match(result.headers.get('cache-control'), /no-store/)
+  assert.deepEqual(await result.json(), { apiKey: 'runtime-only-key' })
+})
+
+test('public config route allows only the named public key and retains a build-key fallback', async () => {
+  for (const [env, buildKey, expected] of [
+    [{ GIPHY_API_KEY: 'must-remain-private' }, '', null],
+    [{ NEXT_PUBLIC_GIPHY_API_KEY: 123 }, '', null],
+    [{ NEXT_PUBLIC_GIPHY_API_KEY: ' ' }, 'build-key', 'build-key'],
+    [{ NEXT_PUBLIC_GIPHY_API_KEY: 'runtime-key' }, 'build-key', 'runtime-key'],
+  ]) {
+    const r = runtime(() => { throw Error('must not fetch') }, buildKey, true, async () => ({ env }))
+    const result = await r.load(path.join(root, 'app/api/giphy/config/route.ts')).GET()
+    assert.deepEqual(await result.json(), { apiKey: expected })
+  }
+  const unavailable = runtime(() => { throw Error('must not fetch') }, '', true, async () => { throw Error('unavailable') })
+  const result = await unavailable.load(path.join(root, 'app/api/giphy/config/route.ts')).GET()
+  assert.equal(result.status, 503)
+  assert.match(result.headers.get('cache-control'), /no-store/)
+  assert.deepEqual(await result.json(), { apiKey: null })
 })
 
 test('provider content fails closed on ratings, unexpected IDs, and unsafe media origins', async () => {
@@ -203,11 +308,14 @@ test('received GIF renders at a useful size after loading and recovers from brok
 })
 
 test('automatic GIF viewing still handles unconfigured sites and browsers without visibility observers', async () => {
-  const missing = runtime(() => { throw Error('must not fetch') }, '')
+  const missing = runtime(async url => { assert.equal(url, '/api/giphy/config'); return configResponse(null) }, '')
   const { GifMessage: MissingGif } = missing.load(path.join(root, 'components/chat/gif-message.tsx'))
   const missingElement = MissingGif({ id: 'abc123' }), disabled = missing.mount(missingElement.type, missingElement.props)
   disabled.intersect()
-  assert.match(text(disabled.view()), /hasn’t been enabled/)
+  assert.match(text(disabled.view()), /Loading GIF/)
+  assert.doesNotMatch(text(disabled.view()), /haven’t been enabled/)
+  await tick()
+  assert.match(text(disabled.view()), /haven’t been enabled/)
   assert.equal(nodes(disabled.view(), node => node.type === 'img').length, 0)
   disabled.unmount()
 

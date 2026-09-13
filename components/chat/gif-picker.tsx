@@ -5,7 +5,7 @@ import { Loader2, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
-import { fetchGiphyPage, giphyPageUrl, hasGiphyApiKey, type GiphyGif } from "@/lib/giphy"
+import { fetchGiphyPage, giphyPageUrl, type GiphyGif } from "@/lib/giphy"
 import { GiphyAttribution } from "./giphy-attribution"
 
 export function GifPicker({ disabled = false, onSelectGif }: { disabled?: boolean; onSelectGif: (url: string) => void }) {
@@ -32,10 +32,9 @@ function GifSearch({ disabled, onSelect }: { disabled: boolean; onSelect: (url: 
   const [error, setError] = useState("")
   const requestId = useRef(0)
   const controllerRef = useRef<AbortController | null>(null)
-  const configured = hasGiphyApiKey()
 
   useEffect(() => {
-    if (!search || !configured) return
+    if (!search) return
     const controller = new AbortController()
     controllerRef.current = controller
     const attempt = ++requestId.current
@@ -51,10 +50,10 @@ function GifSearch({ disabled, onSelect }: { disabled: boolean; onSelect: (url: 
       if (!controller.signal.aborted && requestId.current === attempt) setBusy(false)
     })
     return () => { controller.abort(); if (controllerRef.current === controller) controllerRef.current = null }
-  }, [search, configured])
+  }, [search])
 
   function startSearch(value: string) {
-    if (!configured || disabled) return
+    if (disabled) return
     controllerRef.current?.abort()
     requestId.current++
     setGifs([])
@@ -66,7 +65,7 @@ function GifSearch({ disabled, onSelect }: { disabled: boolean; onSelect: (url: 
 
   return <div className="min-w-0 space-y-3">
     <p className="text-xs text-muted-foreground">GIPHY can see your searches and the GIFs you load. Your conversations are not sent to GIPHY.</p>
-    {configured ? <>
+    <>
       <form className="flex gap-2" onSubmit={event => { event.preventDefault(); startSearch(query) }}>
         <Input value={query} onChange={event => setQuery(event.target.value)} maxLength={50} placeholder="Search GIPHY" aria-label="Search GIPHY" disabled={disabled} className="min-w-0" />
         <Button type="submit" disabled={disabled} aria-label="Search"><Search aria-hidden="true" /></Button>
@@ -85,10 +84,7 @@ function GifSearch({ disabled, onSelect }: { disabled: boolean; onSelect: (url: 
       </div>
       {error && <div role="alert" className="space-y-2 text-sm"><p className="text-destructive">{error}</p><Button type="button" size="sm" variant="outline" disabled={disabled || busy} onClick={() => setSearch(previous => previous && { ...previous, attempt: previous.attempt + 1 })}>Try again</Button></div>}
       {nextOffset !== null && !error && <Button type="button" variant="outline" size="sm" disabled={busy || disabled} onClick={() => setSearch(previous => previous && { ...previous, offset: nextOffset, attempt: previous.attempt + 1 })}>Load more</Button>}
-    </> : <div className="space-y-2 rounded-lg border p-4 text-sm">
-      <p>GIF search hasn’t been enabled on this site yet. You can still upload GIFs or reuse them from your File bank.</p>
-      <p className="text-xs text-muted-foreground">The site owner can enable GIPHY in the setup instructions in the project README.</p>
-    </div>}
+    </>
     <a href="https://giphy.com" target="_blank" rel="noopener noreferrer" className="inline-block"><GiphyAttribution /></a>
   </div>
 }

@@ -4,7 +4,7 @@ Browser-based, end-to-end encrypted messaging with device-local identities and a
 
 ## Conversations
 
-- **Appearance:** choose Light, Dark, or System from the theme button. System follows your device automatically; your choice is remembered in this browser. The desktop sidebar collapses into a conversation rail and remembers its width preference. Compact message spacing and a single composer toolbar leave more room for messages and media.
+- **Appearance:** choose Light, Dark, or System from the theme button. Open **Palettes & custom themes** for Default, Forest, Ocean, Lavender, Rose, and Monochrome palettes or to create your own. Custom themes have separately editable light and dark colors, a conversation preview, readability feedback, and local saving. Import/export shares only palette colors and a name; imported themes open in the preview before applying. **Restore default palette** stays available, and the editor uses readable built-in controls. Appearance mode, palette, and compactness are independent. The desktop sidebar collapses into a conversation rail and remembers its width preference. Compact message spacing and a single composer toolbar leave more room for messages and media.
 - **Delete individual messages:** open a message’s actions and choose **Delete for me…**, then confirm. This removes that message and its attachment from this device’s saved history, search, pins, and shared-file list. Other participants and independently linked devices retain their copies. Deletion markers travel in full backups and prevent replay or importing an older backup from restoring removed content.
 
 - **Group chats:** create a named group, add contacts, manage membership, and leave. The creator manages membership and the group name. Groups support up to twenty people.
@@ -103,6 +103,8 @@ To reproduce the Safari engine failure and verify the fix, install WebKit with `
 `npm run test:qr` checks exact-address QR display/download, image import, explicit contact/group confirmation, invalid code handling, camera cleanup, and narrow mobile dialogs with synthetic identities. To test the production bundle without starting Cloudflare's development runtime, first run `npm run build:next -- --webpack`, then `SEROTINE_QR_PRODUCTION=1 npm run test:qr`. Camera tests use a controlled video stream; check physical-camera focus and permissions on your target phones before release.
 
 Run `npm run test:appearance` for theme selection, system-theme changes, sidebar collapse, desktop/mobile layout, message actions, and individual-message deletion.
+
+Run `npm run test:palettes` for preset/custom colors, independent light/dark variants, preview cancellation, import/export validation, local persistence, recovery, and narrow-screen theme settings. See [SIP 2 implementation notes](docs/SIP-2-themes.md).
 
 Run `npm run test:cleanup` for desktop and mobile archive/restore/delete controls, reload persistence, deletion confirmation, and protection against replay or old-backup imports restoring deleted history.
 

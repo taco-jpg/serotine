@@ -310,6 +310,8 @@ test('browser client uses one stable same-origin POST per typed operation and pa
     assert.equal(url, '/api/relay')
     assert.equal(init.method, 'POST')
     assert.equal(init.mode, 'same-origin')
+    assert.equal(init.referrerPolicy, 'strict-origin')
+    assert.equal(init.referrer, undefined, 'an empty referrer forces Safari back to no-referrer')
     assert.equal(init.credentials, 'same-origin')
     assert.equal(init.redirect, 'error')
     assert.equal(init.cache, 'no-store')

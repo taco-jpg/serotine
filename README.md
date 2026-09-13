@@ -77,6 +77,10 @@ npm run build
 
 For browser integration, run `npx playwright install chromium` once, then `npm run test:browser`. The smoke test starts a local server and uses synthetic identities to exercise actual D1 traffic, groups, attachments, voice recording, backups, linked browsers, and the mobile layout. `SEROTINE_CHROMIUM_PATH` can point to an existing Chromium executable.
 
+Run `npm run test:relay-origin` for the focused browser transport regression. It uses a local HTTP server, the real relay route, and in-memory SQLite to check that messaging overrides the page's `no-referrer` policy with `strict-origin`. Only the site origin is sent as `Referer`; conversation paths and query strings stay private.
+
+To reproduce the Safari engine failure and verify the fix, install WebKit with `npx playwright install --with-deps webkit`, then run `SEROTINE_BROWSER=webkit npm run test:relay-origin`. This mode requires the original client to reproduce the `Origin: null` rejection before testing the corrected client. The default Chromium run checks compatibility but may not reproduce Safari's original failure.
+
 `npm run test:private` checks two-participant private messaging, exact access-key reveal/copy/hiding, expiry and destruction, draft/search/backup exclusions, narrow mobile layouts, and native clipboard behavior in the backup password fields.
 
 `npm run test:qr` checks exact-address QR display/download, image import, explicit contact/group confirmation, invalid code handling, camera cleanup, and narrow mobile dialogs with synthetic identities. To test the production bundle without starting Cloudflare's development runtime, first run `npm run build:next -- --webpack`, then `SEROTINE_QR_PRODUCTION=1 npm run test:qr`. Camera tests use a controlled video stream; check physical-camera focus and permissions on your target phones before release.

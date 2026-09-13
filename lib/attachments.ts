@@ -1,5 +1,5 @@
 import type { AttachmentMeta, GroupState, MessagingContextValue } from "./messaging-types"
-import { MAX_EVENT_PACKET_LENGTH, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT } from "./protocol"
+import { MAX_EVENT_PACKET_LENGTH, MAX_MESSAGE_LENGTH, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT, PUBLIC_KEY_PATTERN } from "./protocol"
 
 export const MAX_FILE_BYTES = 50 * 1024 * 1024
 export const ATTACHMENT_CHUNK_BYTES = 30 * 1024
@@ -7,6 +7,7 @@ export const MAX_ATTACHMENT_CHUNKS = Math.ceil(MAX_FILE_BYTES / ATTACHMENT_CHUNK
 export type AttachmentChunk = { index: number; data: string }
 export type AttachmentKind = "file" | "voice"
 export type AttachmentProgress = (percent: number) => void
+export type AttachmentCaption = { content: string; mentions?: string[] }
 
 /** Keep one transfer within the existing relay budget, including group fanout. */
 export function attachmentFileLimit(group?: GroupState): number {
@@ -99,17 +100,22 @@ export async function prepareAttachment(file: File, kind: AttachmentKind = "file
 export async function sendAttachment(
   sendEvent: MessagingContextValue["sendEvent"], conversationId: string, file: File,
   kind: AttachmentKind = "file", onProgress?: AttachmentProgress, replyTo?: string,
-  group?: GroupState,
+  group?: GroupState, caption?: AttachmentCaption,
 ): Promise<string> {
   if (conversationId.startsWith("group:") && group?.id !== conversationId) throw new Error("Group details are unavailable. Reopen this conversation before attaching a file.")
   validateAttachmentFile(file, attachmentFileLimit(group))
+  if (caption !== undefined && (!caption || typeof caption.content !== "string" || caption.content.length > MAX_MESSAGE_LENGTH)) throw new Error(`Use a caption up to ${MAX_MESSAGE_LENGTH.toLocaleString()} characters.`)
+  if (caption?.mentions !== undefined && (!Array.isArray(caption.mentions) || caption.mentions.length > 20 || !caption.mentions.every(pub => typeof pub === "string" && PUBLIC_KEY_PATTERN.test(pub)))) throw new Error("This caption has invalid mentions. Remove them and try again.")
+  // Capture the text before reading the file so later draft edits cannot change it.
+  const content = caption?.content.trim()
+  const mentions = caption?.mentions?.length ? [...caption.mentions] : undefined
   const { metadata, chunks } = await prepareAttachment(file, kind, percent => onProgress?.(Math.round(percent * 0.1)))
   // Queue content first: a storage error cannot publish a permanently truncated attachment.
   for (let index = 0; index < chunks.length; index++) {
     await sendEvent(conversationId, "attachment-chunk", { attachmentId: metadata.id, ...chunks[index] })
     onProgress?.(10 + Math.round((index + 1) * 85 / chunks.length))
   }
-  const messageId = await sendEvent(conversationId, "attachment", { attachment: metadata, replyTo })
+  const messageId = await sendEvent(conversationId, "attachment", { attachment: metadata, replyTo, ...(content ? { content } : {}), ...(mentions ? { mentions } : {}) })
   onProgress?.(100)
   return messageId
 }

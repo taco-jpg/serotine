@@ -110,6 +110,30 @@ test('attachment send queues every piece before publishing metadata and preserve
   assert.deepEqual(failedKinds, ['attachment-chunk'])
 })
 
+test('invalid captions and mentions are rejected before reading or queuing file chunks', async () => {
+  const file = { size: 1, name: 'note.txt', arrayBuffer() { assert.fail('invalid captions must not read the file') } }
+  const send = () => assert.fail('invalid captions must not queue events')
+  for (const caption of [null, { content: 42 }, { content: 'x'.repeat(8001) }]) {
+    await assert.rejects(files.sendAttachment(send, 'self', file, 'file', undefined, undefined, undefined, caption), /caption up to 8,000 characters/)
+  }
+  for (const mentions of ['bad', ['bad'], Array(21).fill('04' + '0'.repeat(128))]) {
+    await assert.rejects(files.sendAttachment(send, 'self', file, 'file', undefined, undefined, undefined, { content: 'Caption', mentions }), /invalid mentions/)
+  }
+})
+
+test('attachment captions and mentions are captured before asynchronous file preparation', async () => {
+  const pub = '04' + '1'.repeat(128), caption = { content: '  A file for you  ', mentions: [pub] }
+  const file = new File(['hello'], 'note.txt')
+  const read = file.arrayBuffer.bind(file)
+  file.arrayBuffer = async () => { caption.content = 'Changed draft'; caption.mentions[0] = '04' + '2'.repeat(128); return read() }
+  const events = []
+  await files.sendAttachment(async (_conversation, kind, payload) => { events.push({ kind, payload }); return 'message-id' }, 'self', file, 'file', undefined, undefined, undefined, caption)
+  assert.equal(events.at(-1).payload.content, 'A file for you')
+  assert.deepEqual(events.at(-1).payload.mentions, [pub])
+  assert.equal(events.filter(event => event.kind === 'attachment').length, 1)
+  assert.equal(events.some(event => event.kind === 'message'), false)
+})
+
 test('rich messages typeset math, escape raw HTML and code, and preserve search highlighting', () => {
   const html = renderToStaticMarkup(React.createElement(RichMessage, {
     text: 'Hello $x^2$\n<script>alert(1)</script>\n```python\nprint("<img src=x onerror=alert(1)>")\n```', highlight: 'Hello',

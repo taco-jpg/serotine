@@ -154,29 +154,45 @@ async function makeIdentity(){const pair=await crypto.subtle.generateKey({name:'
   assert.equal(await pasteFile('clipboard.txt','Pasted file content'),true,'file paste must be captured');
   await a.getByText('clipboard.txt',{exact:false}).last().waitFor();
   assert.equal(await messageBox.inputValue(),'Keep this draft');
-  await a.getByRole('button',{name:'Remove',exact:true}).click();
+  await a.getByRole('button',{name:'Remove clipboard.txt',exact:true}).click();
   assert.deepEqual(await dropFiles(historyText,[{name:'drop-first.txt',text:'First dropped file'},{name:'drop-second.txt',text:'Second dropped file'}]),{overPrevented:true,dropPrevented:true});
-  await a.getByText('2 files queued · send them one at a time',{exact:true}).waitFor();
+  await a.getByText('2 attachments ready · add text or send as is',{exact:true}).waitFor();
+  const composer=a.getByRole('form',{name:'Message composer',exact:true});
+  assert.equal(await composer.getByRole('list',{name:'Pending attachments',exact:true}).getByRole('listitem').count(),2,'all files must preview inside the message composer');
   await a.getByRole('button',{name:'Remove drop-second.txt',exact:true}).waitFor();
-  await a.getByRole('button',{name:'Send file',exact:true}).click();
-  await settle(()=>b.evaluate(()=>engine.model.messages.some(m=>m.attachment?.name==='drop-first.txt')),'dropped file send');
-  await a.getByText('drop-second.txt',{exact:false}).last().waitFor();
-  await a.getByRole('button',{name:'Send file',exact:true}).click();
-  await settle(()=>b.evaluate(()=>engine.model.messages.some(m=>m.attachment?.name==='drop-second.txt')),'second queued file send');
-  assert.equal(await messageBox.inputValue(),'Keep this draft');
-  await messageBox.fill('');
-  console.log('PASS clipboard files, unaffected text paste and multiple dropped files from nested message history');
+  await messageBox.press('Shift+Enter');
+  await messageBox.pressSequentially('and both files');
+  const attachmentCaption='Keep this draft\nand both files';
+  assert.equal(await messageBox.inputValue(),attachmentCaption,'Shift+Enter must add a line without sending attachments');
+  assert.equal(await composer.getByRole('listitem').count(),2);
+  await messageBox.press('Enter');
+  await settle(()=>b.evaluate(()=>['drop-first.txt','drop-second.txt'].every(name=>engine.model.messages.some(m=>m.attachment?.name===name))),'one Enter sends both dropped files');
+  assert.deepEqual(await b.evaluate(()=>engine.model.messages.filter(m=>['drop-first.txt','drop-second.txt'].includes(m.attachment?.name)).map(m=>({name:m.attachment.name,content:m.content})).sort((a,b)=>a.name.localeCompare(b.name))),[
+    {name:'drop-first.txt',content:attachmentCaption},{name:'drop-second.txt',content:''},
+  ]);
+  assert.equal(await b.evaluate(text=>engine.model.messages.filter(m=>m.content===text).length,attachmentCaption),1,'caption must appear once, on the first file');
+  await settle(async()=>await messageBox.inputValue()===''&&await composer.getByRole('list',{name:'Pending attachments',exact:true}).count()===0,'sent caption and attachments clear');
+  console.log('PASS pasted files, unaffected text paste, inline attachment previews and one Enter sending a caption with multiple files');
 
   const compact=a.getByRole('checkbox',{name:'Auto compact files',exact:true});
+  async function showAttachmentSettings(){
+    const tools=a.getByRole('button',{name:'More message tools',exact:true});
+    if(await tools.getAttribute('aria-expanded')!=='true')await tools.click();
+    const settings=a.getByRole('button',{name:'Attachment settings',exact:true});
+    if(await settings.getAttribute('aria-expanded')!=='true')await settings.click();
+  }
+  await showAttachmentSettings();
   assert.equal(await compact.isChecked(),false,'auto compact is optional');
   await compact.check();
   await a.reload();
   await messageBox.waitFor({state:'visible'});
+  await showAttachmentSettings();
   assert.equal(await compact.isChecked(),true,'auto compact setting must survive reload');
   const compactText='Exact content survives automatic compression.\n'.repeat(2000);
   await pasteFile('compact-notes.txt',compactText);
   await a.getByText('compact-notes.txt.gz',{exact:false}).last().waitFor();
-  await a.getByRole('button',{name:'Send file',exact:true}).click();
+  assert.equal(await messageBox.inputValue(),'','files can send with no text');
+  await messageBox.press('Enter');
   await settle(()=>b.evaluate(()=>{const message=engine.model.messages.find(m=>m.attachment?.name==='compact-notes.txt.gz');return !!message&&engine.getAttachmentChunks(message.conversationId,message.id).length===message.attachment.chunks}),'compacted file receive');
   assert.equal(await b.evaluate(async()=>{
     const message=engine.model.messages.find(m=>m.attachment?.name==='compact-notes.txt.gz');
@@ -186,6 +202,7 @@ async function makeIdentity(){const pair=await crypto.subtle.generateKey({name:'
   await compact.uncheck();
   await a.reload();
   await messageBox.waitFor({state:'visible'});
+  await showAttachmentSettings();
   assert.equal(await compact.isChecked(),false,'turning auto compact off must persist');
   console.log('PASS auto compact persistence, .gz filename and lossless received file content');
 
@@ -223,7 +240,15 @@ async function makeIdentity(){const pair=await crypto.subtle.generateKey({name:'
   console.log('PASS typed @ suggestions, keyboard and mouse insertion, real mention delivery and token deletion');
 
   await a.goto(origin+'/chat/'+aid);await a.getByRole('textbox',{name:'Message',exact:true}).waitFor({state:'visible',timeout:30000});await a.getByRole('textbox',{name:'Message',exact:true}).fill('Typed into self chat');await a.getByRole('button',{name:'Send message',exact:true}).click();await a.getByText('Typed into self chat',{exact:true}).last().waitFor({state:'visible',timeout:20000});
-  await a.getByRole('button',{name:'Voice',exact:true}).click();await a.getByRole('button',{name:'Stop & preview',exact:true}).waitFor();await sleep(1200);await a.getByRole('button',{name:'Stop & preview',exact:true}).click();await a.getByRole('button',{name:'Send voice message',exact:true}).click();await a.locator('audio').first().waitFor({state:'visible'});console.log('PASS microphone permission, recording preview and voice-message send');await a.screenshot({path:'/tmp/serotine-desktop.png'});await a.setViewportSize({width:390,height:844});await a.screenshot({path:'/tmp/serotine-mobile.png'});
+  await a.getByRole('button',{name:'More message tools',exact:true}).click();
+  await a.getByRole('button',{name:'Record voice message',exact:true}).click();
+  await a.getByRole('button',{name:'Stop & preview',exact:true}).waitFor();await sleep(1200);
+  await a.getByRole('button',{name:'Stop & preview',exact:true}).click();
+  await a.getByRole('list',{name:'Pending attachments',exact:true}).locator('audio').waitFor({state:'visible'});
+  await a.getByRole('button',{name:'Send message',exact:true}).click();
+  await a.getByRole('region',{name:'Conversation messages',exact:true}).locator('audio').first().waitFor({state:'visible'});
+  console.log('PASS microphone permission, recording preview and voice send through the main message button');
+  await a.screenshot({path:'/tmp/serotine-desktop.png'});await a.setViewportSize({width:390,height:844});await a.screenshot({path:'/tmp/serotine-mobile.png'});
   assert.equal(await a.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth),false,'mobile must not overflow');
   console.log('PASS rendered self-chat composer on desktop and mobile');
 

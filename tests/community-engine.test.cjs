@@ -208,6 +208,34 @@ test('a partially delivered community message retains receipts and retries only 
   assert.equal(message(owner, sent)?.delivery, 'sent')
 })
 
+test('an applicant can recover when the owner saved admission but the encrypted acknowledgement failed', async () => {
+  const owner = await engine(alice), guest = await engine(bob)
+  const { id, invite, channel } = await create(owner)
+  const beforeJoin = await owner.service.sendMessage(id, channel, 'Private history before admission')
+  await sync(owner)
+  await guest.service.joinCommunity(invite)
+  await sync(guest)
+  rejectRecipient = bob.publicKey
+  await sync(owner)
+  assert.equal(community(owner, id).members.includes(bob.publicKey), true)
+  await sync(guest)
+  assert.equal(community(guest, id)?.joined ?? false, false)
+  const request = guest.service.model.requests.find(request => request.communityId === id)
+  assert.equal(request.status, 'pending')
+  const epoch = community(owner, id).epoch
+  const failedApproval = [...recordsFor(alice.publicKey).values()].find(record => record.event.payload.community.type === 'state' && record.event.payload.community.requestId === request.id)
+  assert.ok(failedApproval.error)
+
+  rejectRecipient = undefined
+  await guest.service.retryJoinRequest(id, request.id)
+  await sync(guest, owner, guest)
+  assert.equal(community(guest, id).joined, true)
+  assert.equal(community(guest, id).epoch, epoch)
+  assert.equal(message(guest, beforeJoin), undefined)
+  const retry = guest.service.model.requests.find(request => request.id !== failedApproval.event.payload.community.requestId)
+  assert.equal(retry.status, 'approved')
+})
+
 test('community history and channel preferences survive backup validation while tampered owner state fails', async () => {
   const owner = await engine(alice), guest = await engine(bob)
   const { id, invite, channel } = await create(owner)

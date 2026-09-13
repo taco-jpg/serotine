@@ -1,15 +1,9 @@
 "use client"
 
-import { useState, useEffect } from 'react';
+import { memo } from 'react';
 
-export function IdentityIcon({ pubKey, size = 32 }: { pubKey: string, size?: number }) {
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  if (!mounted || !pubKey) {
+export const IdentityIcon = memo(function IdentityIcon({ pubKey, size = 32 }: { pubKey: string, size?: number }) {
+  if (!pubKey) {
     return <div className="rounded-full bg-muted border border-border flex-shrink-0" style={{ width: size, height: size }} />;
   }
   
@@ -31,5 +25,4 @@ export function IdentityIcon({ pubKey, size = 32 }: { pubKey: string, size?: num
       <div className="w-full h-full rounded-full bg-black/20 backdrop-blur-[1px]" />
     </div>
   );
-}
-
+});

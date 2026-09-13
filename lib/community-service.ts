@@ -1,10 +1,11 @@
 import type { Identity } from "./identity"
 import type { MessagingEvent, MessagingPreferences, StoredEvent } from "./messaging-types"
-import type { CommunityAdmission, CommunityChannel, CommunityCommand, CommunityEventData, CommunityJoinRequest, CommunityRecord, CommunityState } from "./community-types"
+import type { CommunityAdmission, CommunityChannel, CommunityCommand, CommunityEventData, CommunityJoinRequest, CommunityModel, CommunityRecord, CommunityState } from "./community-types"
 import { buildCommunityInviteUrl, buildCommunityModel, canPostToCommunityChannel, communityStateReference, isCommunityAdmin, isCommunityCoOwner, isCommunityId, isCommunityModerator, parseCommunityInvite, signCommunityInvite, signCommunityState, signCommunityTransfer, validateCommunityEvent, validateCommunityInvite, validateCommunityState } from "./community-protocol"
 
 export interface CommunityServiceHost {
   identity: Identity
+  // Replace these snapshots when their contents change; the model is memoized.
   records: () => StoredEvent[]
   preferences: () => MessagingPreferences
   refresh: () => Promise<void>
@@ -39,8 +40,16 @@ function snapshot(record: CommunityRecord): CommunityState {
 }
 
 export class CommunityService {
+  private cachedModel?: { records: StoredEvent[]; preferences: MessagingPreferences; value: CommunityModel }
   constructor(private readonly host: CommunityServiceHost) {}
-  get model() { return buildCommunityModel(this.host.records(), this.host.identity.publicKey, this.host.preferences()) }
+  get model() {
+    const records = this.host.records(), preferences = this.host.preferences()
+    // The engine replaces both snapshots on refresh. Reuse the reducer result
+    // across permission checks and renders until either snapshot changes.
+    if (this.cachedModel?.records !== records || this.cachedModel.preferences !== preferences)
+      this.cachedModel = { records, preferences, value: buildCommunityModel(records, this.address, preferences) }
+    return this.cachedModel.value
+  }
   private get address() { return this.host.identity.publicKey }
   private assertActive() { this.host.assertActive?.() }
   private async locked<T>(id: string, action: () => Promise<T>): Promise<T> {
@@ -184,6 +193,21 @@ export class CommunityService {
       return invite.communityId
     })
   }
+  retryJoinRequest = async (id: string, requestId: string): Promise<string> => this.locked(id, async () => {
+    const model = this.model, known = model.communities.find(item => item.id === id)
+    if (known?.deleted) throw new Error("This community has been deleted.")
+    if (known?.joined) return id
+    const request = model.requests.find(item => item.id === requestId && item.communityId === id && item.author === this.address && item.status === "pending")
+    if (!request) throw new Error("This join request is no longer pending.")
+    if (this.host.preferences().blocked.includes(request.invite.owner)) throw new Error("Unblock this community's owner before retrying.")
+    if (known && (known.owner !== request.invite.owner || known.inviteGeneration !== request.invite.inviteGeneration))
+      throw new Error("This invitation was revoked. Ask the current owner for a new one.")
+    if (!await validateCommunityInvite(request.invite)) throw new Error("This invitation has expired. Ask the owner for a new one.")
+    // A new signed envelope reaches an owner who already processed the first
+    // request; replaying its old event ID would be deduplicated by the relay.
+    await this.publish(id, { type: "join", invite: request.invite }, [request.invite.owner])
+    return id
+  })
   updateCommunity = async (id: string, changes: CommunityChanges): Promise<void> => this.locked(id, async () => {
     const prior = this.admin(id), next = this.nextState(prior)
     this.applyChanges(next, changes)
@@ -257,7 +281,8 @@ export class CommunityService {
   })
   private async rejectPending(prior: CommunityRecord, reason: string) {
     const pending = this.model.requests.filter(request => request.communityId === prior.id && request.status === "pending")
-    for (const request of pending) await this.resolveRequest(prior, request, false, undefined, reason)
+    for (const request of pending) if (this.model.requests.some(item => item.id === request.id && item.status === "pending"))
+      await this.resolveRequest(prior, request, false, undefined, reason)
   }
   moderate = async (id: string, action: CommunityModerationAction, target: string): Promise<void> => this.locked(id, async () => {
     const prior = this.moderator(id)
@@ -301,6 +326,16 @@ export class CommunityService {
     })
   }
   private async resolveRequest(prior: CommunityRecord, request: CommunityJoinRequest, approve: boolean, commandId?: string, rejectionReason?: string) {
+    if (approve && !prior.deleted && request.invite.owner === prior.owner && prior.effectiveMembers.includes(request.author) && !prior.bans.includes(request.author)) {
+      const context = { requestId: request.id, ...(commandId ? { commandId } : {}) }
+      // The owner may have saved admission before its relay delivery failed.
+      // A member can recover that acknowledgement even after joining is paused
+      // or invites are revoked. This never grants membership or replays history.
+      if (prior.members.length !== prior.effectiveMembers.length || (prior.version === 2 && prior.signer !== this.address))
+        await this.publishState(prior, this.nextState(prior), context)
+      else await this.publish(prior.id, { type: "state", state: snapshot(prior), ...context }, this.recipients(prior.members), prior)
+      return
+    }
     let reason = approve ? "" : rejectionReason ?? "A moderator declined your request."
     if (approve) {
       if (prior.deleted) reason = "This community has been deleted."
@@ -312,8 +347,12 @@ export class CommunityService {
       else if (!prior.effectiveMembers.includes(request.author) && prior.effectiveMembers.length >= MAX_MEMBERS) reason = "This community is full (20 members)."
     }
     if (reason) {
-      await this.publish(prior.id, { type: "decision", requestId: request.id, applicant: request.author, status: "rejected", reason,
-        ...(commandId ? { commandId } : {}) }, [request.author], prior)
+      // Explicit rejection also resolves retries shown as one applicant in the
+      // UI. Resolve siblings first so a failed write leaves the chosen request
+      // and any moderator command pending until all refusals are durable.
+      const retries = approve ? [] : this.model.requests.filter(item => item.communityId === prior.id && item.author === request.author && item.status === "pending" && item.id !== request.id)
+      for (const pending of [...retries, request]) await this.publish(prior.id, { type: "decision", requestId: pending.id, applicant: pending.author, status: "rejected", reason,
+        ...(commandId && pending.id === request.id ? { commandId } : {}) }, [pending.author], prior)
       return
     }
     const next = this.nextState(prior)
@@ -372,7 +411,7 @@ export class CommunityService {
         const command = model.commands.find(item => item.communityId === initial.id && !model.processedIds.includes(item.id))
         if (command) { await this.resolveCommand(community, command); continue }
         const request = model.requests.find(item => item.communityId === initial.id && item.status === "pending" &&
-          (community.admission === "direct" || community.joiningPaused || item.invite.owner !== community.owner || item.invite.inviteGeneration !== community.inviteGeneration ||
+          (community.effectiveMembers.includes(item.author) || community.admission === "direct" || community.joiningPaused || item.invite.owner !== community.owner || item.invite.inviteGeneration !== community.inviteGeneration ||
             item.invite.expiresAt <= Date.now() || community.bans.includes(item.author)))
         if (!request) break
         await this.resolveRequest(community, request, true)

@@ -285,10 +285,11 @@ export class MessagingEngine {
     window.addEventListener("serotine:contacts", this.storeListener)
     window.addEventListener("storage", this.storeListener)
     window.addEventListener("online", this.sync)
+    window.addEventListener("focus", this.sync)
     this.timer = setInterval(() => { void this.sync() }, 5000)
     void this.sync()
   }
-  dispose() { this.disposed = true; this.key = undefined; clearInterval(this.timer); clearTimeout(this.refreshTimer); clearTimeout(this.expiryTimer); window.removeEventListener("serotine:events", this.storeListener); window.removeEventListener("serotine:contacts", this.storeListener); window.removeEventListener("storage", this.storeListener); window.removeEventListener("online", this.sync); this.listeners.clear() }
+  dispose() { this.disposed = true; this.key = undefined; clearInterval(this.timer); clearTimeout(this.refreshTimer); clearTimeout(this.expiryTimer); window.removeEventListener("serotine:events", this.storeListener); window.removeEventListener("serotine:contacts", this.storeListener); window.removeEventListener("storage", this.storeListener); window.removeEventListener("online", this.sync); window.removeEventListener("focus", this.sync); this.listeners.clear() }
   refresh = async () => {
     this.assertActive()
     const generation = ++this.refreshGeneration
@@ -572,14 +573,16 @@ export class MessagingEngine {
         this.assertActive()
         // Community sends must see retained membership updates before fanout.
         // Direct/group delivery retains its established retry behavior.
-        const hasCommunities = (await getStoredEvents(this.identity.publicKey)).some(record => record.event.kind === "community")
+        await this.refresh()
+        const hasCommunities = this.records.some(record => record.event.kind === "community")
         if (hasCommunities) { await this.readFeed(); await this.communities.reconcile() }
-        await this.flushOutbox()
-        await this.refresh()
+        if (await this.flushOutbox()) await this.refresh()
         await this.readFeed()
-        if (this.records.some(record => record.event.kind === "community")) { await this.communities.reconcile(); await this.flushOutbox() }
-        await this.readLegacyInbox()
-        await this.refresh()
+        if (this.records.some(record => record.event.kind === "community")) {
+          await this.communities.reconcile()
+          if (await this.flushOutbox()) await this.refresh()
+        }
+        if (await this.readLegacyInbox()) await this.refresh()
         // Successful inbox reads establish connectivity. An older failed send
         // (including a receipt to a retired contact) says nothing about it.
         this.status = "online"; this.error = null
@@ -597,7 +600,7 @@ export class MessagingEngine {
   }
   private async flushOutbox() {
     this.assertActive()
-    if (Date.now() < this.outboxRetryAt) return
+    if (Date.now() < this.outboxRetryAt) return false
     const owner = this.identity.publicKey
     const pending = (await getStoredEvents(owner)).filter(r => r.local && !r.legacy && r.event.recipients.some(peer => canSendTo(r, peer))).sort((a, b) => a.receivedAt - b.receivedAt)
     let transportFailed = false
@@ -662,6 +665,7 @@ export class MessagingEngine {
       }))
       if (transportFailed || Date.now() < this.outboxRetryAt) break
     }
+    return pending.length > 0
   }
   private async readFeed() {
     this.assertActive()
@@ -675,7 +679,13 @@ export class MessagingEngine {
       const result = await getEventFeed(data, proof)
       this.assertActive()
       if (!result.success) throw new Error(result.error)
+      // Receiving a feed response establishes connectivity before a large
+      // history download or the compatibility inbox has finished processing.
+      if (this.status !== "online" || this.error) {
+        this.status = "online"; this.error = null; this.emit()
+      }
       const notifications: string[] = []
+      let changed = false
       for (const packet of result.messages) {
         this.assertActive()
         let event: MessagingEvent
@@ -691,9 +701,10 @@ export class MessagingEngine {
         const record: StoredEvent = { key, event, local: event.author === owner, delivered: event.author === owner ? [packet.recipientPubKey] : [], receivedAt: packet.createdAt, sequence: packet.sequence, error: existing?.error }
         // Persist failures must abort the page before its cursor can advance.
         await saveStoredEvent(owner, record)
+        changed = true
         if (!existing && event.author !== owner && (VISIBLE_KINDS.has(event.kind) || (event.kind === "community" && event.payload.community?.type === "message")) && packet.createdAt >= this.initializedAt) notifications.push(event.id)
       }
-      await this.refresh()
+      if (changed) await this.refresh()
       this.assertActive()
       for (const id of notifications) {
         const message = this.model.messages.find(m => m.id === id)
@@ -745,7 +756,8 @@ export class MessagingEngine {
   private async readLegacyInbox() {
     this.assertActive()
     const owner = this.identity.publicKey
-    const existing = new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
+    let existing: Map<string, StoredEvent> | undefined
+    let changed = false
     let after: { createdAt: number; id: string; senderPubKey: string } | undefined
     for (let page = 0; page < 10 && !this.disposed; page++) {
       const data = after ? { after } : {}
@@ -754,12 +766,16 @@ export class MessagingEngine {
       const result = await getLegacyInbox(data, proof)
       this.assertActive()
       if (!result.success) throw new Error(result.error)
+      // Most accounts have no legacy traffic. Avoid cloning all modern event
+      // history just to check an empty compatibility inbox every five seconds.
+      if (result.messages.length && !existing) existing = new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
       for (const packet of result.messages) {
         this.assertActive()
         try {
           const envelope = JSON.parse(await decryptFromPeer(packet.encryptedData, this.key!, packet.senderPubKey))
           if (!isEnvelope(envelope, packet.senderPubKey, owner) || envelope.id !== packet.id) continue
           await this.persistLegacyEvents(await legacyMessageEvents(envelope), false, packet.createdAt, existing)
+          changed = true
           this.assertActive()
           const ack = { id: packet.id, senderPubKey: packet.senderPubKey }
           const ackProof = await createRequestProof("message:ack", ack, this.identity.privateKey, owner)
@@ -770,5 +786,6 @@ export class MessagingEngine {
       if (!result.nextCursor) break
       after = result.nextCursor
     }
+    return changed
   }
 }

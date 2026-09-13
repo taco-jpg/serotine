@@ -31,7 +31,7 @@ Browser-based, end-to-end encrypted messaging with device-local identities and a
 - **Backups and linked devices:** export a password-encrypted full backup containing identity, contacts, legacy history, message events, attachment chunks, and preferences. Restore it on another device to link that device and synchronize retained incoming and outgoing events.
 - **Phones and tablets:** inbox and conversation views fit narrow screens, dialogs scroll within the visible viewport, and the composer adjusts for the on-screen keyboard and device safe areas. Touch controls remain accessible without hover.
 - **Message requests and blocking:** accept unfamiliar senders, block them, or unblock them later. Muted and unaccepted conversations do not generate notifications.
-- **Math and code:** render inline/display math and fenced code without interpreting raw HTML. Math rendering disables trusted commands.
+- **Math and code:** open the message tools and choose **Math** or **Code** to insert formatted content. Both editors render a live preview, and the draft preview updates as you type. Ordinary dollar amounts such as `$4` and `$5` stay plain text. Explicit math delimiters and fenced code remain supported; user HTML and trusted math commands are not executed.
 
 Drafts stay local to each browser and conversation. Backups do not include drafts. Keep a tab open if it warns that a draft could not be saved. Failed outgoing events remain locally available for explicit retry, retaining their original IDs and recipient lists.
 

@@ -59,7 +59,7 @@ test('colliding legacy short addresses stay literal while full addresses remain 
   assert.equal(formatMentionText(`@${shortAddress(alice)}`, [alice, alice], displayName), '@Private Me')
 })
 
-test('plain-text previews preserve code, all math delimiters, and URLs', () => {
+test('plain-text previews preserve code, explicit math delimiters, and URLs', () => {
   const token = `@${alice}`
   const protectedText = `\`${token}\`\n\`\`\`txt\n${token}\n\`\`\`\n$${token}$ $$${token}$$ \\(${token}\\) \\[${token}\\]\nhttps://example.com/?q=${token}`
   assert.equal(formatMentionText(`${protectedText}\n${token}`, [alice], displayName), `${protectedText}\n@Private Me`)
@@ -77,7 +77,7 @@ test('local names render as literal React text, including HTML, URL, math, and m
 test('rich rendering replaces ordinary text only, preserving code, math, URL targets, and search highlighting', () => {
   const token = `@${alice}`
   const html = renderToStaticMarkup(React.createElement(RichMessage, {
-    text: `${token}\n\`${token}\`\n\`\`\`text\n${token}\n\`\`\`\n$\\text{${token}}$ https://example.com/${token}`,
+    text: `${token}\n\`${token}\`\n\`\`\`text\n${token}\n\`\`\`\n\\(\\text{${token}}\\) https://example.com/${token}`,
     mentions: [alice], displayName, highlight: 'Private',
   }))
   assert.match(html, /<mark[^>]*>Private<\/mark>/)

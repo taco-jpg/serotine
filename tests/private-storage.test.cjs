@@ -7,6 +7,12 @@ const ts = require('typescript')
 const root = path.join(__dirname, '..')
 const local = new Map(), databases = new Map(), cache = new Map()
 let writes = 0, failCommit = false, beforeLegacyPut
+const reads = { full: 0, payloadBytes: 0 }
+function copyRead(value, full = false) {
+  if (full) reads.full++
+  for (const record of Array.isArray(value) ? value : [value]) reads.payloadBytes += record?.event?.payload?.data?.length ?? record?.event?.payload?.community?.data?.length ?? 0
+  return structuredClone(value)
+}
 const localStorage = {
   getItem(key) { return local.get(key) ?? null },
   setItem(key, value) { writes++; local.set(key, String(value)) },
@@ -18,12 +24,12 @@ function database(name) {
   const rows = store => { if (!data.has(store)) data.set(store, new Map()); return data.get(store) }
   const keyFor = (store, value, key) => key !== undefined ? JSON.stringify(key) : JSON.stringify(store === 'messages' ? [value.peerPubKey, value.senderPubKey, value.id] : value.key)
   const facade = (store, staging) => ({
-    async get(key) { return structuredClone((staging?.get(store) ?? rows(store)).get(JSON.stringify(key))) },
-    async getAll() { return structuredClone([...(staging?.get(store) ?? rows(store)).values()]) },
+    async get(key) { return copyRead((staging?.get(store) ?? rows(store)).get(JSON.stringify(key))) },
+    async getAll() { return copyRead([...(staging?.get(store) ?? rows(store)).values()], store === 'events') },
     index(index) {
-      assert.equal(index, 'by-peer')
+      assert.ok(index === 'by-peer' || index === 'by-kind')
       return { async getAll(peerPubKey) {
-        return structuredClone([...(staging?.get(store) ?? rows(store)).values()].filter(row => row.peerPubKey === peerPubKey))
+        return copyRead([...(staging?.get(store) ?? rows(store)).values()].filter(row => (index === 'by-kind' ? row.event.kind : row.peerPubKey) === peerPubKey))
       } }
     },
     async put(value, key) {
@@ -40,7 +46,7 @@ function database(name) {
   })
   return {
     close() {},
-    async getAll(store) { return structuredClone([...rows(store).values()]) },
+    async getAll(store) { return copyRead([...rows(store).values()], store === 'events') },
     async get(store, key) { return facade(store).get(key) },
     async put(store, value, key) { return facade(store).put(value, key) },
     transaction(stores) {
@@ -91,7 +97,7 @@ before(async () => {
   }
   ;[alice, bob, charlie] = await Promise.all([generate(), generate(), generate()])
 })
-beforeEach(() => { local.clear(); databases.clear(); writes = 0; failCommit = false; beforeLegacyPut = undefined })
+beforeEach(() => { local.clear(); databases.clear(); writes = 0; failCommit = false; beforeLegacyPut = undefined; reads.full = 0; reads.payloadBytes = 0 })
 async function signed(kind, payload, author = alice, recipient = bob, timestamp = Date.now() - 1000) {
   const event = await messaging.signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: author.publicKey,
     conversationId: recipient.publicKey, recipients: [recipient.publicKey], timestamp, kind, payload }, author)
@@ -247,4 +253,98 @@ test('destruction cannot overwrite an existing signed event with the same identi
   await assert.rejects(events.saveStoredEvent(owner(), { ...row, event: conflicting }), /Conflicting message identifier/)
   assert.deepEqual(rawRows().map(record => record.key), [row.key])
   assert.equal(await events.saveStoredEvent(owner(), row), true)
+})
+
+test('a 14.6 MiB attachment history is read once and never cloned again for idle refresh or a text send', async t => {
+  const { ATTACHMENT_CHUNK_BYTES } = load(path.join(root, 'lib/attachments.ts'))
+  const attachmentId = crypto.randomUUID(), bytes = Math.ceil(14.6 * 1024 * 1024)
+  const db = database(`serotine-events:${owner()}`)
+  let encodedBytes = 0
+  for (let offset = 0, index = 0; offset < bytes; offset += ATTACHMENT_CHUNK_BYTES, index++) {
+    const data = Buffer.alloc(Math.min(ATTACHMENT_CHUNK_BYTES, bytes - offset), index % 251).toString('base64')
+    encodedBytes += data.length
+    // Seed the old database format without a change log, as a schema upgrade does.
+    await db.put('events', await signed('attachment-chunk', { attachmentId, index, data }))
+  }
+  const reader = events.createStoredEventReader(owner())
+  const started = performance.now(), initial = await reader.read()
+  const initialMs = performance.now() - started
+  assert.equal(initial.length, Math.ceil(bytes / ATTACHMENT_CHUNK_BYTES))
+  assert.equal(reads.full, 1)
+  assert.equal(reads.payloadBytes, encodedBytes)
+  reads.full = 0; reads.payloadBytes = 0
+  const idleStarted = performance.now()
+  for (let i = 0; i < 8; i++) assert.equal(await reader.read(), initial)
+  const text = await signed('message', { content: 'This text must not deserialize an old GIF.' })
+  await events.saveStoredEvent(owner(), text)
+  const updated = await reader.read()
+  assert.notEqual(updated, initial)
+  assert.equal(updated.find(record => record.key === initial[0].key), initial[0])
+  assert.equal(updated.find(record => record.key === text.key).event.payload.content, text.event.payload.content)
+  assert.equal(reads.full, 0)
+  assert.equal(reads.payloadBytes, 0)
+  t.diagnostic(`14.6 MiB payload: initial ${initialMs.toFixed(1)} ms; 8 idle reads + text write/read ${(performance.now() - idleStarted).toFixed(1)} ms; 0 old attachment bytes read`)
+  reader.dispose()
+})
+
+test('independent readers observe committed writes, confirmations and deletions without shared notifications', async () => {
+  const one = events.createStoredEventReader(owner()), two = events.createStoredEventReader(owner())
+  assert.deepEqual(await one.read(), [])
+  const text = await signed('message', { content: 'cross-tab message' })
+  await events.saveStoredEvent(owner(), text)
+  const first = await one.read(), other = await two.read()
+  assert.equal(first[0].event.payload.content, other[0].event.payload.content)
+  assert.equal(Object.isFrozen(first[0].event.payload), true)
+  await events.saveStoredEvent(owner(), { ...text, delivered: [bob.publicKey] })
+  assert.deepEqual((await one.read())[0].delivered, [bob.publicKey])
+  assert.deepEqual((await two.read())[0].delivered, [bob.publicKey])
+  assert.deepEqual(first[0].delivered, [])
+  await events.deleteStoredMessage(owner(), bob.publicKey, text.event.id)
+  assert.deepEqual(await one.read(), [])
+  assert.deepEqual(await two.read(), [])
+  one.dispose(); two.dispose()
+})
+
+test('failed commits do not advance an incremental reader or publish pending records', async () => {
+  const reader = events.createStoredEventReader(owner()), initial = await reader.read()
+  const text = await signed('message', { content: 'rolled back text' })
+  failCommit = true
+  await assert.rejects(events.saveStoredEvent(owner(), text), /aborted/)
+  failCommit = false
+  assert.equal(await reader.read(), initial)
+  assert.deepEqual(rawRows(), [])
+  await events.saveStoredEvent(owner(), text)
+  assert.equal((await reader.read()).length, 1)
+  reader.dispose()
+})
+
+test('incremental readers reload after import and after a compacted change log', async () => {
+  const reader = events.createStoredEventReader(owner())
+  const first = await signed('message', { content: 'deleted before an old backup is restored' })
+  await events.saveStoredEvent(owner(), first)
+  const old = await events.exportMessagingSnapshot(owner())
+  await reader.read()
+  await events.deleteStoredMessage(owner(), bob.publicKey, first.event.id)
+  await events.importMessagingSnapshot(owner(), old)
+  assert.deepEqual(await reader.read(), [])
+  const newRows = []
+  for (let i = 0; i < 130; i++) { const row = await signed('message', { content: `new ${i}` }); newRows.push(row); await events.saveStoredEvent(owner(), row) }
+  reads.full = 0
+  assert.deepEqual(new Set((await reader.read()).map(record => record.key)), new Set(newRows.map(record => record.key)))
+  assert.equal(reads.full, 1)
+  reader.dispose()
+})
+
+test('incremental readers physically expire private payloads and refuse reads after disposal', async () => {
+  const timestamp = Date.now() - 1000
+  const row = await signed('private-message', { content: 'expire even with a warm reader', expiresAt: timestamp + 300000 }, alice, bob, timestamp)
+  await events.saveStoredEvent(owner(), row)
+  const reader = events.createStoredEventReader(owner())
+  assert.equal((await reader.read()).length, 1)
+  const originalNow = Date.now
+  Date.now = () => timestamp + 300001
+  try { assert.deepEqual(await reader.read(), []) } finally { Date.now = originalNow }
+  assert.deepEqual(rawRows(), [])
+  reader.dispose()
+  await assert.rejects(reader.read(), /closed/)
 })

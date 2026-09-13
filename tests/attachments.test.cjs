@@ -136,7 +136,7 @@ test('attachment captions and mentions are captured before asynchronous file pre
 
 test('rich messages typeset math, escape raw HTML and code, and preserve search highlighting', () => {
   const html = renderToStaticMarkup(React.createElement(RichMessage, {
-    text: 'Hello $x^2$\n<script>alert(1)</script>\n```python\nprint("<img src=x onerror=alert(1)>")\n```', highlight: 'Hello',
+    text: 'Hello \\(x^2\\)\n<script>alert(1)</script>\n```python\nprint("<img src=x onerror=alert(1)>")\n```', highlight: 'Hello',
   }))
   assert.match(html, /class="katex"/)
   assert.match(html, /<mark[^>]*>Hello<\/mark>/)
@@ -147,7 +147,7 @@ test('rich messages typeset math, escape raw HTML and code, and preserve search 
 
 test('rich links allow only http(s) and untrusted KaTeX commands cannot emit active links or images', () => {
   const html = renderToStaticMarkup(React.createElement(RichMessage, {
-    text: 'https://example.com/a?q=1&b=2. javascript:alert(1) $\\href{javascript:alert(1)}{click}$ $\\includegraphics{https://evil.test/x}$',
+    text: 'https://example.com/a?q=1&b=2. javascript:alert(1) \\(\\href{javascript:alert(1)}{click}\\) \\(\\includegraphics{https://evil.test/x}\\)',
   }))
   assert.match(html, /href="https:\/\/example.com\/a\?q=1&amp;b=2"/)
   assert.match(html, /rel="noopener noreferrer"/)

@@ -245,3 +245,58 @@ test('a community update midway through a file rejects incomplete metadata and a
   assert.equal(chunks.length, 2)
   assert.equal((await attachments.assembleAttachment(message.attachment, chunks)).size, file.size)
 })
+
+test('large community files keep validated pieces across text and receipt updates without decoding the file again', async t => {
+  const f = await fixture([alice, bob]), peer = f.client(bob).service
+  const prefs = defaults(); f.preferences.set(bob.publicKey, prefs)
+  const file = await attachments.prepareAttachment(new File([new Uint8Array(Math.round(14.6 * 1024 * 1024))], 'history.gif', { type: 'image/gif' }))
+  for (const chunk of file.chunks) f.inject(f.event(alice, f.data('attachment-chunk', f.channel, { attachmentId: file.metadata.id, ...chunk })))
+  const metadata = f.event(alice, f.data('attachment', f.channel, { attachment: file.metadata }))
+  f.inject(metadata)
+  const decode = globalThis.atob
+  let decodes = 0
+  globalThis.atob = value => { decodes++; return decode(value) }
+  try {
+    const initialStart = performance.now()
+    const first = peer.getAttachmentChunks(f.id, f.channel, metadata.id)
+    const initialMs = performance.now() - initialStart
+    assert.equal(first.length, file.chunks.length)
+    assert.equal(decodes, file.chunks.length, 'each new immutable piece receives its canonical-byte validation')
+    decodes = 0
+    const updateStart = performance.now()
+    for (let index = 0; index < 10; index++) {
+      f.inject(f.event(alice, f.data('message', f.channel, { content: `Text update ${index}` })))
+      f.preferences.set(bob.publicKey, { ...prefs, readAt: { [protocol.communityChannelKey(f.id, f.channel)]: Date.now() } })
+      assert.equal(peer.getAttachmentChunks(f.id, f.channel, metadata.id), first, 'unchanged file keeps its piece-array identity after a history refresh')
+    }
+    assert.equal(decodes, 0, 'typing, ordinary text and read updates must not reprocess 14.6 MB of historical media')
+    t.diagnostic(`14.6 MB community file: first validation ${initialMs.toFixed(1)} ms; ten history/preference updates ${(performance.now() - updateStart).toFixed(1)} ms, zero repeated file decodes`)
+  } finally { globalThis.atob = decode }
+})
+
+test('cached community pieces follow removal, blocking, deletion and conflicts immediately', async () => {
+  const f = await fixture([alice, bob]), peer = f.client(bob).service
+  const prefs = defaults(); f.preferences.set(bob.publicKey, prefs)
+  const file = await attachments.prepareAttachment(new File(['a'], 'a.txt', { type: 'text/plain' }))
+  const piece = f.event(alice, f.data('attachment-chunk', f.channel, { attachmentId: file.metadata.id, ...file.chunks[0] }))
+  const metadata = f.event(alice, f.data('attachment', f.channel, { attachment: file.metadata }))
+  f.inject(piece); f.inject(metadata)
+  assert.equal(peer.getAttachmentChunks(f.id, f.channel, metadata.id).length, 1)
+  f.preferences.set(bob.publicKey, { ...prefs, blocked: [alice.publicKey] })
+  assert.deepEqual(peer.getAttachmentChunks(f.id, f.channel, metadata.id), [])
+  f.preferences.set(bob.publicKey, { ...prefs, deletedMessages: { [f.id]: { messageIds: [metadata.id], eventKeys: [], attachmentKeys: [] } } })
+  assert.deepEqual(peer.getAttachmentChunks(f.id, f.channel, metadata.id), [])
+  f.preferences.set(bob.publicKey, prefs)
+  assert.equal(peer.getAttachmentChunks(f.id, f.channel, metadata.id).length, 1)
+  const all = f.stores.get(bob.publicKey)
+  f.stores.set(bob.publicKey, all.filter(record => record.event.id !== piece.id))
+  assert.deepEqual(peer.getAttachmentChunks(f.id, f.channel, metadata.id), [])
+  f.stores.set(bob.publicKey, all)
+  assert.equal(peer.getAttachmentChunks(f.id, f.channel, metadata.id).length, 1)
+  const conflict = f.event(alice, f.data('attachment-chunk', f.channel, { attachmentId: file.metadata.id, index: 0, data: btoa('b') }))
+  f.inject(conflict)
+  assert.deepEqual(peer.getAttachmentChunks(f.id, f.channel, metadata.id), [], 'a new conflicting piece invalidates a warm result')
+  f.stores.set(bob.publicKey, all.filter(record => record.event.id !== piece.id))
+  f.inject(f.event(alice, f.data('attachment-chunk', f.channel, { attachmentId: file.metadata.id, index: 0, data: 'YR==' })))
+  assert.deepEqual(peer.getAttachmentChunks(f.id, f.channel, metadata.id), [], 'noncanonical base64 cannot populate the cache')
+})

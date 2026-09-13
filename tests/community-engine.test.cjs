@@ -13,6 +13,7 @@ let rejectRecipient, historyReads = 0
 const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true, archived: [], deleted: {}, deletedMessages: {} })
 const recordsFor = owner => { if (!stores.has(owner)) stores.set(owner, new Map()); return stores.get(owner) }
 const store = {
+  createStoredEventReader: owner => ({ read: () => store.getStoredEvents(owner), dispose() {} }),
   defaultMessagingPreferences: defaults,
   eventStorageKey: event => `${event.author}:${event.conversationId}:${event.id}`,
   getStoredEvents: async owner => { historyReads++; return structuredClone([...recordsFor(owner).values()]) },
@@ -448,6 +449,24 @@ test('routine community sends use one signature and only one extra history read 
   assert.equal(directReads, 1)
   assert.equal(historyReads, 2, 'one post-signing membership check plus the durable message view refresh')
   t.diagnostic(`Local preparation with one recipient: direct ${directMs.toFixed(2)} ms / ${directReads} history read / ${directSignatures} signature; community ${communityMs.toFixed(2)} ms / ${historyReads} history reads / ${signatures} signature. Transport is excluded.`)
+})
+
+test('an unrelated ordinary message reaches the relay before a slow community membership feed', async t => {
+  const owner = await engine(alice)
+  await create(owner)
+  await sync(owner)
+  const id = await owner.instance.sendText(bob.publicKey, 'Ordinary sends remain responsive')
+  const read = relay.getEventFeed
+  let sawFeed = false
+  t.mock.method(relay, 'getEventFeed', async (...args) => {
+    sawFeed = true
+    assert.equal(attempts.filter(attempt => attempt.id === id).length, 1,
+      'the ordinary send must be published before waiting for community synchronization')
+    return read(...args)
+  })
+  await sync(owner)
+  assert.equal(sawFeed, true)
+  assert.equal(attempts.filter(attempt => attempt.id === id).length, 1)
 })
 
 test('a send queued while sync finishes is flushed immediately without waiting for the polling interval', async t => {

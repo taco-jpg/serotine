@@ -21,9 +21,9 @@ function database(name) {
     async get(key) { return structuredClone((staging?.get(store) ?? rows(store)).get(JSON.stringify(key))) },
     async getAll() { return structuredClone([...(staging?.get(store) ?? rows(store)).values()]) },
     index(index) {
-      assert.equal(index, 'by-peer')
+      assert.ok(index === 'by-peer' || index === 'by-kind')
       return { async getAll(peerPubKey) {
-        return structuredClone([...(staging?.get(store) ?? rows(store)).values()].filter(row => row.peerPubKey === peerPubKey))
+        return structuredClone([...(staging?.get(store) ?? rows(store)).values()].filter(row => (index === 'by-kind' ? row.event.kind : row.peerPubKey) === peerPubKey))
       } }
     },
     async put(value, key) {

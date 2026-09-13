@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { BarChart3, Check, Loader2, Plus, UserMinus, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { QrScanner } from "@/components/qr-scanner"
 import { MAX_MESSAGE_LENGTH } from "@/lib/protocol"
+import { MessageFormattingPreview, MessageFormattingTools } from "@/components/chat/message-formatting"
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : "This change could not be saved. Try again."
 
@@ -77,13 +78,14 @@ export function EditMessageDialog({ message, onClose, onSave }: {
   const [content, setContent] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const input = useRef<HTMLTextAreaElement>(null)
   useEffect(() => { setContent(message?.content || ""); setError("") }, [message])
-  return <Dialog open={!!message} onOpenChange={open => { if (!open && !busy) onClose() }}><DialogContent><DialogHeader><DialogTitle>Edit message</DialogTitle><DialogDescription>The message will show an edited label for everyone in this conversation.</DialogDescription></DialogHeader><form className="space-y-4" onSubmit={async event => {
+  return <Dialog open={!!message} onOpenChange={open => { if (!open && !busy) onClose() }}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>Edit message</DialogTitle><DialogDescription>The message will show an edited label for everyone in this conversation.</DialogDescription></DialogHeader><form className="space-y-4" onSubmit={async event => {
     event.preventDefault()
     if (!message || busy || !content.trim()) return
     setBusy(true); setError("")
     try { await onSave(message.id, content); onClose() } catch (cause) { setError(errorText(cause)) } finally { setBusy(false) }
-  }}><Textarea aria-label="Edited message" rows={5} maxLength={MAX_MESSAGE_LENGTH} disabled={busy} value={content} onChange={event => setContent(event.target.value)} />{error && <p role="alert" className="text-sm text-destructive">{error}</p>}<DialogFooter><Button type="button" variant="outline" disabled={busy} onClick={onClose}>Cancel</Button><Button type="submit" disabled={busy || !content.trim() || content === message?.content}>{busy && <Loader2 className="size-4 animate-spin" />}Save changes</Button></DialogFooter></form></DialogContent></Dialog>
+  }}><Textarea ref={input} aria-label="Edited message" rows={5} maxLength={MAX_MESSAGE_LENGTH} disabled={busy} value={content} onChange={event => setContent(event.target.value)} /><div className="flex flex-wrap gap-1"><MessageFormattingTools key={message?.id || "closed"} content={content} inputRef={input} disabled={busy || !message} onInsert={result => setContent(result.content)} /></div><MessageFormattingPreview content={content} />{error && <p role="alert" className="text-sm text-destructive">{error}</p>}<DialogFooter><Button type="button" variant="outline" disabled={busy} onClick={onClose}>Cancel</Button><Button type="submit" disabled={busy || !content.trim() || content === message?.content}>{busy && <Loader2 className="size-4 animate-spin" />}Save changes</Button></DialogFooter></form></DialogContent></Dialog>
 }
 
 export interface MemberLabel { pub: string; label: string }

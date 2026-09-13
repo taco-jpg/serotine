@@ -8,12 +8,18 @@ const ts = require('typescript')
 // and the browser's object-URL boundary to exercise asynchronous file arrival.
 function harness() {
   const slots = [], effects = [], created = [], revoked = [], cache = new Map()
+  const work = { decodedBytes: 0, serializedBytes: 0 }
   let cursor = 0
   const react = {
     useState(initial) {
       const index = cursor++
       if (!(index in slots)) slots[index] = initial
       return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value }]
+    },
+    useRef(initial) {
+      const index = cursor++
+      if (!(index in slots)) slots[index] = { current: initial }
+      return slots[index]
     },
     useMemo(compute, deps) {
       const index = cursor++, old = slots[index]
@@ -39,21 +45,28 @@ function harness() {
     if (cache.has(filename)) return cache.get(filename)
     const output = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { fileName: filename, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText
     const module = { exports: {} }
-    new Function('require', 'module', 'exports', 'URL', output)(specifier => {
+    new Function('require', 'module', 'exports', 'URL', 'atob', 'JSON', output)(specifier => {
       if (specifier === 'react') return react
       if (specifier === 'lucide-react') return { Download: 'download-icon', FileText: 'file-icon', LoaderCircle: 'loader-icon', Maximize2: 'enlarge-icon' }
       if (specifier === '@/components/ui/dialog') return Object.fromEntries(['Dialog', 'DialogTrigger', 'DialogContent', 'DialogHeader', 'DialogTitle', 'DialogDescription'].map(name => [name, name]))
       if (specifier.startsWith('@/')) return load(path.join(__dirname, '..', specifier.slice(2)))
       if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
       return require(specifier)
-    }, module, module.exports, URL)
+    }, module, module.exports, URL, value => {
+      work.decodedBytes += value.length
+      return atob(value)
+    }, { ...JSON, parse: JSON.parse, stringify(...args) {
+      const result = JSON.stringify(...args)
+      work.serializedBytes += result?.length || 0
+      return result
+    } })
     cache.set(filename, module.exports)
     return module.exports
   }
   const files = load(path.join(__dirname, '../lib/attachments.ts'))
   const { AttachmentView } = load(path.join(__dirname, '../components/chat/attachment-view.tsx'))
   return {
-    files, created, revoked,
+    files, created, revoked, work,
     render({ metadata, chunks }) {
       cursor = 0
       const tree = AttachmentView({ metadata, chunks })
@@ -165,6 +178,50 @@ test('unchanged chunk copies reuse the URL; replacing or removing media revokes 
   assert.equal(tags(h.render(other), 'video')[0].props.src, h.created[1].url)
   h.unmount()
   assert.deepEqual(h.revoked, h.created.map(resource => resource.url))
+})
+
+test('large media rerenders do not serialize file bytes or repeat verification', async () => {
+  const h = harness()
+  const attachment = await prepare(h, 'image/gif', 'large.gif', new Uint8Array(Math.round(14.6 * 1024 * 1024)).fill(97))
+  await h.ready(attachment)
+  assert.ok(h.work.decodedBytes > attachment.metadata.size)
+  h.work.decodedBytes = h.work.serializedBytes = 0
+  for (let update = 0; update < 30; update++) {
+    // A refreshed message model can change object identity/property order and
+    // chunk arrival order without changing the verified file itself.
+    const metadata = Object.fromEntries(Object.entries(attachment.metadata).reverse())
+    const chunks = attachment.chunks.map(chunk => ({ ...chunk }))
+    if (update % 2) chunks.reverse()
+    const tree = h.render({ metadata, chunks })
+    assert.equal(tags(tree, 'img')[0].props.src, h.created[0].url)
+  }
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(h.work.serializedBytes, 0)
+  assert.equal(h.work.decodedBytes, 0)
+  assert.equal(h.created.length, 1)
+  assert.equal(h.revoked.length, 0)
+  h.unmount()
+  assert.deepEqual(h.revoked, [h.created[0].url])
+})
+
+test('changed or removed pieces immediately invalidate an already verified preview', async () => {
+  const h = harness(), attachment = await prepare(h, 'image/png', 'photo.png')
+  await h.ready(attachment)
+  // Even an in-place mutation must not borrow the earlier file's verified URL.
+  attachment.chunks[0].data = btoa('different media bytes')
+  let tree = h.render(attachment)
+  assert.equal(tags(tree, 'img').length, 0)
+  assert.equal(tags(tree, 'a').length, 0)
+  assert.deepEqual(h.revoked, [h.created[0].url])
+  await new Promise(resolve => setTimeout(resolve, 10))
+  tree = h.render(attachment)
+  assert.ok(nodes(tree, node => node.props?.role === 'alert').length)
+  assert.equal(h.created.length, 1)
+  tree = h.render({ ...attachment, chunks: [] })
+  assert.equal(tags(tree, 'progress')[0].props.value, 0)
+  assert.equal(tags(tree, 'a').length, 0)
+  h.unmount()
+  assert.deepEqual(h.revoked, [h.created[0].url])
 })
 
 test('unmounting during verification cannot create an orphaned object URL', async () => {

@@ -58,6 +58,32 @@ test('self send is one ordinary self conversation; incoming and outgoing direct 
   assert.equal(state.messages.filter(x => x.conversationId === alice.publicKey).length, 1)
 })
 
+test('captioned attachments arrive as one signed message with their reply and mentions', async () => {
+  const [alice, bob] = await Promise.all([identity(), identity()])
+  const attachments = load(path.join(root, 'lib/attachments.ts'))
+  const g = await group(alice, [alice, bob])
+  for (const conversation of [bob.publicKey, g]) {
+    const events = [], replyTo = crypto.randomUUID()
+    const id = await attachments.sendAttachment(async (_cid, kind, payload) => {
+      const e = await event(alice, conversation, kind, payload)
+      assert.equal(await messaging.validateMessagingEvent(e), true)
+      events.push(e)
+      return e.id
+    }, typeof conversation === 'string' ? conversation : conversation.id, new File(['hello'], 'notes.txt'), 'file', undefined, replyTo,
+    typeof conversation === 'string' ? undefined : conversation, { content: '  @Bob Here are the notes.  ', mentions: [bob.publicKey] })
+    const received = model(events, bob).messages
+    assert.equal(received.length, 1)
+    assert.equal(received[0].id, id)
+    assert.equal(received[0].content, '@Bob Here are the notes.')
+    assert.equal(received[0].attachment.name, 'notes.txt')
+    assert.equal(received[0].replyTo, replyTo)
+    assert.deepEqual(received[0].mentions, [bob.publicKey])
+    assert.equal(received[0].delivery, 'received')
+    const chunks = events.filter(e => e.kind === 'attachment-chunk').map(e => ({ index: e.payload.index, data: e.payload.data }))
+    assert.equal(await (await attachments.assembleAttachment(received[0].attachment, chunks)).text(), 'hello')
+  }
+})
+
 test('event signatures bind author, route, recipients, payload and transport id', async () => {
   const [alice, bob, mallory] = await Promise.all([identity(), identity(), identity()])
   const e = await event(alice, bob.publicKey)

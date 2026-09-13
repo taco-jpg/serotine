@@ -22,7 +22,7 @@ import { formatMentionText } from "@/lib/mention-display"
 import { useMentionDraft } from "@/hooks/use-mention-draft"
 import { literalSearch } from "@/components/message-text"
 import { type MessageRecord, type NotificationMode } from "@/lib/messaging-types"
-import { AttachmentComposer } from "@/components/chat/attachment-composer"
+import { AttachmentComposer, type AttachmentComposerHandle, type AttachmentComposerState } from "@/components/chat/attachment-composer"
 import { AttachmentView } from "@/components/chat/attachment-view"
 import { RichMessage } from "@/components/chat/rich-message"
 import { attachmentFileLimit, sendAttachment } from "@/lib/attachments"
@@ -113,6 +113,10 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const nearBottom = useRef(true)
   const input = useRef<HTMLTextAreaElement>(null)
   const sendLock = useRef(false)
+  const attachmentComposer = useRef<AttachmentComposerHandle | null>(null)
+  const [attachmentState, setAttachmentState] = useState<AttachmentComposerState>({ count: 0, unavailable: false })
+  const attachmentsUnavailable = !privateMode && attachmentState.unavailable
+  const hasAttachments = !privateMode && attachmentState.count > 0
   const actionScope = useRef<object | null>(null)
   const searchTerm = query.trim()
   const matches = useMemo(() => {
@@ -188,7 +192,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
     }
     node.addEventListener("beforeinput", beforeInput)
     return () => node.removeEventListener("beforeinput", beforeInput)
-  }, [])
+  }, [myPub, conversationId, privateMode])
   useEffect(() => () => { clearTimeout(copyTimer.current); clearTimeout(highlightTimer.current) }, [])
   useEffect(() => {
     setToolsOpen(false)
@@ -268,14 +272,24 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   }
   const submit = async () => {
     const scope = actionScope.current
-    if (!scope || !content.trim() || sendLock.current || !usable || !draftReady) return
+    const attachments = privateMode ? null : attachmentComposer.current
+    const pending = attachments?.getState()
+    if (!scope || (!content.trim() && !pending?.count) || pending?.unavailable || sendLock.current || !usable || !draftReady) return
     sendLock.current = true; setBusy(true); setSendError(""); jumpToLatest()
     try {
       const outgoing = privateMode ? { content, mentions: [] } : serializeMentionDraft(content, mentionSpans)
       if (outgoing.content.trim().length > MAX_MESSAGE_LENGTH) throw new Error("This message is too long after including mention addresses. Shorten it and try again.")
-      await messaging.sendText(conversationId, outgoing.content, privateMode ? undefined : replyTo, outgoing.mentions.filter(pub => mentionMembers.includes(pub)), privateTtlSeconds)
-      clearSubmittedDraft()
-      if (actionScope.current === scope) { setReplyTo(undefined); setMentionOpen(false) }
+      const caption = { content: outgoing.content.trim(), mentions: outgoing.mentions.filter(pub => mentionMembers.includes(pub)) }
+      const clearSentText = () => {
+        clearSubmittedDraft()
+        if (actionScope.current === scope) { setReplyTo(undefined); setMentionOpen(false) }
+      }
+      if (attachments && pending?.count) {
+        await attachments.sendAll(caption, clearSentText)
+      } else {
+        await messaging.sendText(conversationId, outgoing.content, privateMode ? undefined : replyTo, caption.mentions, privateTtlSeconds)
+        clearSentText()
+      }
     } catch (cause) { if (actionScope.current === scope) setSendError(errorText(cause)) }
     finally { if (actionScope.current === scope) { sendLock.current = false; setBusy(false); input.current?.focus() } }
   }
@@ -312,6 +326,15 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const attachmentView = (message: MessageRecord) => !message.private && message.attachment && <AttachmentView metadata={message.attachment} chunks={messaging.getAttachmentChunks(conversationId, message.id)} />
   const openMessageFromInfo = (id: string) => { setInfoOpen(false); requestAnimationFrame(() => jumpToMessage(id)) }
   const statusLabel = { connecting: "Connecting inbox…", online: "Inbox connected", offline: "Inbox sync unavailable" }[status]
+  const messageInput = <div className="flex min-w-0 items-end gap-1"><Button type="button" variant="ghost" size="icon" className="size-9 shrink-0 rounded-lg" aria-label="More message tools" title="Files, GIFs and message tools" aria-expanded={toolsOpen} aria-controls="message-tools" onClick={() => setToolsOpen(value => !value)}>{toolsOpen ? <X className="size-4" /> : <Plus className="size-4" />}</Button><Textarea ref={input} aria-label="Message" aria-busy={busy} autoComplete={privateMode ? "off" : undefined} autoCorrect={privateMode ? "off" : undefined} spellCheck={!privateMode} placeholder={blocked ? "Unblock this person to send messages" : request ? "Accept this conversation to reply" : unavailableGroup ? "This group is unavailable on this device" : closedGroup ? "This group is closed" : leftGroup ? "You left this group" : membershipUpdating ? "Updating group membership…" : ready ? privateMode ? "Write a private message…" : isSelf ? "Message yourself…" : "Write a message…" : "Opening conversation…"} value={content} onChange={event => changeMessage(event.target.value, event.target.selectionStart, event.target.selectionEnd)} onSelect={event => { const node = event.currentTarget; if (document.activeElement === node) updateMentionQuery(node.value, node.selectionStart, node.selectionEnd) }} onBlur={() => setMentionOpen(false)} aria-autocomplete="list" aria-controls={mentionOpen ? "message-mention-options" : undefined} aria-activedescendant={mentionOpen && mentionCandidates.length ? `message-mention-${selectedMentionIndex}` : undefined} maxLength={MAX_MESSAGE_LENGTH} disabled={!usable || !draftReady} readOnly={busy} rows={1} className="max-h-36 min-h-9 min-w-0 flex-1 resize-none border-0 bg-transparent px-1.5 py-2 text-base md:text-base shadow-none focus-visible:ring-0" onKeyDown={event => {
+          if (event.nativeEvent.isComposing) return
+          if (mentionOpen) {
+            if (event.key === "Escape") { event.preventDefault(); setMentionOpen(false); return }
+            if (mentionCandidates.length && (event.key === "ArrowDown" || event.key === "ArrowUp")) { event.preventDefault(); setMentionIndex((selectedMentionIndex + (event.key === "ArrowDown" ? 1 : mentionCandidates.length - 1)) % mentionCandidates.length); return }
+            if (mentionCandidates.length && ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab")) { event.preventDefault(); chooseMention(mentionCandidates[selectedMentionIndex]); return }
+          }
+          if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit() }
+        }} /><Button type="submit" aria-label="Send message" disabled={!usable || !draftReady || (!content.trim() && !hasAttachments) || sending || attachmentsUnavailable} size="icon" className="size-9 shrink-0 rounded-lg">{busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}</Button></div>
   return <div ref={chatRoot} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
     <header className="flex min-h-13 shrink-0 items-center justify-between gap-1 border-b border-border/80 bg-card/70 px-2 py-1 sm:px-4">
       <div className="flex min-w-0 items-center gap-1.5"><Link href="/chat" aria-label="Back to conversations" className="flex size-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-card md:hidden"><ArrowLeft className="size-5" /></Link>{isGroup ? <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><Users className="size-5" /></span> : <span className="hidden shrink-0 sm:block"><IdentityIcon pubKey={conversationId} size={30} /></span>}<div className="min-w-0"><h1 className="truncate font-sans text-base font-medium">{title}{isSelf && <span className="ml-2 text-xs font-normal text-muted-foreground">yourself</span>}</h1><span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Lock className="size-3 shrink-0" /><span className="truncate">{conversation?.archived ? "Archived · History saved" : isGroup ? unavailableGroup ? "Group history unavailable" : closedGroup ? "Closed group · Encrypted" : leftGroup ? "Left group · Encrypted" : `${activeMembers.length} members · Encrypted` : privateMode ? `Private · ${privateDurationLabel(privateTtlSeconds)} timer` : "End-to-end encrypted"}</span></span></div></div>
@@ -391,15 +414,21 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
       {(unconfirmed.length > 1 || batchProgress) && <div className="mx-auto mb-3 flex max-w-7xl flex-wrap items-center justify-between gap-2 text-xs text-amber-700 dark:text-amber-200"><span role="status">{batchProgress ? `Retrying ${batchProgress.current} of ${batchProgress.total}…` : `${unconfirmed.length} messages need another attempt.`}</span><Button type="button" size="sm" variant="outline" disabled={!ready || sending} onClick={() => void retryFailed(unconfirmed, true)}><RotateCw className={`size-3 ${batchProgress ? "animate-spin" : ""}`} />{batchProgress ? "Retrying…" : "Retry failed messages"}</Button></div>}
       <div className="mx-auto max-w-7xl">
         {!privateMode && replyTo && <div className="mb-2 flex items-center gap-2 rounded-lg border-l-2 border-primary bg-card p-2 text-xs"><Reply className="size-4 shrink-0 text-primary" /><span className="min-w-0 flex-1"><span className="block text-primary">Replying to {byId.get(replyTo) ? displayName(byId.get(replyTo)!.senderPubKey) : "message"}</span><span className="block truncate text-muted-foreground">{byId.get(replyTo) ? displaySummary(byId.get(replyTo)!) : "Original message"}</span></span><Button variant="ghost" size="icon" aria-label="Cancel reply" onClick={() => setReplyTo(undefined)}><X className="size-4" /></Button></div>}
-        <form onSubmit={event => { event.preventDefault(); void submit() }}><div className="flex items-end gap-1 rounded-xl border border-border bg-card p-1 shadow-sm focus-within:border-primary/60 focus-within:ring-2 focus-within:ring-primary/10"><Button type="button" variant="ghost" size="icon" className="size-9 shrink-0 rounded-lg" aria-label="More message tools" title="Files, GIFs and message tools" aria-expanded={toolsOpen} aria-controls="message-tools" onClick={() => setToolsOpen(value => !value)}>{toolsOpen ? <X className="size-4" /> : <Plus className="size-4" />}</Button><Textarea ref={input} aria-label="Message" aria-busy={busy} autoComplete={privateMode ? "off" : undefined} autoCorrect={privateMode ? "off" : undefined} spellCheck={!privateMode} placeholder={blocked ? "Unblock this person to send messages" : request ? "Accept this conversation to reply" : unavailableGroup ? "This group is unavailable on this device" : closedGroup ? "This group is closed" : leftGroup ? "You left this group" : membershipUpdating ? "Updating group membership…" : ready ? privateMode ? "Write a private message…" : isSelf ? "Message yourself…" : "Write a message…" : "Opening conversation…"} value={content} onChange={event => changeMessage(event.target.value, event.target.selectionStart, event.target.selectionEnd)} onSelect={event => { const node = event.currentTarget; if (document.activeElement === node) updateMentionQuery(node.value, node.selectionStart, node.selectionEnd) }} onBlur={() => setMentionOpen(false)} aria-autocomplete="list" aria-controls={mentionOpen ? "message-mention-options" : undefined} aria-activedescendant={mentionOpen && mentionCandidates.length ? `message-mention-${selectedMentionIndex}` : undefined} maxLength={MAX_MESSAGE_LENGTH} disabled={!usable || !draftReady} readOnly={busy} rows={1} className="max-h-36 min-h-9 min-w-0 flex-1 resize-none border-0 bg-transparent px-1.5 py-2 text-base md:text-base shadow-none focus-visible:ring-0" onKeyDown={event => {
-          if (event.nativeEvent.isComposing) return
-          if (mentionOpen) {
-            if (event.key === "Escape") { event.preventDefault(); setMentionOpen(false); return }
-            if (mentionCandidates.length && (event.key === "ArrowDown" || event.key === "ArrowUp")) { event.preventDefault(); setMentionIndex((selectedMentionIndex + (event.key === "ArrowDown" ? 1 : mentionCandidates.length - 1)) % mentionCandidates.length); return }
-            if (mentionCandidates.length && ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab")) { event.preventDefault(); chooseMention(mentionCandidates[selectedMentionIndex]); return }
-          }
-          if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit() }
-        }} /><Button type="submit" aria-label="Send message" disabled={!usable || !draftReady || !content.trim() || sending} size="icon" className="size-9 shrink-0 rounded-lg">{busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}</Button></div></form>
+        <form aria-label="Message composer" onSubmit={event => { event.preventDefault(); if (event.target === event.currentTarget) void submit() }}>
+          <div className="rounded-xl border border-border bg-card p-1 shadow-sm focus-within:border-primary/60 focus-within:ring-2 focus-within:ring-primary/10">
+            {privateMode ? <>{messageInput}<div id="message-tools" className={`${toolsOpen ? "flex" : "hidden"} flex-wrap items-center justify-between gap-2 py-1`}><Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" />Share access key</Button><span className="text-[11px] text-muted-foreground">Plain text only · No files or polls</span></div></> : <AttachmentComposer key={`${myPub}:${conversationId}`} composerRef={attachmentComposer} onStateChange={setAttachmentState} owner={myPub} maxFileBytes={attachmentFileLimit(group)} toolbarVisible={toolsOpen} toolbarId="message-tools" extraActions={<>
+          {canUsePrivate && <Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" /><span className="hidden sm:inline">Access key</span><span className="sr-only sm:hidden">Share access key</span></Button>}
+          <Button type="button" variant="ghost" size="sm" disabled={!usable} onClick={() => setPollOpen(true)}><BarChart3 className="size-4" />Poll</Button>
+          {!isSelf && <Button type="button" variant="ghost" size="sm" disabled={!usable} aria-expanded={mentionOpen} onClick={() => { setMentionQuery(findMentionQuery(content, input.current?.selectionStart ?? content.length, input.current?.selectionEnd ?? content.length)); setMentionIndex(0); setMentionOpen(!mentionOpen); if (!mentionOpen) requestAnimationFrame(() => document.getElementById("message-mention-0")?.focus()); else input.current?.focus() }}><AtSign className="size-4" />Mention</Button>}
+        </>} captureRef={chatRoot} pasteRef={input} disabled={!usable || sending || !draftReady} onSelectGif={url => {
+          if (!usable || sending || !draftReady) return
+          const next = content.trim() ? `${content}\n${url}` : url
+          if (next.length > MAX_MESSAGE_LENGTH) { setSendError("There is not enough room for this GIF. Send or shorten your draft first."); return }
+          changeMessage(next, next.length)
+          requestAnimationFrame(() => input.current?.focus())
+        }} onSend={async (file, kind, onProgress, caption) => { const scope = actionScope.current; const id = await sendAttachment(messaging.sendEvent, conversationId, file, kind, onProgress, caption ? replyTo : undefined, group, caption); if (actionScope.current === scope) jumpToLatest(); return id }}>{messageInput}</AttachmentComposer>}
+          </div>
+        </form>
         {!privateMode && mentionOpen && <div id="message-mention-options" role="listbox" aria-label="Mention suggestions" onKeyDown={event => {
           if (event.key === "Escape") { event.preventDefault(); setMentionOpen(false); input.current?.focus() }
           if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) && mentionCandidates.length) {
@@ -413,17 +442,6 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
           {!mentionCandidates.length && <p className="px-3 py-2 text-xs text-muted-foreground">{mentionQuery?.query ? "No matching members." : "Everyone is already mentioned."}</p>}
         </div>}
         {mentions.length > 0 && <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">{mentions.map(pub => <button type="button" key={pub} aria-label={`Remove mention of ${displayName(pub)}`} disabled={busy} onClick={() => removeMention(pub)} className="inline-flex items-center gap-1 rounded-full bg-primary/15 px-2 py-1 text-primary">@{displayName(pub)}<X className="size-3" /></button>)}</div>}
-        {privateMode ? <div id="message-tools" className={`${toolsOpen ? "flex" : "hidden"} flex-wrap items-center justify-between gap-2 py-1`}><Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" />Share access key</Button><span className="text-[11px] text-muted-foreground">Plain text only · No files or polls</span></div> : <AttachmentComposer key={`${myPub}:${conversationId}`} owner={myPub} maxFileBytes={attachmentFileLimit(group)} toolbarVisible={toolsOpen} toolbarId="message-tools" extraActions={<>
-          {canUsePrivate && <Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" /><span className="hidden sm:inline">Access key</span><span className="sr-only sm:hidden">Share access key</span></Button>}
-          <Button type="button" variant="ghost" size="sm" disabled={!usable} onClick={() => setPollOpen(true)}><BarChart3 className="size-4" />Poll</Button>
-          {!isSelf && <Button type="button" variant="ghost" size="sm" disabled={!usable} aria-expanded={mentionOpen} onClick={() => { setMentionQuery(findMentionQuery(content, input.current?.selectionStart ?? content.length, input.current?.selectionEnd ?? content.length)); setMentionIndex(0); setMentionOpen(!mentionOpen); if (!mentionOpen) requestAnimationFrame(() => document.getElementById("message-mention-0")?.focus()); else input.current?.focus() }}><AtSign className="size-4" />Mention</Button>}
-        </>} captureRef={chatRoot} pasteRef={input} disabled={!usable || sending || !draftReady} onSelectGif={url => {
-          if (!usable || sending || !draftReady) return
-          const next = content.trim() ? `${content}\n${url}` : url
-          if (next.length > MAX_MESSAGE_LENGTH) { setSendError("There is not enough room for this GIF. Send or shorten your draft first."); return }
-          changeMessage(next, next.length)
-          requestAnimationFrame(() => input.current?.focus())
-        }} onSend={async (file, kind, onProgress) => { const scope = actionScope.current; const id = await sendAttachment(messaging.sendEvent, conversationId, file, kind, onProgress, replyTo, group); if (actionScope.current === scope) { setReplyTo(undefined); jumpToLatest() } return id }} />}
         <div className={toolsOpen || (!privateMode && !draftSaved) ? "mt-1 flex flex-wrap justify-between gap-1 text-[11px] text-muted-foreground" : "sr-only"}><span className="hidden sm:inline">Enter to send · Shift + Enter for a new line · Math: $…$ · Code: ```</span><span className={!privateMode && !draftSaved ? "text-amber-700 dark:text-amber-300" : ""}>{privateMode ? "Private draft stays only in this tab" : !draftSaved ? draftIssue === "read" ? "Saved draft could not be loaded" : draftIssue === "clear" ? "Sent text is waiting to be cleared from storage" : "Draft is only in this tab · Do not close it" : content ? "Draft saved on this browser" : "History saved on this browser"}</span></div>{!privateMode && !draftSaved && <Button type="button" size="sm" variant="ghost" onClick={retryDraftSave}>{draftIssue === "read" ? "Try loading draft again" : draftIssue === "clear" ? "Retry draft cleanup" : "Try saving draft again"}</Button>}{content.length > MAX_MESSAGE_LENGTH - 1000 && <p className="mt-1 text-right text-xs text-muted-foreground">{content.length.toLocaleString()} / {MAX_MESSAGE_LENGTH.toLocaleString()}</p>}
       </div>
     </footer>

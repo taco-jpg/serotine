@@ -1,7 +1,12 @@
-# SIP-4: Favicon and unread badge
+---
+sip: 4
+title: Favicon and unread badge
+author: louisliu
+status: Draft
+created: 2026-09-12
+---
 
-- Status: Draft
-- Type: UX
+# SIP-4: Favicon and unread badge
 
 ## Summary
 
@@ -20,6 +25,10 @@ Serotine currently has no useful favicon, which makes the tab feel unfinished an
 - Keep the badge simple: a dot is enough; a numeric counter is optional and can be explored later.
 - The favicon should remain recognizable at normal browser-tab sizes and in both light and dark browser chrome.
 
-## Notes
+## Compatibility
 
-This is presentation-only. It should not change notification permissions, read-receipt behavior, or message delivery semantics.
+This is presentation-only. It should not change notification permissions, read-receipt behavior, message delivery semantics, stored messages, or APIs.
+
+## Implementation Notes
+
+Keep the favicon generation path small and deterministic. Reuse the same underlying app mark where practical, and verify that unread-state updates do not leave stale object URLs or trigger unnecessary redraws.

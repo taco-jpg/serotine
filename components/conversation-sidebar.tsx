@@ -4,15 +4,17 @@ import Link from "next/link"
 import { Archive, BellOff, File, Mic, BarChart3, Users, UserRound, CheckCheck, Clock3, CircleAlert } from "lucide-react"
 import { IdentityIcon } from "@/components/ui/identity-icon"
 import type { ConversationRecord, MessageRecord } from "@/lib/messaging-types"
+import { formatMentionText } from "@/lib/mention-display"
 import { conversationHref } from "@/lib/conversation-route"
 
-export function messagePreview(message?: MessageRecord): string {
+export function messagePreview(message?: MessageRecord, displayName?: (pub: string) => string): string {
   if (!message) return "Start a conversation"
   if (message.private) return message.expiresAt && message.expiresAt <= Date.now() ? "Private message expired" : message.secret ? "Private access key" : "Private message"
   if (message.attachment?.kind === "voice") return message.content || "Voice message"
   if (message.attachment) return [message.attachment.name, message.content].filter(Boolean).join(" · ")
   if (message.poll) return `Poll: ${message.poll.question}`
-  return message.content.replace(/\s+/g, " ").trim() || "Message"
+  const content = displayName ? formatMentionText(message.content, message.mentions || [], displayName) : message.content
+  return content.replace(/\s+/g, " ").trim() || "Message"
 }
 
 function messageTime(timestamp: number) {
@@ -21,8 +23,8 @@ function messageTime(timestamp: number) {
   return date.toLocaleDateString([], { month: "short", day: "numeric" })
 }
 
-export function ConversationRow({ conversation, selected, owner, actions, collapsed = false }: {
-  conversation: ConversationRecord; selected: boolean; owner: string; actions?: React.ReactNode; collapsed?: boolean
+export function ConversationRow({ conversation, selected, owner, actions, displayName, collapsed = false }: {
+  conversation: ConversationRecord; selected: boolean; owner: string; actions?: React.ReactNode; displayName?: (pub: string) => string; collapsed?: boolean
 }) {
   const last = conversation.lastMessage
   const outgoing = last?.senderPubKey === owner
@@ -56,7 +58,7 @@ export function ConversationRow({ conversation, selected, owner, actions, collap
           {outgoing && (last?.delivery === "delivered" || last?.delivery === "read") && <CheckCheck className={`size-3 shrink-0 ${last.delivery === "read" ? "text-primary" : ""}`} aria-label={last.delivery} />}
           {last?.attachment && (last.attachment.kind === "voice" ? <Mic className="size-3 shrink-0" /> : <File className="size-3 shrink-0" />)}
           {last?.poll && <BarChart3 className="size-3 shrink-0" />}
-          <span className="truncate">{outgoing && conversation.kind !== "self" ? "You: " : ""}{last ? messagePreview(last) : conversation.kind === "self" ? "Send messages and files to yourself" : conversation.kind === "group" ? `${conversation.members.length} members` : "Start a conversation"}</span>
+          <span className="truncate">{outgoing && conversation.kind !== "self" ? "You: " : ""}{last ? messagePreview(last, displayName) : conversation.kind === "self" ? "Send messages and files to yourself" : conversation.kind === "group" ? `${conversation.members.length} members` : "Start a conversation"}</span>
           {conversation.unreadCount > 0 && <span aria-label={`${conversation.unreadCount} unread messages`} className="ml-auto flex min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground">{conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}</span>}
         </span>
       </span>

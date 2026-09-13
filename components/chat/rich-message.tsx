@@ -6,14 +6,21 @@ import "katex/dist/katex.min.css"
 import { MessageText } from "@/components/message-text"
 import { GifMessage } from "@/components/chat/gif-message"
 import { parseGiphyUrl } from "@/lib/giphy"
+import { partitionMentionText, type MentionDisplayName } from "@/lib/mention-display"
 
-function linkedText(text: string, highlight: string): ReactNode[] {
+function mentionedText(text: string, highlight: string, mentions: string[], displayName?: MentionDisplayName): ReactNode[] {
+  return partitionMentionText(text, mentions, displayName).map((part, index) => part.publicKey
+    ? <span key={index} className="rounded bg-primary/10 px-0.5 font-medium text-primary"><MessageText content={part.text} query={highlight} /></span>
+    : <MessageText key={index} content={part.text} query={highlight} />)
+}
+
+function linkedText(text: string, highlight: string, mentions: string[], displayName?: MentionDisplayName): ReactNode[] {
   const result: ReactNode[] = []
   const pattern = /https?:\/\/[^\s<>"`]+/gi
   let start = 0
   for (const match of text.matchAll(pattern)) {
     const index = match.index!
-    result.push(<MessageText key={`before-${index}`} content={text.slice(start, index)} query={highlight} />)
+    result.push(<Fragment key={`before-${index}`}>{mentionedText(text.slice(start, index), highlight, mentions, displayName)}</Fragment>)
     const href = match[0].replace(/[.,!?:;]+$/, "").replace(/\)+$/, trailing => {
       const opens = (match[0].match(/\(/g) || []).length
       const closes = (match[0].match(/\)/g) || []).length
@@ -30,18 +37,18 @@ function linkedText(text: string, highlight: string): ReactNode[] {
     result.push(<Fragment key={`tail-${index}`}>{match[0].slice(href.length)}</Fragment>)
     start = index + match[0].length
   }
-  result.push(<MessageText key="remaining" content={text.slice(start)} query={highlight} />)
+  result.push(<Fragment key="remaining">{mentionedText(text.slice(start), highlight, mentions, displayName)}</Fragment>)
   return result
 }
 
-function inlineContent(text: string, highlight: string): ReactNode[] {
+function inlineContent(text: string, highlight: string, mentions: string[], displayName?: MentionDisplayName): ReactNode[] {
   const nodes: ReactNode[] = []
   const pattern = /\$\$([\s\S]{1,2000}?)\$\$|\\\[([\s\S]{1,2000}?)\\\]|(?<!\\)\$([^\n$]{1,1000}?)\$(?!\$)|\\\(([\s\S]{1,1000}?)\\\)|`([^`\n]{1,2000})`/g
   let start = 0
   let renderedMath = 0
   for (const match of text.matchAll(pattern)) {
     const index = match.index!
-    nodes.push(<Fragment key={`text-${index}`}>{linkedText(text.slice(start, index), highlight)}</Fragment>)
+    nodes.push(<Fragment key={`text-${index}`}>{linkedText(text.slice(start, index), highlight, mentions, displayName)}</Fragment>)
     if (match[5] !== undefined) {
       nodes.push(<code key={`code-${index}`} className="rounded bg-current/10 px-1 py-0.5 font-mono text-[0.9em]"><MessageText content={match[5]} query={highlight} /></code>)
     } else if (renderedMath++ < 64) {
@@ -60,17 +67,17 @@ function inlineContent(text: string, highlight: string): ReactNode[] {
     } else nodes.push(<MessageText key={`limit-${index}`} content={match[0]} query={highlight} />)
     start = index + match[0].length
   }
-  nodes.push(<Fragment key="remaining">{linkedText(text.slice(start), highlight)}</Fragment>)
+  nodes.push(<Fragment key="remaining">{linkedText(text.slice(start), highlight, mentions, displayName)}</Fragment>)
   return nodes
 }
 
-export function RichMessage({ text, highlight = "", className = "" }: { text: string; highlight?: string; className?: string }) {
+export function RichMessage({ text, highlight = "", className = "", mentions = [], displayName }: { text: string; highlight?: string; className?: string; mentions?: string[]; displayName?: MentionDisplayName }) {
   const nodes: ReactNode[] = []
   const pattern = /```([^\n`]*)\n([\s\S]*?)(?:```|$)/g
   let start = 0
   for (const match of text.matchAll(pattern)) {
     const index = match.index!
-    nodes.push(<Fragment key={`text-${index}`}>{inlineContent(text.slice(start, index), highlight)}</Fragment>)
+    nodes.push(<Fragment key={`text-${index}`}>{inlineContent(text.slice(start, index), highlight, mentions, displayName)}</Fragment>)
     const language = /^[\w#+.-]{1,30}$/.test(match[1].trim()) ? match[1].trim() : "code"
     nodes.push(<div key={`fence-${index}`} className="my-2 min-w-0 overflow-hidden rounded-lg border border-current/15 bg-current/5">
       <div className="border-b border-current/10 px-3 py-1 font-sans text-xs opacity-70">{language}</div>
@@ -78,6 +85,6 @@ export function RichMessage({ text, highlight = "", className = "" }: { text: st
     </div>)
     start = index + match[0].length
   }
-  nodes.push(<Fragment key="remaining">{inlineContent(text.slice(start), highlight)}</Fragment>)
+  nodes.push(<Fragment key="remaining">{inlineContent(text.slice(start), highlight, mentions, displayName)}</Fragment>)
   return <div className={`min-w-0 whitespace-pre-wrap break-words ${className}`}>{nodes}</div>
 }

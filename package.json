@@ -18,6 +18,7 @@
     "test:browser": "node scripts/browser-smoke.cjs",
     "test:media": "node scripts/media-smoke.cjs",
     "test:appearance": "node scripts/theme-layout-smoke.cjs",
+    "test:nicknames": "node scripts/nickname-smoke.cjs",
     "test:private": "node scripts/private-chat-smoke.cjs",
     "test:qr": "node scripts/qr-smoke.cjs",
     "test:cleanup": "node scripts/chat-cleanup-smoke.cjs",

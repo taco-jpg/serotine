@@ -61,3 +61,17 @@ export function insertMention(text: string, range: { start: number; end: number 
     caret: range.start + replacement.length,
   }
 }
+
+/** Resolve local composer labels to addresses before text leaves this browser. */
+export function serializeMentionDraft(text: string, spans: MentionSpan[]) {
+  const valid = validMentionSpans(text, spans).sort((a, b) => a.start - b.start)
+  let content = "", cursor = 0
+  const mentions = new Set<string>()
+  for (const span of valid) {
+    if (span.start < cursor) continue
+    content += text.slice(cursor, span.start) + `@${span.publicKey}`
+    mentions.add(span.publicKey)
+    cursor = span.end
+  }
+  return { content: content + text.slice(cursor), mentions: [...mentions] }
+}

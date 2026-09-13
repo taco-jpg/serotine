@@ -23,16 +23,22 @@ function nodes(node, predicate) {
   return [...(predicate(node) ? [node] : []), ...nodes(node.props?.children, predicate)]
 }
 
-function runtime(fetch, key = 'test-only-key') {
+function runtime(fetch, key = 'test-only-key', supportsObserver = true) {
   let active
   const cache = new Map()
+  const observers = []
+  class ViewportObserver {
+    constructor(callback) { this.callback = callback; this.targets = new Set(); observers.push(this) }
+    observe(target) { this.targets.add(target) }
+    disconnect() { this.targets.clear() }
+  }
   const react = Object.fromEntries(['useState', 'useRef', 'useEffect'].map(name => [name, (...args) => active[name](...args)]))
   function load(filename) {
     if (!path.extname(filename)) filename += fs.existsSync(filename + '.tsx') ? '.tsx' : '.ts'
     if (cache.has(filename)) return cache.get(filename).exports
     const module = { exports: {} }; cache.set(filename, module)
     const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { fileName: filename, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText
-    new Function('require', 'module', 'exports', 'fetch', 'process', code)(specifier => {
+    new Function('require', 'module', 'exports', 'fetch', 'process', 'IntersectionObserver', code)(specifier => {
       if (specifier === 'react') return react
       if (specifier === '@/components/ui/button') return { Button: 'button' }
       if (specifier === '@/components/ui/input') return { Input: 'input' }
@@ -40,7 +46,7 @@ function runtime(fetch, key = 'test-only-key') {
       if (specifier.startsWith('@/')) return load(path.join(root, specifier.slice(2)))
       if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
       return require(specifier)
-    }, module, module.exports, fetch, { env: { NEXT_PUBLIC_GIPHY_API_KEY: key } })
+    }, module, module.exports, fetch, { env: { NEXT_PUBLIC_GIPHY_API_KEY: key } }, supportsObserver ? ViewportObserver : undefined)
     return module.exports
   }
   function mount(Component, props) {
@@ -62,9 +68,23 @@ function runtime(fetch, key = 'test-only-key') {
         }
       },
     }
-    function view() { active = hooks; cursor = 0; const result = Component(props); while (effects.length) effects.shift()(); return result }
+    function view() {
+      active = hooks; cursor = 0
+      const result = Component(props)
+      for (const node of nodes(result, node => typeof node.type === 'string' && node.props.ref)) node.props.ref.current ||= {}
+      while (effects.length) effects.shift()()
+      return result
+    }
     return {
       view,
+      intersect(isIntersecting = true) {
+        const targets = nodes(view(), node => node.props.ref).map(node => node.props.ref.current)
+        for (const observer of observers) {
+          const entries = targets.filter(target => observer.targets.has(target)).map(target => ({ target, isIntersecting }))
+          if (entries.length) observer.callback(entries)
+        }
+        view()
+      },
       click(label) {
         const button = nodes(view(), node => node.type === 'button' && (node.props['aria-label'] || text(node)) === label)[0]
         assert.ok(button, `button: ${label}`); assert.ok(!button.props.disabled)
@@ -137,7 +157,7 @@ test('provider content fails closed on ratings, unexpected IDs, and unsafe media
   await assert.rejects(runtime(() => { throw Error('must not fetch') }).lib.fetchGiphyGif('../search'), /Invalid GIF ID/)
 })
 
-test('received GIFs have no remote media or fetch before consent; hide/unmount aborts late loads', async () => {
+test('GIFs load automatically on entering the viewport; hiding and unmounting abort late loads', async () => {
   const calls = []
   const r = runtime((url, options) => new Promise(resolve => calls.push({ url, options, resolve })))
   const { GifMessage } = r.load(path.join(root, 'components/chat/gif-message.tsx'))
@@ -145,7 +165,9 @@ test('received GIFs have no remote media or fetch before consent; hide/unmount a
   h.view()
   assert.equal(calls.length, 0)
   assert.equal(nodes(h.view(), node => ['img', 'video', 'iframe'].includes(node.type)).length, 0)
-  h.click('Load GIF'); h.view()
+  h.intersect(false)
+  assert.equal(calls.length, 0, 'offscreen history waits until visible')
+  h.intersect()
   assert.equal(calls.length, 1)
   assert.equal(calls[0].url.pathname, '/v1/gifs/abc123')
   h.click('Hide GIF'); h.view()
@@ -153,7 +175,9 @@ test('received GIFs have no remote media or fetch before consent; hide/unmount a
   calls[0].resolve(response(sample()))
   await tick()
   assert.equal(nodes(h.view(), node => node.type === 'img').length, 0)
-  h.click('Load GIF'); h.view()
+  h.intersect(false); h.intersect()
+  assert.equal(calls.length, 1, 'scrolling never overrides an explicit Hide GIF')
+  h.click('Show GIF'); h.view()
   h.unmount()
   assert.equal(calls[1].options.signal.aborted, true)
   calls[1].resolve(response(sample()))
@@ -165,7 +189,7 @@ test('received GIF renders at a useful size after loading and recovers from brok
   const r = runtime(async () => response(sample()))
   const { GifMessage } = r.load(path.join(root, 'components/chat/gif-message.tsx'))
   const element = GifMessage({ id: 'abc123' }), h = r.mount(element.type, element.props)
-  h.click('Load GIF'); h.view(); await tick()
+  h.intersect(); await tick()
   const img = nodes(h.view(), node => node.type === 'img')[0]
   assert.equal(img.props.src, sample().images.downsized.url)
   assert.equal(img.props.width, 400)
@@ -175,6 +199,23 @@ test('received GIF renders at a useful size after loading and recovers from brok
   assert.equal(nodes(h.view(), node => node.type === 'img').length, 0)
   h.click('Try again'); h.view(); await tick()
   assert.equal(nodes(h.view(), node => node.type === 'img').length, 1)
+  h.unmount()
+})
+
+test('automatic GIF viewing still handles unconfigured sites and browsers without visibility observers', async () => {
+  const missing = runtime(() => { throw Error('must not fetch') }, '')
+  const { GifMessage: MissingGif } = missing.load(path.join(root, 'components/chat/gif-message.tsx'))
+  const missingElement = MissingGif({ id: 'abc123' }), disabled = missing.mount(missingElement.type, missingElement.props)
+  disabled.intersect()
+  assert.match(text(disabled.view()), /hasn’t been enabled/)
+  assert.equal(nodes(disabled.view(), node => node.type === 'img').length, 0)
+  disabled.unmount()
+
+  const fallback = runtime(async () => response(sample()), 'test-only-key', false)
+  const { GifMessage } = fallback.load(path.join(root, 'components/chat/gif-message.tsx'))
+  const element = GifMessage({ id: 'abc123' }), h = fallback.mount(element.type, element.props)
+  h.view(); h.view(); await tick()
+  assert.equal(nodes(h.view(), node => node.type === 'img').length, 1, 'no click needed without IntersectionObserver')
   h.unmount()
 })
 

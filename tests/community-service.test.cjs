@@ -30,9 +30,9 @@ function harness() {
   const storage = new Map(), sent = []
   let order = 0
   const rows = address => { if (!storage.has(address)) storage.set(address, []); return storage.get(address) }
-  const inject = event => {
+  const inject = (event, skip = []) => {
     sent.push(event)
-    for (const address of new Set([event.author, ...event.recipients])) rows(address).push({
+    for (const address of new Set([event.author, ...event.recipients])) if (!skip.includes(address)) rows(address).push({
       key: `${event.author}:${event.conversationId}:${event.id}`, event: structuredClone(event),
       local: event.author === address, delivered: [...event.recipients], receivedAt: ++order,
     })
@@ -172,4 +172,92 @@ test('revocation arriving while an invite is signed prevents returning the stale
     return invite
   })
   await assert.rejects(owner.service.createInvite(id), /community changed/i)
+})
+
+test('retry recovers a lost acknowledgement without changing membership or bypassing approval', async () => {
+  const h = harness(), { owner, id, invite } = await established(h, 'direct', [])
+  const applicant = h.client(bob)
+  owner.host.queue = async event => h.inject(event, [bob.publicKey])
+  await applicant.service.joinCommunity(invite)
+  await owner.service.reconcile()
+  await owner.service.updateCommunity(id, { admission: 'approval', joiningPaused: true })
+  await owner.service.revokeInvites(id)
+  const prior = owner.service.model.communities[0]
+  assert.equal(prior.joined, true)
+  assert.ok(prior.members.includes(bob.publicKey))
+  assert.equal(applicant.service.model.communities.length, 0)
+  const request = applicant.service.model.requests[0]
+  assert.equal(request.status, 'pending')
+
+  owner.host.queue = async event => h.inject(event)
+  assert.equal(await applicant.service.retryJoinRequest(id, request.id), id)
+  const retry = applicant.service.model.requests.at(-1)
+  assert.notEqual(retry.id, request.id)
+  await owner.service.reconcile()
+  const restored = applicant.service.model.communities[0]
+  assert.equal(restored.joined, true)
+  assert.equal(restored.epoch, prior.epoch)
+  assert.equal(restored.signature, prior.signature)
+  assert.equal(applicant.service.model.requests.find(item => item.id === retry.id).status, 'approved')
+  const count = h.sent.length
+  await owner.service.reconcile()
+  assert.equal(h.sent.length, count, 'a processed retry does not publish more acknowledgements')
+})
+
+test('retrying an unapproved request cannot grant membership and approving it resolves duplicate requests', async () => {
+  const h = harness(), { owner, id, clients: [applicant] } = await established(h, 'approval', [bob])
+  const request = applicant.service.model.requests[0]
+  await applicant.service.retryJoinRequest(id, request.id)
+  await owner.service.reconcile()
+  assert.deepEqual(owner.service.model.communities[0].members, [alice.publicKey])
+  assert.equal(applicant.service.model.communities.length, 0)
+  const retry = applicant.service.model.requests.at(-1)
+  await owner.service.approveRequest(id, retry.id)
+  await owner.service.reconcile()
+  assert.equal(applicant.service.model.communities[0].joined, true)
+  assert.equal(applicant.service.model.communities[0].epoch, 2)
+  assert.ok(applicant.service.model.requests.every(item => item.status === 'approved'))
+})
+
+test('a lost acknowledgement cannot let a subsequently banned applicant recover membership', async () => {
+  const h = harness(), { owner, id, invite } = await established(h, 'direct', [])
+  const applicant = h.client(bob)
+  owner.host.queue = async event => h.inject(event, [bob.publicKey])
+  await applicant.service.joinCommunity(invite)
+  await owner.service.reconcile()
+  await owner.service.moderate(id, 'ban', bob.publicKey)
+  owner.host.queue = async event => h.inject(event)
+  await applicant.service.retryJoinRequest(id, applicant.service.model.requests[0].id)
+  await owner.service.reconcile()
+  assert.equal(applicant.service.model.requests.at(-1).status, 'rejected')
+  assert.equal(applicant.service.model.communities.length, 0)
+  assert.equal(owner.service.model.communities[0].members.includes(bob.publicKey), false)
+  await assert.rejects(applicant.service.retryJoinRequest(id, applicant.service.model.requests.at(-1).id), /no longer pending/i)
+})
+
+test('rejecting a retried applicant resolves older pending requests too', async () => {
+  const h = harness(), { owner, id, clients: [applicant] } = await established(h, 'approval', [bob])
+  await applicant.service.retryJoinRequest(id, applicant.service.model.requests[0].id)
+  await owner.service.rejectRequest(id, applicant.service.model.requests.at(-1).id)
+  assert.ok(applicant.service.model.requests.every(item => item.status === 'rejected'))
+  assert.ok(owner.service.model.requests.every(item => item.status === 'rejected'))
+  await owner.service.updateCommunity(id, { admission: 'direct' })
+  await owner.service.reconcile()
+  assert.deepEqual(owner.service.model.communities[0].members, [alice.publicKey])
+})
+
+test('the community model is reused only while its input snapshots are unchanged', async () => {
+  const h = harness(), { owner, id } = await established(h, 'direct', [])
+  const preferences = owner.host.preferences()
+  owner.host.preferences = () => preferences
+  let records = [...owner.host.records()]
+  owner.host.records = () => records
+  const model = owner.service.model
+  assert.equal(owner.service.model, model)
+  records = [...records]
+  assert.notEqual(owner.service.model, model)
+  const next = owner.service.model
+  owner.host.preferences = () => ({ ...preferences, notifications: { [id]: 'muted' } })
+  assert.notEqual(owner.service.model, next)
+  assert.equal(owner.service.model.communities[0].notificationMode, 'muted')
 })

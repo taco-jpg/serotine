@@ -99,6 +99,33 @@ function deferred() {
   return { promise, resolve }
 }
 
+test('an idle sync reads local history only for refresh and outbox, including after reload', async () => {
+  const sender = await engine(alice)
+  historyReads = 0
+  await sender.synchronize()
+  assert.equal(historyReads, 2, 'empty feed and legacy inbox must not clone history again')
+  assert.equal(sender.instance.status, 'online')
+  const reloaded = await engine(alice)
+  historyReads = 0
+  await reloaded.synchronize()
+  assert.equal(historyReads, 2)
+})
+
+test('a successful feed clears connecting before the legacy inbox finishes', async t => {
+  const sender = await engine(alice)
+  const entered = deferred(), release = deferred()
+  t.mock.method(relay, 'getLegacyInbox', async () => {
+    entered.resolve()
+    await release.promise
+    return { success: true, messages: [], nextCursor: null }
+  })
+  const synchronize = sender.synchronize()
+  await entered.promise
+  assert.equal(sender.instance.status, 'online')
+  release.resolve()
+  await synchronize
+})
+
 test('switching identities during message signing never queues the old send and rejects stale actions', async t => {
   const sender = await engine(alice)
   const entered = deferred(), release = deferred()

@@ -8,7 +8,7 @@ import type { CommunityService } from "@/lib/community-service"
 import type { CommunityModel } from "@/lib/community-types"
 import type { MessagingContextValue } from "@/lib/messaging-types"
 
-type CommunityMethods = Pick<CommunityService, "createCommunity" | "createInvite" | "joinCommunity" | "updateCommunity" | "moderate" | "approveRequest" | "rejectRequest" | "leave" | "sendMessage" | "reportMessage" | "hideMessage" | "revokeInvites" | "setCoOwner" | "transferOwnership" | "deleteCommunity">
+type CommunityMethods = Pick<CommunityService, "createCommunity" | "createInvite" | "joinCommunity" | "retryJoinRequest" | "updateCommunity" | "moderate" | "approveRequest" | "rejectRequest" | "leave" | "sendMessage" | "reportMessage" | "hideMessage" | "revokeInvites" | "setCoOwner" | "transferOwnership" | "deleteCommunity">
 export type CommunityContextValue = CommunityMethods & Pick<MessagingContextValue, "identity" | "contacts" | "ready" | "error" | "status" | "preferences" | "setNotificationMode" | "sync" | "retry"> & {
   model: CommunityModel
   deliveryIssues: Array<{ id: string; communityId: string; kind: string; error: string }>
@@ -104,6 +104,7 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     createCommunity: engine?.communities.createCommunity ?? unavailable,
     createInvite: engine?.communities.createInvite ?? unavailable,
     joinCommunity: engine?.communities.joinCommunity ?? unavailable,
+    retryJoinRequest: engine?.communities.retryJoinRequest ?? unavailable,
     updateCommunity: engine?.communities.updateCommunity ?? unavailable,
     moderate: engine?.communities.moderate ?? unavailable,
     approveRequest: engine?.communities.approveRequest ?? unavailable,

@@ -1,6 +1,6 @@
 "use client"
 
-import { Fragment, type ReactNode } from "react"
+import { Fragment, memo, type ReactNode } from "react"
 import katex from "katex"
 import "katex/dist/katex.min.css"
 import { MessageText } from "@/components/message-text"
@@ -71,7 +71,7 @@ function inlineContent(text: string, highlight: string, mentions: string[], disp
   return nodes
 }
 
-export function RichMessage({ text, highlight = "", className = "", mentions = [], displayName }: { text: string; highlight?: string; className?: string; mentions?: string[]; displayName?: MentionDisplayName }) {
+export const RichMessage = memo(function RichMessage({ text, highlight = "", className = "", mentions = [], displayName }: { text: string; highlight?: string; className?: string; mentions?: string[]; displayName?: MentionDisplayName }) {
   const nodes: ReactNode[] = []
   const pattern = /```([^\n`]*)\n([\s\S]*?)(?:```|$)/g
   let start = 0
@@ -87,4 +87,4 @@ export function RichMessage({ text, highlight = "", className = "", mentions = [
   }
   nodes.push(<Fragment key="remaining">{inlineContent(text.slice(start), highlight, mentions, displayName)}</Fragment>)
   return <div className={`min-w-0 whitespace-pre-wrap break-words ${className}`}>{nodes}</div>
-}
+})

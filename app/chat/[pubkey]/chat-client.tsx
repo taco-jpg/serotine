@@ -63,12 +63,21 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const membershipUpdating = isGroup && !!conversation && !!group && !leftGroup && group.members.length !== activeMembers.length
   const usable = ready && !blocked && !request && !membershipUpdating && (!isGroup || (!!conversation && !!group && !leftGroup))
   const title = isSelf ? nickname || "You" : group?.name || conversation?.name || contacts.find(contact => contact.pub === conversationId)?.alias || (isGroup ? "Group conversation" : shortAddress(conversationId))
-  const displayName = (pub: string) => pub === myPub ? nickname || "You" : contacts.find(contact => contact.pub === pub)?.alias || shortAddress(pub)
+  const contactNames = useMemo(() => new Map(contacts.map(contact => [contact.pub, contact.alias])), [contacts])
+  const displayName = useCallback((pub: string) => pub === myPub ? nickname || "You" : contactNames.get(pub) || shortAddress(pub), [myPub, nickname, contactNames])
   const displaySummary = (message: MessageRecord) => formatMentionText(messageSummary(message), message.private ? [] : message.mentions || [], displayName)
   const messages = useMemo(() => messaging.messages.filter(message => message.conversationId === conversationId), [messaging.messages, conversationId])
   const byId = useMemo(() => new Map(messages.map(message => [message.id, message])), [messages])
-  const pinned = messages.filter(message => message.pinned && !message.private)
-  const files = messages.filter(message => message.attachment && !message.private)
+  const messageTimes = useMemo(() => {
+    const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" })
+    const timeFormat = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" })
+    return new Map(messages.map(message => {
+      const date = new Date(message.timestamp)
+      return [message.id, { day: dayFormat.format(date), dayKey: date.toDateString(), time: timeFormat.format(date), full: date.toLocaleString(), iso: date.toISOString() }]
+    }))
+  }, [messages])
+  const pinned = useMemo(() => messages.filter(message => message.pinned && !message.private), [messages])
+  const files = useMemo(() => messages.filter(message => message.attachment && !message.private), [messages])
   const sharedLinks = useMemo(() => messages.filter(message => !message.private).flatMap(message => extractLinks(message.content).map(url => ({ url, message }))).reverse(), [messages])
   const { content, setContent, clearSubmittedDraft, retryDraftSave, draftReady, draftSaved, draftIssue } = useChatDraft(myPub, conversationId, !privateMode)
   const [busy, setBusy] = useState(false)
@@ -125,7 +134,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   }, [messages, searchTerm])
   const selectedIndex = matches.length ? Math.min(matchIndex, matches.length - 1) : 0
   const activeMatch = matches[selectedIndex]
-  const unconfirmed = messages.filter(message => message.senderPubKey === myPub && message.delivery === "failed")
+  const unconfirmed = useMemo(() => messages.filter(message => message.senderPubKey === myPub && message.delivery === "failed"), [messages, myPub])
   const sending = busy || retrying !== null || batchProgress !== null
   const notificationMode = preferences.notifications[conversationId] || "all"
   const mentionMembers = privateMode ? [] : (isGroup ? activeMembers : (isSelf ? [] : [conversationId])).filter(pub => pub !== myPub)
@@ -170,7 +179,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
     input.current?.focus()
   }
 
-  const incomingLatest = messages.filter(message => message.senderPubKey !== myPub).at(-1)?.timestamp || 0
+  const incomingLatest = useMemo(() => messages.findLast(message => message.senderPubKey !== myPub)?.timestamp || 0, [messages, myPub])
 
   useEffect(() => {
     const node = input.current
@@ -359,20 +368,20 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
         {ready && isGroup && !group && <p role="status" className="rounded-[4px] border border-border p-5 text-center text-sm text-muted-foreground">This group is not saved on this device. Ask a group member for an invitation, or restore your chat backup.</p>}
         {messages.map((message, index) => {
           const mine = message.senderPubKey === myPub
-          const day = new Date(message.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
-          const previousDay = index ? new Date(messages[index - 1].timestamp).toDateString() : ""
+          const time = messageTimes.get(message.id)!
+          const previousDay = index ? messageTimes.get(messages[index - 1].id)!.dayKey : ""
           const quoted = !message.private && message.replyTo ? byId.get(message.replyTo) : undefined
           const inRun = (first: MessageRecord | undefined, second: MessageRecord | undefined) => !!first && !!second
             && first.senderPubKey === second.senderPubKey && !first.private && !second.private
             && !second.replyTo && first.delivery !== "failed" && second.delivery !== "failed"
             && second.timestamp >= first.timestamp && second.timestamp - first.timestamp < 5 * 60_000
-            && new Date(first.timestamp).toDateString() === new Date(second.timestamp).toDateString()
+            && messageTimes.get(first.id)!.dayKey === messageTimes.get(second.id)!.dayKey
           const continuesRun = inRun(messages[index - 1], message)
           const next = messages[index + 1]
           const showMetadata = !inRun(message, next) || message.editedAt || message.pinned
             || message.delivery === "pending" || message.delivery !== next?.delivery
             || (isGroup && (message.readBy.length !== next?.readBy.length || message.deliveredTo.length !== next?.deliveredTo.length))
-          return <div key={message.id} id={`message-${message.id}`} ref={node => { if (node) messageNodes.current.set(message.id, node); else messageNodes.current.delete(message.id) }} data-message-run={continuesRun ? "continuation" : "start"} className={`${continuesRun ? "mt-0.5" : "mt-2"} ${activeMatch === message.id || highlightedId === message.id ? "rounded-[4px] ring-2 ring-primary/60 ring-offset-4 ring-offset-background" : ""}`}>{previousDay !== new Date(message.timestamp).toDateString() && <p className="mb-3 flex items-center gap-4 pt-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground before:h-px before:flex-1 before:bg-border after:h-px after:flex-1 after:bg-border">{day}</p>}<div className={`flex flex-col ${mine ? "items-end" : "items-start"}`}>
+          return <div key={message.id} id={`message-${message.id}`} ref={node => { if (node) messageNodes.current.set(message.id, node); else messageNodes.current.delete(message.id) }} data-message-run={continuesRun ? "continuation" : "start"} className={`${continuesRun ? "mt-0.5" : "mt-2"} ${activeMatch === message.id || highlightedId === message.id ? "rounded-[4px] ring-2 ring-primary/60 ring-offset-4 ring-offset-background" : ""}`}>{previousDay !== time.dayKey && <p className="mb-3 flex items-center gap-4 pt-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground before:h-px before:flex-1 before:bg-border after:h-px after:flex-1 after:bg-border">{time.day}</p>}<div className={`flex flex-col ${mine ? "items-end" : "items-start"}`}>
             {isGroup && !mine && !continuesRun && <p className="mb-1 ml-1 font-mono text-[10px] text-primary">{displayName(message.senderPubKey)}</p>}<span className="sr-only">{displayName(message.senderPubKey)}:</span>
             <div className={`flex w-full min-w-0 items-start gap-1 ${mine ? "flex-row-reverse" : ""}`}>
               <div className={`min-w-0 max-w-[calc(100%-3rem)] break-words rounded-[4px] px-2.5 py-1 text-[15px] leading-[1.4] [overflow-wrap:anywhere] sm:max-w-[min(85%,75ch)] ${mine ? "border border-primary/15 bg-message-outgoing text-message-outgoing-foreground" : "border border-border bg-message-incoming text-message-incoming-foreground"}`}>
@@ -388,7 +397,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
                   const action = afterMessageMenuClose.current
                   if (action) { event.preventDefault(); afterMessageMenuClose.current = null; action() }
                 }}>
-                  <div className="px-2 py-1.5 text-xs text-muted-foreground"><time dateTime={new Date(message.timestamp).toISOString()}>{new Date(message.timestamp).toLocaleString()}</time></div>
+                  <div className="px-2 py-1.5 text-xs text-muted-foreground"><time dateTime={time.iso}>{time.full}</time></div>
                   {!message.secret && <DropdownMenuItem className="min-h-11" onSelect={async () => { if (message.private && (!message.expiresAt || Date.now() >= message.expiresAt)) return; try { await navigator.clipboard.writeText(message.private ? message.content : messageSummary(message)); clearTimeout(copyTimer.current); setCopiedMessage(message.id); setAnnouncement("Message copied."); copyTimer.current = setTimeout(() => setCopiedMessage(""), 2500) } catch { setSendError("Clipboard access was blocked. Select the message text to copy it.") } }}>{copiedMessage === message.id ? <Check /> : <Copy />}{copiedMessage === message.id ? "Copied" : "Copy"}</DropdownMenuItem>}
                   {!message.private && !privateMode && <DropdownMenuItem className="min-h-11" disabled={!usable} onSelect={() => { afterMessageMenuClose.current = () => { setReplyTo(message.id); input.current?.focus() } }}><Reply />Reply</DropdownMenuItem>}
                   {!message.private && !privateMode && mine && !!message.content && !message.attachment && !message.poll && <DropdownMenuItem className="min-h-11" disabled={!usable || actionBusy} onSelect={() => { afterMessageMenuClose.current = () => setEditing(message) }}><Pencil />Edit</DropdownMenuItem>}
@@ -398,7 +407,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
-            <div className={showMetadata ? "mt-0.5 flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 font-mono text-[9px] leading-4 text-muted-foreground" : "sr-only"}><time title={new Date(message.timestamp).toLocaleString()} dateTime={new Date(message.timestamp).toISOString()}>{new Date(message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>{!message.private && message.editedAt && <span title={`Edited ${new Date(message.editedAt).toLocaleString()}`}>edited</span>}{!message.private && message.pinned && <Pin aria-label="Pinned message" className="size-3 text-primary" />}
+            <div className={showMetadata ? "mt-0.5 flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 font-mono text-[9px] leading-4 text-muted-foreground" : "sr-only"}><time title={time.full} dateTime={time.iso}>{time.time}</time>{!message.private && message.editedAt && <span title={`Edited ${new Date(message.editedAt).toLocaleString()}`}>edited</span>}{!message.private && message.pinned && <Pin aria-label="Pinned message" className="size-3 text-primary" />}
               {mine && (isSelf ? <span className="flex items-center gap-1"><Check className="size-3" />Saved</span> : message.delivery === "failed" ? <button type="button" disabled={sending || !ready} title={message.error} className="flex min-h-7 items-center gap-1 rounded px-1 text-destructive hover:text-destructive disabled:opacity-50" onClick={() => void retryFailed([message])}><RotateCw className={`size-3 ${retrying === message.id ? "animate-spin" : ""}`} />{retrying === message.id ? "Retrying" : "Failed · Retry"}</button> : <span className="flex items-center gap-1" title={message.delivery === "sent" ? "Accepted by the encrypted relay; no recipient receipt yet." : message.delivery === "delivered" ? `Received by ${message.deliveredTo.length || 1} recipient(s).` : message.delivery === "read" ? `Read by ${message.readBy.length || 1} recipient(s).` : "Waiting to reach the relay."}>{message.delivery === "pending" ? <Loader2 className="size-3 animate-spin" /> : message.delivery === "read" || message.delivery === "delivered" ? <CheckCheck className={`size-3 ${message.delivery === "read" ? "text-primary" : ""}`} /> : <Check className="size-3" />}{({ pending: "Queued", sent: "Sent", delivered: "Delivered", read: "Read", received: "Received", failed: "Failed" })[message.delivery]}{isGroup && message.delivery === "read" ? ` · ${message.readBy.length}` : isGroup && message.delivery === "delivered" ? ` · ${message.deliveredTo.length}` : ""}</span>)}
             </div>
             {mine && message.delivery === "failed" && message.error && message.error !== deliveryError && message.error !== sendError && <p className="mt-1 max-w-[94%] text-xs text-destructive [overflow-wrap:anywhere] sm:max-w-[min(85%,75ch)]">{message.error}</p>}

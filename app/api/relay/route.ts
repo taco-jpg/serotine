@@ -3,6 +3,7 @@ import {
   getEventFeed, getLegacyInbox, storeEncryptedEvent, retireIdentity,
 } from "@/app/actions"
 import { ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "@/lib/protocol"
+import { requestProofFailureMessage } from "@/lib/request-auth"
 
 export const dynamic = "force-dynamic"
 
@@ -118,7 +119,7 @@ export async function POST(request: Request): Promise<Response> {
     return failure(INVALID_REQUEST, 400)
   }
   if (!proofShape(body.proof)) {
-    return failure("Identity verification failed. Check your device clock and reopen the app.", 401)
+    return failure(requestProofFailureMessage({ valid: false, reason: "malformed" }), 401)
   }
   const data = body.data
   const proof = body.proof

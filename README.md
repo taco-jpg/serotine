@@ -68,6 +68,8 @@ Retirement cannot erase downloaded files, prevent offline decryption of an old b
 
 ## Verification
 
+If messaging reports that a signed request timestamp is ahead of or behind the server, reconnect once to replace a delayed request. If the error persists, enable automatic date and time in the device settings, reload Serotine, and explicitly retry failed messages. On iPhone this is under **Settings → General → Date & Time** ([Apple's instructions](https://support.apple.com/en-us/101619)). The relay accepts signed requests only within 60 seconds of its clock. Time errors show the approximate difference; a request with an invalid signature is reported separately and is never treated as a clock error. A signature failure alone is not a reason to delete browser data or change your address.
+
 ```sh
 npm test
 npm run typecheck

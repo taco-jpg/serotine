@@ -1,4 +1,4 @@
-import type { MessageRecord, NotificationMode } from "./messaging-types"
+import type { AttachmentMeta, MessageRecord, NotificationMode } from "./messaging-types"
 
 export type CommunityAdmission = "direct" | "approval"
 export interface CommunityChannel { id: string; name: string; posting: "members" | "moderators" }
@@ -28,6 +28,13 @@ export type CommunityEventData =
   | { type: "command"; epoch: number; action: CommunityCommandAction; target: string; requestId?: string; changes?: CommunitySettingsChanges; stateRef?: string }
   | { type: "leave"; epoch: number; stateRef?: string }
   | { type: "message"; epoch: number; channelId: string; content: string; replyTo?: string; mentions?: string[]; stateRef?: string }
+  | { type: "attachment"; epoch: number; channelId: string; attachment: AttachmentMeta; content?: string; replyTo?: string; mentions?: string[]; stateRef?: string }
+  | { type: "attachment-chunk"; epoch: number; channelId: string; attachmentId: string; index: number; data: string; stateRef?: string }
+  | { type: "edit"; epoch: number; channelId: string; targetId: string; content: string; stateRef?: string }
+  | { type: "pin"; epoch: number; channelId: string; targetId: string; pinned: boolean; stateRef?: string }
+  | { type: "poll"; epoch: number; channelId: string; question: string; options: string[]; stateRef?: string }
+  | { type: "vote"; epoch: number; channelId: string; targetId: string; option: number; stateRef?: string }
+  | { type: "receipt"; epoch: number; channelId: string; targetId: string; receipt: "delivered" | "read"; stateRef?: string }
   | { type: "hide"; epoch: number; channelId: string; targetId: string; stateRef?: string }
   | { type: "report"; epoch: number; channelId: string; targetId: string; reason: string; stateRef?: string }
 
@@ -48,5 +55,5 @@ export interface CommunityCommand {
 }
 export interface CommunityModel {
   communities: CommunityRecord[]; messages: CommunityMessage[]; requests: CommunityJoinRequest[]
-  reports: CommunityReport[]; commands: CommunityCommand[]; processedIds: string[]
+  reports: CommunityReport[]; commands: CommunityCommand[]; processedIds: string[]; acceptedKeys: string[]
 }

@@ -16,7 +16,7 @@ A signed encrypted join request goes only to the owner. Direct admission is proc
 
 Before adding a member the owner checks the current invitation generation, expiry, joining pause, ban list, and 20-member limit. Revocation increments the invitation generation. Member removal excludes their address from future fanout after synchronization; bans also reject subsequent requests from that address. A person can create another device-local identity, so an address ban is not a person-wide ban.
 
-Channels share one membership. There are at most eight channels; a channel permits all members or only the primary owner, co-owners, and moderators to post. The first stage supports text messages only, avoiding attachment fanout expansion. Reports are encrypted to the primary owner, co-owners, and current moderators; message hides are authenticated and enforced by cooperating clients. Hiding does not erase copies held elsewhere.
+Channels share one membership. There are at most eight channels; a channel permits all members or only the primary owner, co-owners, and moderators to post. Channels support the regular shared-chat tools: formatted text and math, replies, mentions, attachments with captions, inline media, voice notes, GIFs, saved files, editing your own text, local message deletion, pins, polls, and votes. Files retain the existing recipient-count-based relay budget. Reports are encrypted to the primary owner, co-owners, and current moderators; message hides are authenticated and enforced by cooperating clients. Hiding does not erase copies held elsewhere.
 
 ## Delivery and history
 
@@ -26,7 +26,7 @@ There is no globally synchronous revocation in a client-mediated relay: already 
 
 ## Operational scope
 
-No public listing is created. Private direct/group conversations retain their existing behavior. Invitation previews require explicit joining. The initial UI includes compact community/channel navigation, unread counts, channel notification preferences, reports and member controls, and narrow-screen navigation. Full backups carry community events and preferences; restoring an old backup still needs relay synchronization to learn newer changes.
+No public listing is created. Private direct/group conversations retain their existing behavior. Invitation previews require explicit joining. Communities appear as full-size rows alongside conversations in the Inbox, with previews, unread counts, and recent activity. Channel views provide search, saved drafts, Files/Links/Pinned views, notification choices, reports and member controls, and narrow-screen navigation. Recently opened conversations and communities affect ordering; the last community and each community’s last channel are remembered locally per identity. Full backups carry community events and preferences; restoring an old backup still needs relay synchronization to learn newer changes.
 
 
 ## Ownership and deletion (version 2)
@@ -38,3 +38,9 @@ Ownership transfers carry a founder-rooted signature chain. Each handoff is sign
 Version-2 content and administrative events bind to their signed membership state. A delayed command is checked against current permissions when processed. A signed deletion is terminal once observed: clients hide community history, reject further admission/sends, and cancel pending content. The durable signed tombstone survives backup/restore and relay replay. It does not erase copies already retained by another member.
 
 An existing version-1 community upgrades atomically: save a founder-only legacy membership fence and the version-2 replacement together in one IndexedDB transaction. Older clients receive the fence and stop participating; current clients retain their actual membership from the replacement. A failed write cannot retire the old membership without saving the replacement. All upgraded members need the current client.
+
+## Shared-chat features
+
+Content controls remain inside the signed `community` envelope and bind to the channel and current membership state. Edits are author-restricted, targets cannot cross channels, and announcement channels preserve posting restrictions. Read receipts follow the user's read-receipt preference. Local deletion removes the selected message and its attachment bytes on this device while retaining membership and ownership proofs; deletion tombstones survive backup imports. Moderator hiding remains a separate shared action.
+
+Private disappearing messages and access-key messages remain direct-chat features, as they are in regular conversations; they are not enabled for regular groups or community channels. The new community event variants require an updated client. Existing text community events retain their format.

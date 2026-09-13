@@ -4,7 +4,11 @@ Implementation of [SIP 2](https://github.com/taco-jpg/serotine/blob/SIP/SIPs/SIP
 
 ## Appearance choices
 
-The existing Light, Dark, and System preference keeps its original storage key and behavior. A separate palette preference provides Default, Forest, Ocean, Lavender, Rose, and Monochrome, each with light and dark variants. Default leaves the existing stylesheet colors untouched. Palette changes update semantic color variables only: they do not change density, font sizes, spacing, or sidebar preferences.
+The existing Light, Dark, and System preference keeps its original storage key and behavior. A separate palette preference provides Default, Forest, Ocean, Lavender, Rose, and Monochrome, each with light and dark variants. Default matches the stylesheet fallback colors. Palette changes update semantic color variables only: they do not change density, font sizes, spacing, or sidebar preferences.
+
+Presets color the full canvas, sidebar, raised panels, selection states, and message bubbles. Forest uses emerald greens, Ocean uses blue/navy, Lavender uses violet/plum, Rose uses pink/burgundy, and Monochrome uses neutral grays. Default retains the ink, paper, and lime identity. Each palette has separately balanced light and dark colors.
+
+The app uses one system sans-serif family for headings, messages, labels, menus, and dialogs, including portaled controls. Timestamps use tabular numerals in the same family; monospace is reserved for addresses, codes, and color values. Small labels use more readable sizes and restrained tracking. The landing page keeps its independent typography and styling.
 
 The theme menu opens **Palettes & custom themes**. A custom theme starts from a preset or a copy of the current theme. Both variants can be edited independently. The preview includes incoming/outgoing messages, links, selected states, and controls. Edits stay inside the preview until saved and applied; cancellation leaves the current palette intact. Resetting a draft restores its starting preset. The editor and recovery menu use readable built-in colors even when the current palette is hard to read.
 

@@ -14,6 +14,13 @@ export function conversationHref(id: string): string {
   return `/chat/${encodeURIComponent(id)}`
 }
 
+export function communityHref(id: string, channelId?: string, messageId?: string): string {
+  const params = new URLSearchParams({ id })
+  if (channelId) params.set("channel", channelId)
+  if (messageId) params.set("message", messageId)
+  return `/chat/communities#${params}`
+}
+
 export function conversationFromPathname(pathname: string): string | null {
   const segment = /^\/chat\/([^/]+)\/?$/.exec(pathname)?.[1]
   return segment ? parseConversationAddress(segment) : null

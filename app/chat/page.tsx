@@ -2,17 +2,19 @@
 
 import Link from "next/link"
 import { ArrowUpRight, Lock, UserRound } from "lucide-react"
-import { useMessaging } from "@/components/messaging-provider"
+import { useCommunities, useMessaging } from "@/components/messaging-provider"
 import { Button } from "@/components/ui/button"
 
 export default function ChatIndexPage() {
-  const { identity, conversations } = useMessaging()
+  const { identity, conversations, preferences } = useMessaging()
+  const { model } = useCommunities()
   const unread = conversations.filter(conversation => !conversation.blocked && !conversation.request && !conversation.archived).reduce((sum, conversation) => sum + conversation.unreadCount, 0)
+    + model.communities.filter(community => community.joined && !community.deleted && !preferences.archived.includes(community.id)).reduce((sum, community) => sum + community.unreadCount, 0)
 
   return <div className="flex h-full min-h-0 flex-col overflow-y-auto">
     <header className="flex min-h-15 shrink-0 items-center justify-between gap-4 border-b border-border px-6">
       <p className="app-eyebrow">Your inbox</p>
-      <span className="font-mono text-[10px] tracking-wide text-muted-foreground">{unread ? `${unread} unread` : "All caught up"}</span>
+      <span className="text-xs text-muted-foreground">{unread ? `${unread} unread` : "All caught up"}</span>
     </header>
     <div className="flex flex-1 flex-col justify-center px-8 py-10 lg:px-14">
       <div className="mx-auto w-full max-w-3xl">

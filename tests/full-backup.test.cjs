@@ -557,3 +557,134 @@ test('import merges individual deletion markers from both devices before inserti
   assert.deepEqual(await events.getStoredEvents(alice.publicKey), [])
   assert.deepEqual(new Set((await events.getMessagingPreferences(alice.publicKey)).deletedMessages[bob.publicKey].messageIds), new Set([first.event.id, second.event.id]))
 })
+
+const communities = load(path.join(root, 'lib/community-protocol.ts'))
+const history = load(path.join(root, 'lib/messaging-history.ts'))
+async function communityFixture() {
+  const state = await communities.signCommunityState({ id: `community:${alice.publicKey}:${crypto.randomUUID()}`, owner: alice.publicKey,
+    name: 'Study group', description: '', epoch: 1, updatedAt: Date.now() - 1000, members: [alice.publicKey, bob.publicKey, charlie.publicKey],
+    moderators: [bob.publicKey], bans: [], channels: [{ id: crypto.randomUUID(), name: 'general', posting: 'members' },
+      { id: crypto.randomUUID(), name: 'homework', posting: 'members' }], admission: 'approval', joiningPaused: false, inviteGeneration: 1,
+    version: 2, coOwners: [], transfers: [], signer: alice.publicKey, deleted: false }, alice)
+  const authority = await saveCommunityEvent(alice, state, { type: 'state', state })
+  return { state, authority }
+}
+async function saveCommunityEvent(author, state, data, extra = {}) {
+  const peers = state.members.filter(member => member !== author.publicKey)
+  const event = await messaging.signMessagingEvent({ version: 3, id: extra.id ?? crypto.randomUUID(), author: author.publicKey,
+    conversationId: state.id, recipients: extra.recipients ?? (peers.length ? peers : [author.publicKey]), timestamp: extra.timestamp ?? Date.now(),
+    kind: 'community', payload: { community: data.type === 'state' ? data : { epoch: state.epoch, stateRef: state.signature, ...data } } }, author)
+  assert.equal(await messaging.validateMessagingEvent(event), true)
+  const record = { key: events.eventStorageKey(event), event, local: author.publicKey === alice.publicKey, delivered: [], receivedAt: Date.now() }
+  await events.saveStoredEvent(alice.publicKey, record)
+  return record
+}
+
+test('community local deletion survives reload and stale backup restore while retaining replies, channels and ownership proofs', async () => {
+  const { state, authority } = await communityFixture(), channelId = state.channels[0].id
+  const target = await saveCommunityEvent(bob, state, { type: 'message', channelId, content: 'Delete this local text' })
+  const edit = await saveCommunityEvent(bob, state, { type: 'edit', channelId, targetId: target.event.id, content: 'Delete the edit too' })
+  const pin = await saveCommunityEvent(alice, state, { type: 'pin', channelId, targetId: target.event.id, pinned: true })
+  const receipt = await saveCommunityEvent(alice, state, { type: 'receipt', channelId, targetId: target.event.id, receipt: 'read' })
+  const reply = await saveCommunityEvent(alice, state, { type: 'message', channelId, content: 'Keep the reply', replyTo: target.event.id })
+  const sibling = await saveCommunityEvent(bob, state, { type: 'message', channelId: state.channels[1].id, content: 'Keep another channel' })
+  const command = await saveCommunityEvent(bob, state, { type: 'command', action: 'ban', target: charlie.publicKey }, { recipients: [alice.publicKey] })
+  const transferred = await communities.signCommunityTransfer({ ...state, epoch: 2, updatedAt: state.updatedAt + 100 }, bob.publicKey, alice)
+  const ownership = await saveCommunityEvent(alice, transferred, { type: 'state', state: transferred })
+  const original = await events.exportMessagingSnapshot(alice.publicKey)
+  await events.deleteStoredCommunityMessage(alice.publicKey, state.id, channelId, target.event.id)
+  const kept = [authority, reply, sibling, command, ownership]
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), kept)
+  let prefs = await events.getMessagingPreferences(alice.publicKey)
+  let model = communities.buildCommunityModel(kept, alice.publicKey, prefs)
+  assert.deepEqual(model.messages.map(message => message.id).sort(), [reply.event.id, sibling.event.id].sort())
+  assert.equal(model.communities[0].owner, bob.publicKey)
+  await events.saveMessagingPreferences(alice.publicKey, original.preferences)
+  await events.importMessagingSnapshot(alice.publicKey, original)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), kept)
+  for (const record of [target, edit, pin, receipt]) assert.equal(await events.saveStoredEvent(alice.publicKey, record), false)
+  const exported = await events.exportMessagingSnapshot(alice.publicKey)
+  await events.validateMessagingSnapshot(exported, alice.publicKey)
+  databases.clear()
+  await events.importMessagingSnapshot(alice.publicKey, exported)
+  prefs = await events.getMessagingPreferences(alice.publicKey)
+  model = communities.buildCommunityModel(await events.getStoredEvents(alice.publicKey), alice.publicKey, prefs)
+  assert.equal(model.communities[0].owner, bob.publicKey)
+  assert.equal(model.messages.some(message => message.id === target.event.id), false)
+  await events.deleteStoredCommunityMessage(alice.publicKey, state.id, channelId, target.event.id)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), kept)
+})
+
+test('community file deletion removes pending bytes and retries only for the attachment author and channel', async () => {
+  const { state, authority } = await communityFixture(), channelId = state.channels[0].id
+  const attachment = { id: crypto.randomUUID(), name: 'notes.txt', mime: 'text/plain', size: 3, chunks: 1,
+    sha256: Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('abc'))).toString('hex'), kind: 'file' }
+  const chunk = await saveCommunityEvent(alice, state, { type: 'attachment-chunk', channelId, attachmentId: attachment.id, index: 0, data: 'YWJj' })
+  const target = await saveCommunityEvent(alice, state, { type: 'attachment', channelId, attachment, content: 'A file caption' })
+  const otherChunk = await saveCommunityEvent(bob, state, { type: 'attachment-chunk', channelId, attachmentId: attachment.id, index: 0, data: 'YWJj' })
+  const otherFile = await saveCommunityEvent(bob, state, { type: 'attachment', channelId, attachment })
+  const siblingChunk = await saveCommunityEvent(alice, state, { type: 'attachment-chunk', channelId: state.channels[1].id, attachmentId: attachment.id, index: 0, data: 'YWJj' })
+  const siblingFile = await saveCommunityEvent(alice, state, { type: 'attachment', channelId: state.channels[1].id, attachment })
+  const original = await events.exportMessagingSnapshot(alice.publicKey)
+  await events.deleteStoredCommunityMessage(alice.publicKey, state.id, channelId, target.event.id)
+  const kept = [authority, otherChunk, otherFile, siblingChunk, siblingFile]
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), kept)
+  assert.equal(await events.saveStoredEvent(alice.publicKey, chunk), false)
+  assert.equal(await events.saveStoredEvent(alice.publicKey, { ...target, error: 'Offline' }), false)
+  const latest = await events.exportMessagingSnapshot(alice.publicKey)
+  assert.deepEqual(latest.preferences.deletedMessages[state.id].attachmentKeys, [JSON.stringify([alice.publicKey, channelId, attachment.id])])
+  await events.validateMessagingSnapshot(latest, alice.publicKey)
+  await events.importMessagingSnapshot(alice.publicKey, original)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), kept)
+})
+
+test('community poll deletion removes its votes and preserves unrelated controls and authority', async () => {
+  const { state, authority } = await communityFixture(), channelId = state.channels[0].id
+  const poll = await saveCommunityEvent(bob, state, { type: 'poll', channelId, question: 'Study when?', options: ['Today', 'Tomorrow'] })
+  await saveCommunityEvent(alice, state, { type: 'vote', channelId, targetId: poll.event.id, option: 1 })
+  const other = await saveCommunityEvent(bob, state, { type: 'message', channelId, content: 'Keep' })
+  const pin = await saveCommunityEvent(alice, state, { type: 'pin', channelId, targetId: other.event.id, pinned: true })
+  await events.deleteStoredCommunityMessage(alice.publicKey, state.id, channelId, poll.event.id)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), [authority, other, pin])
+  const preferences = { deletedMessages: { [state.id]: { deletedAt: Date.now(), eventKeys: [authority.key], messageIds: [authority.event.id] } } }
+  for (const type of ['state', 'join', 'decision', 'command', 'leave', 'hide', 'report']) {
+    assert.equal(history.isDeletedMessageEvent({ ...authority, event: { ...authority.event, payload: { community: { type } } } }, alice.publicKey, preferences), false)
+  }
+})
+
+test('community deletion validates the channel and rolls back payload and tombstone on failed commit', async () => {
+  const { state, authority } = await communityFixture(), channelId = state.channels[0].id
+  const target = await saveCommunityEvent(bob, state, { type: 'message', channelId, content: 'Keep on failure' })
+  let changes = 0
+  const changed = () => { changes++ }
+  window.addEventListener('serotine:events', changed)
+  try {
+    await assert.rejects(events.deleteStoredCommunityMessage(alice.publicKey, state.id, state.channels[1].id, target.event.id), /no longer available/)
+    await assert.rejects(events.deleteStoredCommunityMessage(alice.publicKey, state.id, 'invalid', target.event.id), /valid community channel/)
+    await assert.rejects(events.deleteStoredCommunityMessage(alice.publicKey, state.id, channelId, authority.event.id), /no longer available/)
+    failCommit = true
+    await assert.rejects(events.deleteStoredCommunityMessage(alice.publicKey, state.id, channelId, target.event.id), /aborted/)
+    failCommit = false
+    assert.deepEqual(await events.getStoredEvents(alice.publicKey), [authority, target])
+    assert.deepEqual((await events.getMessagingPreferences(alice.publicKey)).deletedMessages, {})
+    assert.equal(changes, 0)
+  } finally { failCommit = false; window.removeEventListener('serotine:events', changed) }
+})
+
+test('community backup tombstones reject malformed and cross-community event and attachment keys before writes', async () => {
+  const cid = `community:${alice.publicKey}:${crypto.randomUUID()}`, otherCid = `community:${alice.publicKey}:${crypto.randomUUID()}`
+  const id = crypto.randomUUID(), channelId = crypto.randomUUID(), eventKey = `${bob.publicKey}:${cid}:${id}`
+  const base = { deletedAt: Date.now(), eventKeys: [eventKey], messageIds: [id], attachmentKeys: [JSON.stringify([bob.publicKey, channelId, id])] }
+  const valid = { version: 3, owner: alice.publicKey, events: [], preferences: { ...events.defaultMessagingPreferences(), deletedMessages: { [cid]: base } } }
+  await events.validateMessagingSnapshot(structuredClone(valid), alice.publicKey)
+  for (const changes of [{ eventKeys: [`${bob.publicKey}:${otherCid}:${id}`] }, { eventKeys: [eventKey + ':extra'] },
+    { eventKeys: [`${bob.publicKey}:${cid}:not-a-uuid`] }, { eventKeys: [`${bob.publicKey}:community:invalid:${id}:${id}`] },
+    { attachmentKeys: [JSON.stringify([bob.publicKey, channelId, 'bad-id'])] }, { attachmentKeys: [JSON.stringify(['invalid', channelId, id])] },
+    { attachmentKeys: [JSON.stringify([bob.publicKey, 'bad-channel', id])] }, { attachmentKeys: [JSON.stringify([bob.publicKey, id])] },
+    { legacyKeys: [JSON.stringify([bob.publicKey, 'old-message'])] }]) {
+    const invalid = structuredClone(valid)
+    Object.assign(invalid.preferences.deletedMessages[cid], changes)
+    await assert.rejects(events.importMessagingSnapshot(alice.publicKey, invalid), /deleted (messages|chats) are invalid/)
+  }
+  assert.equal(writes, 0)
+})

@@ -6,7 +6,7 @@ import { ID_PATTERN, isEnvelope, MAX_MESSAGE_LENGTH, PUBLIC_KEY_PATTERN } from "
 import { createRequestProof } from "./request-auth"
 import { deleteMessage, getEventFeed, getLegacyInbox, storeEncryptedEvent } from "./relay-client"
 import { deleteConversationHistoryFromStorage, deleteMessageHistoryFromStorage, exportAllMessagesFromStorage, migrateLegacyHistory } from "./storage"
-import { defaultMessagingPreferences, deleteStoredConversation, deleteStoredMessage, eventStorageKey, getMessagingPreferences, getStoredEvents, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor, saveCommunityUpgrade } from "./messaging-store"
+import { defaultMessagingPreferences, deleteStoredConversation, deleteStoredMessage, deleteStoredCommunityMessage, eventStorageKey, getMessagingPreferences, getStoredEvents, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor, saveCommunityUpgrade } from "./messaging-store"
 import { isDeletedStoredEvent, isDeletedLegacyMessage } from "./messaging-history"
 import { ATTACHMENT_CHUNK_BYTES, MAX_ATTACHMENT_CHUNKS, isAttachmentMeta } from "./attachments"
 import { legacyMessageEvents, legacyStoredMessageId, legacyVisibleMessageIds } from "./legacy-messaging"
@@ -212,6 +212,8 @@ export class MessagingEngine {
   status: "connecting" | "online" | "offline" = "connecting"
   error: string | null = null
   private running = false
+  private syncRequested = false
+  private communityReads = new Set<string>()
   private outboxRetryAt = 0
   private disposed = false
   private listeners = new Set<() => void>()
@@ -220,6 +222,7 @@ export class MessagingEngine {
   private refreshTimer?: ReturnType<typeof setTimeout>
   private expiryTimer?: ReturnType<typeof setTimeout>
   private refreshGeneration = 0
+  private refreshCompletion?: Promise<void>
   private refreshPending = false
   private initializedAt = Date.now()
   private authorizedKeys = new Set<string>()
@@ -256,16 +259,53 @@ export class MessagingEngine {
         })))
         this.assertActive()
         try { await this.refresh() } catch (error) { this.fail(error) }
-        void this.sync()
+        this.requestSync()
       },
     })
   }
   markCommunityRead = async (cid: string, channelId: string) => {
     this.assertActive()
     const key = communityChannelKey(cid, channelId)
-    const latest = Math.max(0, ...this.communities.model.messages.filter(message => message.conversationId === cid && message.channelId === channelId).map(message => message.timestamp))
-    if (latest <= (this.preferences.readAt[key] ?? 0)) return
-    await this.updatePreferences(p => ({ ...p, readAt: { ...p.readAt, [key]: Math.max(latest, p.readAt[key] ?? 0) } }))
+    if (this.communityReads.has(key) || (typeof document !== "undefined" && (document.visibilityState !== "visible" || !document.hasFocus()))) return
+    const model = this.communities.model
+    const community = model.communities.find(item => item.id === cid && item.joined && !item.deleted)
+    if (!community?.channels.some(item => item.id === channelId)) return
+    const messages = model.messages.filter(message => message.conversationId === cid && message.channelId === channelId && !message.hidden && message.senderPubKey !== this.identity.publicKey)
+    const latest = Math.max(0, ...messages.map(message => message.timestamp))
+    const readAt = this.preferences.readAt[key] ?? 0
+    // File metadata can clear the local unread badge before all bytes arrive.
+    // Once complete and visible, acknowledge that file even if its timestamp
+    // was already covered; recorded read receipts prevent duplicate sends.
+    const unread = this.preferences.readReceipts ? messages.filter(message => !message.readBy.includes(this.identity.publicKey)
+      && (message.timestamp > readAt || (message.attachment && this.communities.getAttachmentChunks(cid, channelId, message.id).length === message.attachment.chunks))) : []
+    if (latest <= readAt && !unread.length) return
+    this.communityReads.add(key)
+    try {
+      if (latest > readAt) await this.updatePreferences(p => ({ ...p, readAt: { ...p.readAt, [key]: Math.max(latest, p.readAt[key] ?? 0) } }))
+      if (this.preferences.readReceipts) for (const message of unread) {
+        if (!this.preferences.readReceipts || (typeof document !== "undefined" && (document.visibilityState !== "visible" || !document.hasFocus()))) break
+        const current = this.communities.model.messages.find(item => item.id === message.id && item.conversationId === cid && item.channelId === channelId && !item.hidden)
+        if (!current || current.readBy.includes(this.identity.publicKey) || (current.attachment && this.communities.getAttachmentChunks(cid, channelId, current.id).length !== current.attachment.chunks)) continue
+        await this.communities.receipt(cid, channelId, message.id, "read")
+      }
+    } finally { this.communityReads.delete(key) }
+  }
+  deleteCommunityMessage = async (cid: string, channelId: string, messageId: string) => {
+    this.assertActive()
+    const message = this.communities.model.messages.find(item => item.conversationId === cid && item.channelId === channelId && item.id === messageId)
+    if (!message) throw new Error("This channel message is no longer available.")
+    await deleteStoredCommunityMessage(this.identity.publicKey, cid, channelId, messageId)
+    this.assertActive()
+    await this.refresh()
+  }
+  archiveCommunity = async (cid: string, archived = true) => {
+    this.assertActive()
+    if (!this.communities.model.communities.some(item => item.id === cid && item.joined && !item.deleted)) throw new Error("This community is no longer available.")
+    await this.updatePreferences(p => ({ ...p, archived: archived ? [...new Set([...(p.archived ?? []), cid])] : (p.archived ?? []).filter(id => id !== cid) }))
+  }
+  private requestSync() {
+    if (this.running) this.syncRequested = true
+    else void this.sync()
   }
   subscribe = (listener: () => void) => { this.assertActive(); this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private assertActive() { if (this.disposed) throw new Error("Your identity changed. Reopen this conversation before continuing.") }
@@ -293,14 +333,20 @@ export class MessagingEngine {
   refresh = async () => {
     this.assertActive()
     const generation = ++this.refreshGeneration
-    const [records, preferences] = await Promise.all([getStoredEvents(this.identity.publicKey), getMessagingPreferences(this.identity.publicKey)])
-    this.assertActive()
-    if (generation !== this.refreshGeneration) return
-    const cutoffs = privateDestroyCutoffs(records, this.identity.publicKey)
-    this.records = records.filter(record => !isPrivateEventExpired(record, this.identity.publicKey, cutoffs)); this.preferences = preferences; this.contacts = loadContacts(this.identity.publicKey)
-    this.model = buildMessagingModel(this.records, this.identity.publicKey, this.contacts, preferences, this.authorizedKeys)
-    this.scheduleExpiry()
-    this.emit()
+    const completion = (async () => {
+      const [records, preferences] = await Promise.all([getStoredEvents(this.identity.publicKey), getMessagingPreferences(this.identity.publicKey)])
+      this.assertActive()
+      // Permission-sensitive callers must wait for the newer snapshot, not
+      // continue with old state when overlapping reads supersede their own.
+      if (generation !== this.refreshGeneration) { await this.refreshCompletion; return }
+      const cutoffs = privateDestroyCutoffs(records, this.identity.publicKey)
+      this.records = records.filter(record => !isPrivateEventExpired(record, this.identity.publicKey, cutoffs)); this.preferences = preferences; this.contacts = loadContacts(this.identity.publicKey)
+      this.model = buildMessagingModel(this.records, this.identity.publicKey, this.contacts, preferences, this.authorizedKeys)
+      this.scheduleExpiry()
+      this.emit()
+    })()
+    this.refreshCompletion = completion
+    await completion
   }
   private scheduleExpiry() {
     clearTimeout(this.expiryTimer)
@@ -424,11 +470,11 @@ export class MessagingEngine {
     // piece would repeatedly clone an entire large file. Its metadata refreshes
     // and starts delivery when preparation finishes; normal sync can also recover
     // already saved pieces if preparation is interrupted.
-    if (event.kind === "attachment-chunk") return
+    if (event.kind === "attachment-chunk" || (event.kind === "community" && event.payload.community?.type === "attachment-chunk")) return
     // Once durable, a view refresh failure must not make the composer resend it.
     try { await this.refresh() } catch (error) { this.fail(error) }
     this.assertActive()
-    void this.sync()
+    this.requestSync()
   }
   sendText = (cid: string, text: string, replyTo?: string, mentions?: string[], expectedPrivateTtlSeconds?: PrivateTtlSeconds) => {
     // The composer may still have a private draft when a remote mode change
@@ -560,8 +606,17 @@ export class MessagingEngine {
   }
   retry = async (messageId?: string) => {
     this.assertActive()
-    const message = this.model.messages.find(m => m.id === messageId)
-    for (const record of await getStoredEvents(this.identity.publicKey)) if (record.local && record.error && (!messageId || record.event.id === messageId || (message?.attachment && record.event.payload.attachmentId === message.attachment.id))) { this.assertActive(); await saveStoredEvent(this.identity.publicKey, { ...record, error: undefined, failedRecipients: undefined }) }
+    const directMessage = this.model.messages.find(m => m.id === messageId)
+    const communityMessage = directMessage ? undefined : this.communities.model.messages.find(m => m.id === messageId)
+    const message = directMessage || communityMessage
+    for (const record of await getStoredEvents(this.identity.publicKey)) {
+      const communityData = record.event.payload.community
+      const sameCommunityMessage = !communityMessage || (record.event.conversationId === communityMessage.conversationId && record.event.author === communityMessage.senderPubKey && communityData && "channelId" in communityData && communityData.channelId === communityMessage.channelId)
+      const matchingChunk = communityMessage
+        ? sameCommunityMessage && communityData?.type === "attachment-chunk" && communityData.attachmentId === communityMessage.attachment?.id
+        : message?.attachment && record.event.kind === "attachment-chunk" && record.event.payload.attachmentId === message.attachment.id
+      if (record.local && record.error && (!messageId || (record.event.id === messageId && sameCommunityMessage) || matchingChunk)) { this.assertActive(); await saveStoredEvent(this.identity.publicKey, { ...record, error: undefined, failedRecipients: undefined }) }
+    }
     this.assertActive()
     await this.sync()
   }
@@ -596,6 +651,9 @@ export class MessagingEngine {
       // refreshes; coalesce any concurrent local changes into one final read.
       if (this.refreshPending && !this.disposed) this.storeListener()
       this.emit()
+      // A message queued after this pass captured its outbox should leave now,
+      // rather than waiting for the next five-second polling interval.
+      if (this.syncRequested && !this.disposed) { this.syncRequested = false; void this.sync() }
     }
   }
   private async flushOutbox() {
@@ -612,7 +670,8 @@ export class MessagingEngine {
           if (!canSendTo(record, recipientPubKey)) continue
           try {
             if (record.event.kind === "community") {
-              await this.refresh()
+              // The pass already refreshed local state. Recheck again after
+              // encryption below, when a newer membership could have arrived.
               const reason = communityOutboxError(record.event, this.communities.model, owner)
               if (reason) {
                 record.error = reason
@@ -702,7 +761,7 @@ export class MessagingEngine {
         // Persist failures must abort the page before its cursor can advance.
         await saveStoredEvent(owner, record)
         changed = true
-        if (!existing && event.author !== owner && (VISIBLE_KINDS.has(event.kind) || (event.kind === "community" && event.payload.community?.type === "message")) && packet.createdAt >= this.initializedAt) notifications.push(event.id)
+        if (!existing && event.author !== owner && (VISIBLE_KINDS.has(event.kind) || (event.kind === "community" && ["message", "attachment", "poll"].includes(event.payload.community?.type ?? ""))) && packet.createdAt >= this.initializedAt) notifications.push(event.id)
       }
       if (changed) await this.refresh()
       this.assertActive()
@@ -717,7 +776,7 @@ export class MessagingEngine {
           if (communityMessage && community) {
             const channel = community.channels.find(row => row.id === communityMessage.channelId)
             const notificationMode = this.preferences.notifications[communityChannelKey(community.id, communityMessage.channelId)] ?? community.notificationMode
-            void notifyIncoming(communityMessage, { id: community.id, kind: "group", name: `${community.name} / ${channel?.name ?? "channel"}`, members: community.members, unreadCount: community.unreadCount, updatedAt: community.updatedAt, notificationMode, blocked: false, request: false, archived: false }, owner,
+            void notifyIncoming(communityMessage, { id: community.id, kind: "group", name: `${community.name} / ${channel?.name ?? "channel"}`, members: community.members, unreadCount: community.unreadCount, updatedAt: community.updatedAt, notificationMode, blocked: false, request: false, archived: (this.preferences.archived ?? []).includes(community.id) }, owner,
               `/chat/communities#id=${encodeURIComponent(community.id)}&channel=${communityMessage.channelId}`)
           }
         }
@@ -751,6 +810,19 @@ export class MessagingEngine {
       if (!conversation || conversation.request || conversation.blocked || !conversation.members.includes(owner)) continue
       if (message.attachment && this.getAttachmentChunks(message.conversationId, message.id).length !== message.attachment.chunks) continue
       await this.sendEvent(message.conversationId, "receipt", { targetId: message.id, receipt: "delivered" })
+    }
+    const communityAccepted = new Set(this.communities.model.acceptedKeys)
+    const communityReceipted = new Set(this.records.flatMap(record => {
+      const data = record.event.payload.community
+      return communityAccepted.has(record.key) && record.event.author === owner && data?.type === "receipt" ? [`${communityChannelKey(record.event.conversationId, data.channelId)}:${data.targetId}`] : []
+    }))
+    for (const message of this.communities.model.messages) {
+      this.assertActive()
+      if (message.hidden || message.senderPubKey === owner || communityReceipted.has(`${communityChannelKey(message.conversationId, message.channelId)}:${message.id}`)) continue
+      const community = this.communities.model.communities.find(item => item.id === message.conversationId && item.joined && !item.deleted)
+      if (!community || !community.effectiveMembers.includes(message.senderPubKey) || community.members.length !== community.effectiveMembers.length) continue
+      if (message.attachment && this.communities.getAttachmentChunks(message.conversationId, message.channelId, message.id).length !== message.attachment.chunks) continue
+      await this.communities.receipt(message.conversationId, message.channelId, message.id, "delivered")
     }
   }
   private async readLegacyInbox() {

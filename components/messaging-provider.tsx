@@ -8,14 +8,16 @@ import type { CommunityService } from "@/lib/community-service"
 import type { CommunityModel } from "@/lib/community-types"
 import type { MessagingContextValue } from "@/lib/messaging-types"
 
-type CommunityMethods = Pick<CommunityService, "createCommunity" | "createInvite" | "joinCommunity" | "retryJoinRequest" | "updateCommunity" | "moderate" | "approveRequest" | "rejectRequest" | "leave" | "sendMessage" | "reportMessage" | "hideMessage" | "revokeInvites" | "setCoOwner" | "transferOwnership" | "deleteCommunity">
+type CommunityMethods = Pick<CommunityService, "createCommunity" | "createInvite" | "joinCommunity" | "retryJoinRequest" | "updateCommunity" | "moderate" | "approveRequest" | "rejectRequest" | "leave" | "sendMessage" | "sendEvent" | "editMessage" | "pinMessage" | "createPoll" | "vote" | "getAttachmentChunks" | "reportMessage" | "hideMessage" | "revokeInvites" | "setCoOwner" | "transferOwnership" | "deleteCommunity">
 export type CommunityContextValue = CommunityMethods & Pick<MessagingContextValue, "identity" | "contacts" | "ready" | "error" | "status" | "preferences" | "setNotificationMode" | "sync" | "retry"> & {
   model: CommunityModel
   deliveryIssues: Array<{ id: string; communityId: string; kind: string; error: string }>
   markRead: (communityId: string, channelId: string) => Promise<void>
+  deleteMessage: (communityId: string, channelId: string, messageId: string) => Promise<void>
+  archiveCommunity: (communityId: string, archived?: boolean) => Promise<void>
 }
 const CommunityContext = createContext<CommunityContextValue | null>(null)
-const emptyCommunityModel: CommunityModel = { communities: [], messages: [], requests: [], reports: [], commands: [], processedIds: [] }
+const emptyCommunityModel: CommunityModel = { communities: [], messages: [], requests: [], reports: [], commands: [], processedIds: [], acceptedKeys: [] }
 const MessagingContext = createContext<MessagingContextValue | null>(null)
 const unavailable = async (): Promise<never> => { throw new Error("Your identity is still loading. Try again in a moment.") }
 const empty = {
@@ -111,6 +113,14 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     rejectRequest: engine?.communities.rejectRequest ?? unavailable,
     leave: engine?.communities.leave ?? unavailable,
     sendMessage: engine?.communities.sendMessage ?? unavailable,
+    sendEvent: engine?.communities.sendEvent ?? unavailable,
+    editMessage: engine?.communities.editMessage ?? unavailable,
+    pinMessage: engine?.communities.pinMessage ?? unavailable,
+    createPoll: engine?.communities.createPoll ?? unavailable,
+    vote: engine?.communities.vote ?? unavailable,
+    getAttachmentChunks: engine?.communities.getAttachmentChunks ?? (() => []),
+    deleteMessage: engine?.deleteCommunityMessage ?? unavailable,
+    archiveCommunity: engine?.archiveCommunity ?? unavailable,
     reportMessage: engine?.communities.reportMessage ?? unavailable,
     hideMessage: engine?.communities.hideMessage ?? unavailable,
     revokeInvites: engine?.communities.revokeInvites ?? unavailable,

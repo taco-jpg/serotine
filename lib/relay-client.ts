@@ -77,6 +77,10 @@ async function relay<Result>(action: RelayAction, data: unknown, proof: RequestP
     return await Promise.race([timeout, (async () => {
       const response = await fetch("/api/relay", {
         method: "POST", mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store",
+        // Safari turns the page's no-referrer policy into Origin: null for this
+        // POST. Send only the site origin, never the chat path or query. An empty
+        // referrer would force WebKit back to no-referrer despite this override.
+        referrerPolicy: "strict-origin",
         headers: { "Content-Type": "application/json", Accept: "application/json",
           ...(action.startsWith("event:") ? { "X-Serotine-Events": "1" } : {}) },
         body: JSON.stringify({ version: 2, action, data, proof }), signal: controller.signal,

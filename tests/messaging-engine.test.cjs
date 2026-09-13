@@ -266,6 +266,51 @@ test('saved failed sends survive recreation without making a healthy relay offli
   assert.equal(attempts.filter(a => a.id === id).length, attempted, 'saved failures require an explicit retry')
 })
 
+test('an origin refusal fails self text and contact files; a fresh client reconnects and explicit retries recover both', async t => {
+  const refusal = 'Open Serotine directly to reconnect to messaging.'
+  const files = load(path.join(root, 'lib/attachments.ts'))
+  const original = await engine(alice)
+  const selfId = await original.instance.sendText(alice.publicKey, 'Hi')
+  const bytes = new Uint8Array(files.ATTACHMENT_CHUNK_BYTES + 19).fill(37)
+  const fileId = await files.sendAttachment(original.instance.sendEvent, bob.publicKey, new File([bytes], 'photo.bin'))
+  const blocked = ['storeEncryptedEvent', 'getEventFeed', 'getLegacyInbox'].map(method =>
+    t.mock.method(relay, method, async () => ({ success: false, error: refusal })))
+  await original.synchronize()
+  assert.equal(original.instance.status, 'offline')
+  assert.equal(original.instance.error, refusal)
+  for (const cid of [alice.publicKey, bob.publicKey]) {
+    assert.equal(original.instance.model.conversations.find(c => c.id === cid).sendError, refusal)
+  }
+  for (const id of [selfId, fileId]) assert.equal(original.instance.model.messages.find(m => m.id === id).delivery, 'failed')
+  assert.equal(packets.length, 0)
+
+  original.instance.dispose()
+  blocked.forEach(mock => mock.mock.restore())
+  const updated = await engine(alice)
+  t.after(() => updated.instance.dispose())
+  await updated.synchronize()
+  assert.equal(updated.instance.status, 'online')
+  assert.equal(updated.instance.error, null)
+  assert.equal(packets.length, 0, 'reconnecting must not silently resend rejected content')
+  for (const id of [selfId, fileId]) {
+    assert.equal(updated.instance.model.messages.find(m => m.id === id).delivery, 'failed')
+    await updated.instance.retry(id)
+    await updated.synchronize()
+    assert.equal(updated.instance.model.messages.find(m => m.id === id).delivery, 'sent')
+  }
+  for (const cid of [alice.publicKey, bob.publicKey]) {
+    assert.equal(updated.instance.model.conversations.find(c => c.id === cid).sendError, undefined)
+  }
+  assert.equal(packets.filter(packet => packet.id === selfId).length, 1)
+  assert.equal(packets.filter(packet => packet.id === fileId).length, 1)
+  const receiver = await engine(bob)
+  t.after(() => receiver.instance.dispose())
+  await receiver.synchronize()
+  const received = receiver.instance.model.messages.find(m => m.id === fileId)
+  const restored = await files.assembleAttachment(received.attachment, receiver.instance.getAttachmentChunks(alice.publicKey, fileId))
+  assert.deepEqual(new Uint8Array(await restored.arrayBuffer()), bytes)
+})
+
 test('a retired first group member does not block later members or later outbox batches', async () => {
   const sender = await engine(alice)
   const cid = await sender.instance.createGroup('Team', [bob.publicKey, charlie.publicKey])

@@ -5,26 +5,31 @@ const path = require("node:path")
 const vm = require("node:vm")
 const ts = require("typescript")
 const React = require("react")
-
 const root = path.resolve(__dirname, "..")
-const source = fs.readFileSync(path.join(root, "app/page.tsx"), "utf8")
-const css = fs.readFileSync(path.join(root, "app/landing.module.css"), "utf8")
-const classes = Object.fromEntries([...css.matchAll(/\.([a-zA-Z_][\w-]*)/g)].map(match => [match[1], match[1]]))
-const compiled = ts.transpileModule(source, {
-  compilerOptions: { jsx: ts.JsxEmit.React, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
-  reportDiagnostics: true,
+const read = file => fs.readFileSync(path.join(root, file), "utf8")
+const source = read("app/page.tsx")
+const controls = read("app/landing-controls.tsx")
+const behavior = read("app/landing-behavior.ts")
+const css = read("app/landing.module.css")
+const classes = Object.fromEntries([...css.matchAll(/\.([a-zA-Z_][\w-]*)/g)].map(m => [m[1], m[1]]))
+const compile = (text, fileName) => ts.transpileModule(text, {
+  fileName, compilerOptions: { jsx: ts.JsxEmit.React, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }, reportDiagnostics: true,
 })
-const exportsObject = {}
-const testReact = { ...React, Fragment: React.Fragment || Symbol.for("react.fragment") }
-// Evaluate the real, pure server components. Only framework navigation and CSS
-// module resolution are substituted; no DOM, transport, or identity is needed.
+const compiled = compile(source, "page.tsx")
+const pageExports = {}
+// Server-document contract only. Interactive behavior is exercised separately
+// in the browser smoke test, not replaced by a pretend React hydration test.
 vm.runInNewContext(compiled.outputText, {
-  exports: exportsObject,
-  React: testReact,
+  exports: pageExports, React,
   require(name) {
-    if (name === "next/link") return { default: props => testReact.createElement("a", props, props.children) }
+    if (name === "next/link") return { default: props => React.createElement("a", props, props.children) }
     if (name === "./landing.module.css") return { default: classes }
-    throw new Error(`Unexpected landing-page dependency: ${name}`)
+    if (name === "./landing-controls") return {
+      LandingEnhancements: () => null,
+      ThemeControl: () => React.createElement("button", { type: "button", disabled: true, "aria-label": "Change color theme" }),
+    }
+    if (name === "@/components/ui/identity-icon") return { IdentityIcon: () => React.createElement("span", { "aria-hidden": true }) }
+    throw new Error(`Unexpected dependency: ${name}`)
   },
 })
 const elements = []
@@ -34,98 +39,127 @@ function visit(node) {
   if (typeof node === "string" || typeof node === "number") return String(node)
   if (typeof node.type === "function") return visit(node.type(node.props))
   if (typeof node.type === "symbol") return visit(node.props.children)
-  const element = { tag: node.type, props: node.props, text: "" }
-  elements.push(element)
-  element.text = visit(node.props.children)
-  return element.text
+  const item = { tag: node.type, props: node.props, text: "" }
+  elements.push(item); item.text = visit(node.props.children)
+  return item.text
 }
-const text = visit(testReact.createElement(exportsObject.default))
-const find = tag => elements.filter(element => element.tag === tag)
+const text = visit(React.createElement(pageExports.default))
+const find = tag => elements.filter(e => e.tag === tag)
+const logic = {}
+vm.runInNewContext(compile(behavior, "landing-behavior.ts").outputText, { exports: logic })
 
-test("landing TSX transpiles and every referenced CSS class exists", () => {
-  assert.deepEqual(compiled.diagnostics.filter(d => d.category === ts.DiagnosticCategory.Error), [])
-  const ast = ts.createSourceFile("page.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
-  function inspect(node) {
-    if (ts.isPropertyAccessExpression(node) && node.expression.getText(ast) === "styles") {
-      assert.ok(classes[node.name.text], `Missing CSS class ${node.name.text}`)
+test("all landing TypeScript transpiles and referenced module classes exist", () => {
+  for (const [name, code] of [["page.tsx", source], ["landing-controls.tsx", controls], ["landing-behavior.ts", behavior]]) {
+    assert.deepEqual(compile(code, name).diagnostics.filter(d => d.category === ts.DiagnosticCategory.Error), [])
+    const ast = ts.createSourceFile(name, code, ts.ScriptTarget.Latest, true, name.endsWith("tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
+    function inspect(node) {
+      if (ts.isPropertyAccessExpression(node) && node.expression.getText(ast) === "styles") assert.ok(classes[node.name.text], `Missing class ${node.name.text}`)
+      ts.forEachChild(node, inspect)
     }
-    ts.forEachChild(node, inspect)
+    inspect(ast)
   }
-  inspect(ast)
-  assert.match(exportsObject.metadata.title, /Serotine/)
+  assert.match(pageExports.metadata.title, /Serotine/)
 })
 
-test("landing has one main and h1, and all in-page links have unique targets", () => {
-  assert.equal(find("h1").length, 1)
-  assert.equal(find("main").length, 1)
-  const ids = elements.filter(element => element.props.id).map(element => element.props.id)
+test("server document has semantic landmarks, unique IDs and valid anchor targets", () => {
+  assert.equal(find("h1").length, 1); assert.equal(find("main").length, 1)
+  const ids = elements.filter(e => e.props.id).map(e => e.props.id)
   assert.equal(new Set(ids).size, ids.length)
-  for (const anchor of find("a").filter(element => element.props.href.startsWith("#"))) {
-    assert.ok(ids.includes(anchor.props.href.slice(1)), `Broken anchor ${anchor.props.href}`)
+  for (const anchor of find("a").filter(e => e.props.href.startsWith("#"))) assert.ok(ids.includes(anchor.props.href.slice(1)))
+  assert.ok(find("a").some(e => e.text === "Skip to content" && e.props.href === "#main"))
+  assert.match(css, /\.skipLink:focus\s*\{/)
+})
+
+test("entry links retain real app routes, without account creation on the landing", () => {
+  assert.ok(find("a").filter(e => e.props.href === "/login").length >= 2)
+  for (const link of find("a")) {
+    assert.notEqual(link.props.href, "#")
+    if (link.props.href.startsWith("/")) assert.ok(["/", "/login"].includes(link.props.href))
+    if (link.props.target === "_blank") { assert.match(link.props.rel, /noopener/); assert.match(link.props.rel, /noreferrer/) }
   }
-  assert.ok(find("a").some(element => element.text === "Skip to content" && element.props.href === "#main"))
+  assert.doesNotMatch(source + controls + behavior, /createIdentity|useMessaging|messaging-provider|fetch\(|WebSocket|sendBeacon|localStorage|sessionStorage|indexedDB|crypto\./)
 })
 
-test("all application entry points retain /login and external links are safe", () => {
-  assert.equal(find("a").filter(element => element.props.href === "/login").length, 4)
-  for (const anchor of find("a")) {
-    assert.ok(anchor.props.href && anchor.props.href !== "#")
-    if (anchor.props.href.startsWith("/")) assert.ok(["/", "/login"].includes(anchor.props.href))
-    if (anchor.props.target === "_blank") {
-      assert.match(anchor.props.rel, /noopener/)
-      assert.match(anchor.props.rel, /noreferrer/)
-    }
+test("demo is opt-in, honestly labeled, bounded and disabled before enhancement", () => {
+  assert.ok(find("details").some(e => e.props["data-room"] !== undefined))
+  assert.ok(find("fieldset").some(e => e.props.disabled === true))
+  assert.ok(find("textarea").some(e => e.props.maxLength === logic.MAX_NOTE_LENGTH))
+  assert.ok(find("div").some(e => e.props.role === "log" && e.props["aria-live"] === "polite"))
+  assert.match(text, /Scripted replies, not a person or AI/)
+  assert.match(text, /Nothing is sent or saved/)
+  assert.match(text, /Closing this room clears it/)
+  assert.equal(logic.MAX_DEMO_NOTES, 8)
+  assert.match(behavior, /content\.textContent = text/)
+  assert.doesNotMatch(source + behavior, /dangerouslySetInnerHTML|\.innerHTML\s*=/)
+})
+
+test("scripted replies are deterministic and do not impersonate a person", () => {
+  for (let turn = 0; turn < 8; turn++) for (const note of ["Hello", "hello", "1976", "privacy", "Are you a real person?", "a thought", "<script>alert(1)</script>"]) {
+    const reply = logic.replyFor(note, turn)
+    assert.equal(reply, logic.replyFor(note, turn)); assert.equal(typeof reply, "string"); assert.ok(reply.length > 0 && reply.length < 280)
   }
+  assert.match(logic.replyFor("are you AI?", 0), /No person or AI/)
+  assert.match(logic.replyFor("privacy", 0), /isn’t an encryption test/)
+  assert.match(logic.replyFor("1976", 0), /margin note/)
 })
 
-test("cryptography history retains dated sources and attributed manifesto", () => {
-  const hrefs = find("a").map(element => element.props.href)
-  assert.ok(hrefs.includes("https://doi.org/10.1109/TIT.1976.1055638"))
-  assert.ok(hrefs.includes("https://www.internethalloffame.org/official-biography-philip-zimmermann/"))
-  assert.ok(hrefs.includes("https://www.activism.net/cypherpunk/manifesto.html"))
-  for (const year of ["1976", "1991", "1993"]) assert.ok(find("summary").some(element => element.text.includes(year)))
-  assert.match(text, /ERIC HUGHES/)
+test("scroll progress clamps and handles short and restored pages", () => {
+  assert.equal(logic.storyProgress(100, 1800, 900), 0)
+  assert.equal(logic.storyProgress(0, 1800, 900), 0)
+  assert.equal(logic.storyProgress(-450, 1800, 900), .5)
+  assert.equal(logic.storyProgress(-900, 1800, 900), 1)
+  assert.equal(logic.storyProgress(-1000, 100, 900), 1)
 })
 
-test("native reveal, history, and motion controls need no client component", () => {
-  assert.doesNotMatch(source, /["']use client["']|useEffect|useState|dangerouslySetInnerHTML/)
-  assert.equal(find("details").length, 7)
-  assert.equal(find("summary").length, 7)
-  const input = find("input").find(element => element.props.id === "pause-signal")
-  assert.equal(input.props.type, "checkbox")
-  assert.ok(find("label").some(element => element.props.htmlFor === "pause-signal"))
+test("motion is event-driven, cleaned up, and never hides essential content", () => {
+  assert.match(behavior, /requestAnimationFrame\(paint\)/)
+  assert.doesNotMatch(behavior, /setInterval|setTimeout/)
+  assert.match(behavior, /scrollEvents\?\.abort\(\)/)
+  assert.match(behavior, /observer\?\.disconnect\(\)/)
+  assert.match(behavior, /cancelAnimationFrame\(frame\)/)
   assert.match(css, /prefers-reduced-motion:\s*reduce/)
-  assert.match(css, /animation-play-state:\s*paused/)
   assert.match(css, /animation:\s*none\s*!important/)
-  assert.match(css, /motionInput:focus-visible\s*\+\s*\.motionControl/)
+  assert.match(css, /--reply:\s*1\s*!important/)
+  assert.match(css, /max-width:\s*640px/)
+  assert.match(behavior, /!event\.isComposing/)
+  assert.match(behavior, /event\.keyCode !== 229/)
 })
 
-test("security boundaries and illustrative-demo labels remain explicit", () => {
-  for (const phrase of [
-    "has not undergone an independent security audit",
-    "does not provide forward secrecy",
-    "routing addresses and timing",
-    "seven days",
-    "does not erase a recipient’s copy",
-    "No real message or key is created",
-    "FORM, NOT TELEMETRY",
-  ]) assert.ok(text.includes(phrase), `Missing limitation: ${phrase}`)
-  assert.equal(find("script").length, 0)
-  assert.equal(find("canvas").length, 0)
-  assert.equal(find("img").length, 0)
-  assert.doesNotMatch(source, /fetch\(|localStorage|sessionStorage|navigator\.|crypto\./)
-  assert.doesNotMatch(css, /@import|@font-face|https?:|:global/)
+test("both art directions are scoped and leave saved application palettes alone", () => {
+  assert.match(css, /--paper:\s*#f6f4ef/)
+  assert.match(css, /--paper:\s*#201e23/)
+  assert.match(css, /:global\(\.dark\) \.landing/)
+  assert.match(controls, /useTheme/)
+  assert.match(controls, /setTheme\(resolvedTheme/)
+  assert.doesNotMatch(controls + behavior, /selectPalette|resetPalette|setItem|removeItem/)
+  assert.doesNotMatch(css, /@import|@font-face|https?:|#ccff89|#a9ed68|#b5ff69|backdrop-filter/)
 })
 
-test("generated vector geometry is finite and all SVG artwork is decorative", () => {
-  for (const svg of find("svg")) assert.equal(svg.props["aria-hidden"], "true")
-  for (const element of elements) {
-    for (const attribute of ["cx", "cy", "r", "rx", "ry"]) {
-      if (element.props[attribute] === undefined) continue
-      // SVG gradients also accept percentage coordinates.
-      const value = Number(String(element.props[attribute]).replace(/%$/, ""))
-      assert.ok(Number.isFinite(value), `${element.tag}.${attribute} is not finite`)
-      if (["r", "rx", "ry"].includes(attribute)) assert.ok(value >= 0)
-    }
+test("important limitations remain discoverable rather than erased", () => {
+  for (const phrase of ["has not undergone an independent security audit", "does not provide forward secrecy", "routing addresses and timing", "seven days", "does not erase a recipient’s copy", "no real message or key is created"]) assert.ok(text.includes(phrase), phrase)
+  assert.ok(find("details").some(e => e.text.includes("A few things to know")))
+  assert.equal(find("canvas").length, 0); assert.equal(find("img").length, 0)
+  assert.doesNotMatch(source, /SignalSphere|ProtocolDiagram|THE CYPHERPUNKS|THE BREAKTHROUGH/)
+})
+
+test("cryptography reference is optional, attributed, and linked to the paper", () => {
+  assert.ok(find("details").some(e => e.text.includes("A margin note") && e.text.includes("Whitfield Diffie and Martin Hellman")))
+  assert.ok(find("a").some(e => e.props.href === "https://doi.org/10.1109/TIT.1976.1055638"))
+  assert.equal(find("h2").filter(e => /1976|crypto|history|lineage/i.test(e.text)).length, 0)
+})
+
+test("small text and input borders meet contrast targets in both themes", () => {
+  function luminance(hex) {
+    const channels = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4)
+    return channels.reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0)
+  }
+  const ratio = (a, b) => { const x = [luminance(a), luminance(b)].sort((a, b) => a - b); return (x[1] + .05) / (x[0] + .05) }
+  // Read the actual first light and dark token sets, not independent test colors.
+  const blocks = [css.match(/\.landing \{([\s\S]*?)\n\}/)[1], css.match(/:global\(\.dark\) \.landing \{([\s\S]*?)\n\}/)[1]]
+  for (const block of blocks) {
+    const token = name => block.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`))[1]
+    for (const background of ["paper", "surface", "note"]) assert.ok(ratio(token("muted-ink"), token(background)) >= 4.5, `Muted text on ${background}`)
+    assert.ok(ratio(token("input-line"), token("surface")) >= 3)
+    assert.ok(ratio(token("focus"), token("paper")) >= 3)
   }
 })

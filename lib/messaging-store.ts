@@ -1,3 +1,4 @@
+import { isCommunityId } from "./community-protocol"
 import { openDB, type DBSchema, type IDBPTransaction } from "idb"
 import { ID_PATTERN, PUBLIC_KEY_PATTERN } from "./protocol"
 import type { MessagingPreferences, MessagingSnapshot, StoredEvent } from "./messaging-types"
@@ -213,7 +214,12 @@ export async function deleteStoredMessage(owner: string, cid: string, messageId:
   changed(owner)
 }
 function stringArray(value: unknown): value is string[] { return Array.isArray(value) && value.every(x => typeof x === "string") }
-function validConversation(value: string) { return PUBLIC_KEY_PATTERN.test(value) || (value.startsWith("group:") && ID_PATTERN.test(value.slice(6))) }
+function validConversation(value: string) { return isCommunityId(value) || PUBLIC_KEY_PATTERN.test(value) || (value.startsWith("group:") && ID_PATTERN.test(value.slice(6))) }
+function validPreferenceKey(value: string) {
+  if (validConversation(value)) return true
+  const match = /^(community:04[0-9a-f]{128}:[^:]+):channel:([^:]+)$/.exec(value)
+  return !!match && isCommunityId(match[1]) && ID_PATTERN.test(match[2])
+}
 function validEventKey(key: string, cid: string, owner: string) {
   const match = key.match(/^(04[0-9a-f]{128}):(group:[^:]+|04[0-9a-f]{128}):([^:]+)$/)
   return !!match && ID_PATTERN.test(match[3]) && validConversation(match[2]) && (match[2].startsWith("group:") ? match[2] : match[1] === owner ? match[2] : match[1]) === cid
@@ -233,7 +239,7 @@ export async function validateMessagingSnapshot(value: unknown, owner: string): 
   if (snapshot.version !== 3 || snapshot.owner !== owner || !Array.isArray(snapshot.events) || snapshot.events.length > 250000) throw new Error("The messaging backup belongs to a different identity or is invalid.")
   const p = snapshot.preferences
   if (!p || !stringArray(p.accepted) || !p.accepted.every(validConversation) || !stringArray(p.blocked) || !p.blocked.every(x => PUBLIC_KEY_PATTERN.test(x)) || !p.notifications || !p.readAt || typeof p.readReceipts !== "boolean") throw new Error("The saved chat preferences are invalid.")
-  if (!Object.entries(p.notifications).every(([key, mode]) => validConversation(key) && ["all", "mentions", "muted"].includes(mode)) || !Object.entries(p.readAt).every(([key, time]) => validConversation(key) && Number.isSafeInteger(time) && time >= 0)) throw new Error("The saved chat preferences are invalid.")
+  if (!Object.entries(p.notifications).every(([key, mode]) => validPreferenceKey(key) && ["all", "mentions", "muted"].includes(mode)) || !Object.entries(p.readAt).every(([key, time]) => validPreferenceKey(key) && Number.isSafeInteger(time) && time >= 0)) throw new Error("The saved chat preferences are invalid.")
   if (p.archived !== undefined && (!stringArray(p.archived) || !p.archived.every(validConversation))) throw new Error("The saved archived chats are invalid.")
   if (p.deleted !== undefined && (!p.deleted || typeof p.deleted !== "object" || Array.isArray(p.deleted))) throw new Error("The saved deleted chats are invalid.")
   if (p.deletedMessages !== undefined && (!p.deletedMessages || typeof p.deletedMessages !== "object" || Array.isArray(p.deletedMessages))) throw new Error("The saved deleted messages are invalid.")

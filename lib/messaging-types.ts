@@ -1,3 +1,4 @@
+import type { CommunityEventData } from "./community-types"
 import type { Identity, Contact } from "./identity"
 
 export type NotificationMode = "all" | "mentions" | "muted"
@@ -30,8 +31,9 @@ export interface MessagingPreferences {
   accepted: string[]; blocked: string[]; notifications: Record<string, NotificationMode>; readAt: Record<string, number>; readReceipts: boolean
   archived: string[]; deleted: Record<string, ConversationDeletion>; deletedMessages: Record<string, MessageDeletion>
 }
-export type EventKind = "message" | "edit" | "pin" | "poll" | "vote" | "receipt" | "group" | "leave" | "attachment" | "attachment-chunk" | "private-settings" | "private-message" | "private-destroy"
+export type EventKind = "community" | "message" | "edit" | "pin" | "poll" | "vote" | "receipt" | "group" | "leave" | "attachment" | "attachment-chunk" | "private-settings" | "private-message" | "private-destroy"
 export interface EventPayload {
+  community?: CommunityEventData
   content?: string; replyTo?: string; mentions?: string[]; targetId?: string; pinned?: boolean
   question?: string; options?: string[]; option?: number; receipt?: "delivered" | "read"
   attachment?: AttachmentMeta; attachmentId?: string; index?: number; data?: string

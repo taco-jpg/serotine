@@ -22,7 +22,7 @@ export async function requestMessagingNotifications(): Promise<NotificationPermi
   return permission
 }
 
-export async function notifyIncoming(message: MessageRecord, conversation: ConversationRecord, owner: string) {
+export async function notifyIncoming(message: MessageRecord, conversation: ConversationRecord, owner: string, destination?: string) {
   if (typeof window === "undefined" || !("Notification" in window) || Notification.permission !== "granted"
     || document.visibilityState !== "hidden" || !shouldNotify(message, conversation, owner)) return
   const notify = async () => {
@@ -34,7 +34,7 @@ export async function notifyIncoming(message: MessageRecord, conversation: Conve
       if (Array.isArray(saved)) recent = saved.filter((item): item is string => typeof item === "string").slice(-100)
       if (recent.includes(id)) return
     } catch { /* A blocked preference store must not break receiving messages. */ }
-    const url = `/chat/${encodeURIComponent(conversation.id)}`
+    const url = destination ?? `/chat/${encodeURIComponent(conversation.id)}`
     const options: NotificationOptions = {
       body: "Open Serotine to read your new message.",
       tag: `serotine:${owner}:${id}`, data: { url },

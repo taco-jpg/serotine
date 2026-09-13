@@ -2,14 +2,14 @@ import type { ConversationDeletion, MessageDeletion, MessagingPreferences, Store
 
 export function storedConversationId(record: StoredEvent, owner: string) {
   const event = record.event
-  return event.conversationId.startsWith("group:") ? event.conversationId : event.author === owner ? event.conversationId : event.author
+  return (event.conversationId.startsWith("group:") || event.kind === "community") ? event.conversationId : event.author === owner ? event.conversationId : event.author
 }
 
 /** Deletion boundaries stay in place after a new message reopens the chat. */
 export function isDeletedConversationEvent(record: StoredEvent, owner: string, preferences: Pick<MessagingPreferences, "deleted">) {
   // Shared membership, private mode and destruction controls must still reach
   // peers and apply after one device deletes its local history.
-  if (["group", "leave", "private-settings", "private-destroy"].includes(record.event.kind)) return false
+  if (["group", "leave", "private-settings", "private-destroy", "community"].includes(record.event.kind)) return false
   const deletion = preferences.deleted?.[storedConversationId(record, owner)]
   const attachmentId = record.event.payload.attachmentId ?? record.event.payload.attachment?.id
   return !!deletion && (record.event.timestamp <= deletion.deletedAt || deletion.eventKeys.includes(record.key) || !!(attachmentId && deletion.attachmentIds?.includes(attachmentId)))
@@ -17,7 +17,7 @@ export function isDeletedConversationEvent(record: StoredEvent, owner: string, p
 
 /** Individual deletions match IDs, never a time boundary or later messages. */
 export function isDeletedMessageEvent(record: StoredEvent, owner: string, preferences: Pick<MessagingPreferences, "deletedMessages">) {
-  if (["group", "leave", "private-settings", "private-destroy"].includes(record.event.kind)) return false
+  if (["group", "leave", "private-settings", "private-destroy", "community"].includes(record.event.kind)) return false
   const deletion = preferences.deletedMessages?.[storedConversationId(record, owner)]
   if (!deletion) return false
   const event = record.event

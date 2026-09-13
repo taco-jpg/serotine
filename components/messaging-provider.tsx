@@ -4,8 +4,18 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { loadIdentity } from "@/lib/identity"
 import { MessagingEngine } from "@/lib/messaging"
 import { defaultMessagingPreferences } from "@/lib/messaging-store"
+import type { CommunityService } from "@/lib/community-service"
+import type { CommunityModel } from "@/lib/community-types"
 import type { MessagingContextValue } from "@/lib/messaging-types"
 
+type CommunityMethods = Pick<CommunityService, "createCommunity" | "createInvite" | "joinCommunity" | "updateCommunity" | "moderate" | "approveRequest" | "rejectRequest" | "leave" | "sendMessage" | "reportMessage" | "hideMessage" | "revokeInvites">
+export type CommunityContextValue = CommunityMethods & Pick<MessagingContextValue, "identity" | "contacts" | "ready" | "error" | "status" | "preferences" | "setNotificationMode" | "sync" | "retry"> & {
+  model: CommunityModel
+  deliveryIssues: Array<{ id: string; communityId: string; kind: string; error: string }>
+  markRead: (communityId: string, channelId: string) => Promise<void>
+}
+const CommunityContext = createContext<CommunityContextValue | null>(null)
+const emptyCommunityModel: CommunityModel = { communities: [], messages: [], requests: [], reports: [], commands: [], processedIds: [] }
 const MessagingContext = createContext<MessagingContextValue | null>(null)
 const unavailable = async (): Promise<never> => { throw new Error("Your identity is still loading. Try again in a moment.") }
 const empty = {
@@ -81,10 +91,36 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     setNotificationMode: engine.setNotificationMode, setReadReceipts: engine.setReadReceipts, requestNotifications: engine.requestNotifications, retry: engine.retry, sync: engine.sync,
     sendEvent: engine.sendEvent, getAttachmentChunks: engine.getAttachmentChunks, refresh: engine.refresh,
   } : { ...empty, ready, error }, [engine, ready, error, revision])
-  return <MessagingContext.Provider value={value}>{children}</MessagingContext.Provider>
+  const communityValue = useMemo<CommunityContextValue>(() => ({
+    identity: value.identity, contacts: value.contacts, ready, error: value.error, status: value.status, preferences: value.preferences,
+    model: engine?.communities.model ?? emptyCommunityModel,
+    deliveryIssues: engine?.records.filter(record => record.local && record.event.kind === "community" && record.error && record.event.recipients.some(peer => !record.delivered.includes(peer)))
+      .map(record => ({ id: record.event.id, communityId: record.event.conversationId, kind: record.event.payload.community!.type, error: record.error! })) ?? [],
+    createCommunity: engine?.communities.createCommunity ?? unavailable,
+    createInvite: engine?.communities.createInvite ?? unavailable,
+    joinCommunity: engine?.communities.joinCommunity ?? unavailable,
+    updateCommunity: engine?.communities.updateCommunity ?? unavailable,
+    moderate: engine?.communities.moderate ?? unavailable,
+    approveRequest: engine?.communities.approveRequest ?? unavailable,
+    rejectRequest: engine?.communities.rejectRequest ?? unavailable,
+    leave: engine?.communities.leave ?? unavailable,
+    sendMessage: engine?.communities.sendMessage ?? unavailable,
+    reportMessage: engine?.communities.reportMessage ?? unavailable,
+    hideMessage: engine?.communities.hideMessage ?? unavailable,
+    revokeInvites: engine?.communities.revokeInvites ?? unavailable,
+    markRead: engine?.markCommunityRead ?? unavailable,
+    setNotificationMode: value.setNotificationMode, sync: value.sync, retry: value.retry,
+  }), [engine, ready, value])
+  return <MessagingContext.Provider value={value}><CommunityContext.Provider value={communityValue}>{children}</CommunityContext.Provider></MessagingContext.Provider>
 }
 export function useMessaging(): MessagingContextValue {
   const value = useContext(MessagingContext)
   if (!value) throw new Error("useMessaging must be used within MessagingProvider.")
+  return value
+}
+
+export function useCommunities(): CommunityContextValue {
+  const value = useContext(CommunityContext)
+  if (!value) throw new Error("useCommunities must be used within MessagingProvider.")
   return value
 }

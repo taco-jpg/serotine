@@ -1,3 +1,5 @@
+import { CommunityService } from "./community-service"
+import { communityOutboxError, communityChannelKey, isCommunityId, validateCommunityEvent } from "./community-protocol"
 import { arrayBufferToHex, decryptFromPeer, encryptForPeer, importKey, verifySignature } from "./crypto"
 import { loadContacts, shortAddress, validateAddress, type Contact, type Identity } from "./identity"
 import { ID_PATTERN, isEnvelope, MAX_MESSAGE_LENGTH, PUBLIC_KEY_PATTERN } from "./protocol"
@@ -15,7 +17,7 @@ import type { AttachmentMeta, ConversationRecord, EventKind, EventPayload, Group
 const MAX_MEMBERS = 20
 const VISIBLE_KINDS = new Set(["message", "poll", "attachment", "private-message"])
 const PRIVATE_KINDS = new Set(["private-settings", "private-message", "private-destroy"])
-const EVENT_KINDS = new Set(["message", "edit", "pin", "poll", "vote", "receipt", "group", "leave", "attachment", "attachment-chunk", ...PRIVATE_KINDS])
+const EVENT_KINDS = new Set(["community", "message", "edit", "pin", "poll", "vote", "receipt", "group", "leave", "attachment", "attachment-chunk", ...PRIVATE_KINDS])
 const PRIVATE_DURATIONS = new Set([0, 300, 3600, 86400])
 const validGroupId = (value: string) => typeof value === "string" && value.startsWith("group:") && ID_PATTERN.test(value.slice(6))
 const sameSet = (left: string[], right: string[]) => left.length === right.length && left.every(x => right.includes(x))
@@ -48,6 +50,7 @@ function validPayload(kind: EventKind, p: EventPayload) {
   if (p.replyTo !== undefined && !validId(p.replyTo)) return false
   if (p.mentions !== undefined && (!Array.isArray(p.mentions) || p.mentions.length > MAX_MEMBERS || !p.mentions.every(x => PUBLIC_KEY_PATTERN.test(x)))) return false
   switch (kind) {
+    case "community": return Object.keys(p).length === 1 && !!p.community
     case "message": return validText(p.content)
     case "private-message": return validText(p.content) && Number.isSafeInteger(p.expiresAt) && (p.secret === undefined || typeof p.secret === "boolean") && Object.keys(p).every(key => ["content", "expiresAt", "secret"].includes(key))
     case "private-settings": return PRIVATE_DURATIONS.has(p.ttlSeconds!) && Object.keys(p).length === 1
@@ -74,6 +77,7 @@ export async function validateMessagingEvent(value: unknown, transport?: { sende
     const e = value as MessagingEvent
     if (!e || e.version !== 3 || !validId(e.id) || !PUBLIC_KEY_PATTERN.test(e.author) || !Array.isArray(e.recipients) || e.recipients.length < 1 || e.recipients.length > MAX_MEMBERS * 2 || !e.recipients.every(x => typeof x === "string" && PUBLIC_KEY_PATTERN.test(x)) || new Set(e.recipients).size !== e.recipients.length || !validTime(e.timestamp) || !EVENT_KINDS.has(e.kind) || !validPayload(e.kind, e.payload) || !/^[0-9a-f]{128}$/.test(e.signature) || JSON.stringify(e).length > 60000) return false
     if (transport && (e.author !== transport.senderPubKey || e.id !== transport.id || !e.recipients.includes(transport.recipientPubKey))) return false
+    if (e.kind === "community") return !e.group && await validateCommunityEvent(e) && await verifySignature(eventText(e), e.signature, e.author)
     // New event kinds make old clients reject temporary content instead of
     // silently retaining it as an ordinary message.
     if (PRIVATE_KINDS.has(e.kind) && (e.group || !PUBLIC_KEY_PATTERN.test(e.conversationId) || e.author === e.conversationId)) return false
@@ -92,7 +96,7 @@ export async function validateMessagingEvent(value: unknown, transport?: { sende
   } catch { return false }
 }
 export function conversationForEvent(event: MessagingEvent, owner: string): string {
-  return validGroupId(event.conversationId) ? event.conversationId : event.author === owner ? event.conversationId : event.author
+  return validGroupId(event.conversationId) || isCommunityId(event.conversationId) ? event.conversationId : event.author === owner ? event.conversationId : event.author
 }
 function outboxStatus(record: StoredEvent) {
   if (!record.local) return "received" as const
@@ -125,6 +129,7 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
   const ordered = [...records, ...checkpoints].sort((a, b) => a.receivedAt - b.receivedAt || (a.sequence && b.sequence ? a.sequence - b.sequence : 0) || a.event.timestamp - b.event.timestamp || a.key.localeCompare(b.key))
   for (const record of ordered) {
     const e = record.event, cid = conversationForEvent(e, owner)
+    if (e.kind === "community") continue
     if (isDeletedStoredEvent(record, owner, preferences)) continue
     if (e.author !== owner && preferences.blocked.includes(e.author)) continue
     if (PRIVATE_KINDS.has(e.kind) && (record.legacy || e.group || e.author === e.conversationId || (e.author !== owner && (e.conversationId !== owner || !e.recipients.includes(owner))))) continue
@@ -229,7 +234,28 @@ export class MessagingEngine {
       void this.refresh().catch(error => this.fail(error))
     }, 40)
   }
-  constructor(identity: Identity) { this.identity = identity }
+  readonly communities: CommunityService
+  constructor(identity: Identity) {
+    this.identity = identity
+    this.communities = new CommunityService({
+      identity, records: () => this.records, preferences: () => this.preferences,
+      refresh: () => this.refresh(), assertActive: () => this.assertActive(),
+      sign: event => signMessagingEvent(event, identity),
+      queue: async event => {
+        this.assertActive()
+        if (!this.key) throw new Error("Your identity is still loading.")
+        if (!await validateMessagingEvent(event)) throw new Error("The community event is invalid.")
+        await this.queue(event)
+      },
+    })
+  }
+  markCommunityRead = async (cid: string, channelId: string) => {
+    this.assertActive()
+    const key = communityChannelKey(cid, channelId)
+    const latest = Math.max(0, ...this.communities.model.messages.filter(message => message.conversationId === cid && message.channelId === channelId).map(message => message.timestamp))
+    if (latest <= (this.preferences.readAt[key] ?? 0)) return
+    await this.updatePreferences(p => ({ ...p, readAt: { ...p.readAt, [key]: Math.max(latest, p.readAt[key] ?? 0) } }))
+  }
   subscribe = (listener: () => void) => { this.assertActive(); this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private assertActive() { if (this.disposed) throw new Error("Your identity changed. Reopen this conversation before continuing.") }
   private emit() { if (!this.disposed) this.listeners.forEach(listener => listener()) }
@@ -353,6 +379,7 @@ export class MessagingEngine {
     if (validGroupId(cid)) { group = this.groupFor(cid); recipients = group.members.filter(x => x !== owner); if (!recipients.length) recipients = [owner] }
     else { cid = await validateAddress(cid); if (this.preferences.blocked.includes(cid)) throw new Error("Unblock this contact before sending a message."); recipients = [cid] }
     this.assertActive()
+    if (kind === "community") throw new Error("Use community management to send community events.")
     if (kind === "group") throw new Error("Use group management to update a group.")
     if (PRIVATE_KINDS.has(kind) && (group || cid === owner)) throw new Error("Private messages are available only in direct conversations with another person.")
     const targetId = payload.replyTo ?? payload.targetId
@@ -532,9 +559,14 @@ export class MessagingEngine {
     try {
       const run = async () => {
         this.assertActive()
+        // Community sends must see retained membership updates before fanout.
+        // Direct/group delivery retains its established retry behavior.
+        const hasCommunities = (await getStoredEvents(this.identity.publicKey)).some(record => record.event.kind === "community")
+        if (hasCommunities) { await this.readFeed(); await this.communities.reconcile() }
         await this.flushOutbox()
         await this.refresh()
         await this.readFeed()
+        if (this.records.some(record => record.event.kind === "community")) { await this.communities.reconcile(); await this.flushOutbox() }
         await this.readLegacyInbox()
         await this.refresh()
         // Successful inbox reads establish connectivity. An older failed send
@@ -565,6 +597,16 @@ export class MessagingEngine {
           if (this.disposed || Date.now() < this.outboxRetryAt) return
           if (!canSendTo(record, recipientPubKey)) continue
           try {
+            if (record.event.kind === "community") {
+              await this.refresh()
+              const reason = communityOutboxError(record.event, this.communities.model, owner)
+              if (reason) {
+                record.error = reason
+                record.failedRecipients = record.event.recipients.filter(peer => !record.delivered.includes(peer))
+                await saveStoredEvent(owner, record)
+                return
+              }
+            }
             const encryptedData = await encryptForPeer(JSON.stringify(record.event), this.key!, recipientPubKey)
             this.assertActive()
             const data = { id: record.event.id, recipientPubKey, encryptedData }
@@ -574,6 +616,16 @@ export class MessagingEngine {
             if (record.event.kind === "private-message") {
               const current = await getStoredEvents(owner)
               if (!current.some(row => row.key === record.key) || isPrivateEventExpired(record, owner, privateDestroyCutoffs(current, owner))) return
+            }
+            if (record.event.kind === "community") {
+              await this.refresh()
+              const reason = communityOutboxError(record.event, this.communities.model, owner)
+              if (reason) {
+                record.error = reason
+                record.failedRecipients = record.event.recipients.filter(peer => !record.delivered.includes(peer))
+                await saveStoredEvent(owner, record)
+                return
+              }
             }
             const result = await storeEncryptedEvent(data, proof)
             this.assertActive()
@@ -628,7 +680,7 @@ export class MessagingEngine {
         const record: StoredEvent = { key, event, local: event.author === owner, delivered: event.author === owner ? [packet.recipientPubKey] : [], receivedAt: packet.createdAt, sequence: packet.sequence, error: existing?.error }
         // Persist failures must abort the page before its cursor can advance.
         await saveStoredEvent(owner, record)
-        if (!existing && event.author !== owner && VISIBLE_KINDS.has(event.kind) && packet.createdAt >= this.initializedAt) notifications.push(event.id)
+        if (!existing && event.author !== owner && (VISIBLE_KINDS.has(event.kind) || (event.kind === "community" && event.payload.community?.type === "message")) && packet.createdAt >= this.initializedAt) notifications.push(event.id)
       }
       await this.refresh()
       this.assertActive()
@@ -636,6 +688,17 @@ export class MessagingEngine {
         const message = this.model.messages.find(m => m.id === id)
         const conversation = message && this.model.conversations.find(c => c.id === message.conversationId)
         if (message && conversation && !conversation.archived) void notifyIncoming(message, conversation, owner)
+        else {
+          const model = this.communities.model
+          const communityMessage = model.messages.find(row => row.id === id && !row.hidden)
+          const community = communityMessage && model.communities.find(row => row.id === communityMessage.conversationId && row.joined)
+          if (communityMessage && community) {
+            const channel = community.channels.find(row => row.id === communityMessage.channelId)
+            const notificationMode = this.preferences.notifications[communityChannelKey(community.id, communityMessage.channelId)] ?? community.notificationMode
+            void notifyIncoming(communityMessage, { id: community.id, kind: "group", name: `${community.name} / ${channel?.name ?? "channel"}`, members: community.members, unreadCount: community.unreadCount, updatedAt: community.updatedAt, notificationMode, blocked: false, request: false, archived: false }, owner,
+              `/chat/communities#id=${encodeURIComponent(community.id)}&channel=${communityMessage.channelId}`)
+          }
+        }
       }
       await this.reconcileDepartures()
       await this.sendDeliveryReceipts()

@@ -95,7 +95,7 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
     }
     const communityInvite = new URLSearchParams(window.location.hash.slice(1)).get("community")
     if (communityInvite) {
-      try { sessionStorage.setItem("serotine_pending_community_invite", communityInvite.slice(0, 8192)) } catch { /* The invite can be pasted after signing in. */ }
+      try { sessionStorage.setItem("serotine_pending_community_invite", communityInvite.slice(0, 48_000)) } catch { /* The invite can be pasted after signing in. */ }
     }
     router.replace("/login")
   }, [ready, identity, router])

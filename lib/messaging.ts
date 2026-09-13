@@ -6,7 +6,7 @@ import { ID_PATTERN, isEnvelope, MAX_MESSAGE_LENGTH, PUBLIC_KEY_PATTERN } from "
 import { createRequestProof } from "./request-auth"
 import { deleteMessage, getEventFeed, getLegacyInbox, storeEncryptedEvent } from "./relay-client"
 import { deleteConversationHistoryFromStorage, deleteMessageHistoryFromStorage, exportAllMessagesFromStorage, migrateLegacyHistory } from "./storage"
-import { defaultMessagingPreferences, deleteStoredConversation, deleteStoredMessage, eventStorageKey, getMessagingPreferences, getStoredEvents, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor } from "./messaging-store"
+import { defaultMessagingPreferences, deleteStoredConversation, deleteStoredMessage, eventStorageKey, getMessagingPreferences, getStoredEvents, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor, saveCommunityUpgrade } from "./messaging-store"
 import { isDeletedStoredEvent, isDeletedLegacyMessage } from "./messaging-history"
 import { ATTACHMENT_CHUNK_BYTES, MAX_ATTACHMENT_CHUNKS, isAttachmentMeta } from "./attachments"
 import { legacyMessageEvents, legacyStoredMessageId, legacyVisibleMessageIds } from "./legacy-messaging"
@@ -246,6 +246,17 @@ export class MessagingEngine {
         if (!this.key) throw new Error("Your identity is still loading.")
         if (!await validateMessagingEvent(event)) throw new Error("The community event is invalid.")
         await this.queue(event)
+      },
+      queueBatch: async events => {
+        this.assertActive()
+        if (!this.key) throw new Error("Your identity is still loading.")
+        const receivedAt = Date.now()
+        await saveCommunityUpgrade(identity.publicKey, events.map((event, index) => ({
+          key: eventStorageKey(event), event, local: true, delivered: [], receivedAt: receivedAt + index,
+        })))
+        this.assertActive()
+        try { await this.refresh() } catch (error) { this.fail(error) }
+        void this.sync()
       },
     })
   }

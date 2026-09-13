@@ -127,6 +127,51 @@ export async function getMessagingPreferences(owner: string): Promise<MessagingP
   const db = await database(owner)
   try { return withDefaults(await db.get("metadata", "preferences") as Partial<MessagingPreferences> | undefined) } finally { db.close() }
 }
+
+/** Upgrade both client generations in one durable transaction. Never retire the
+ * old membership unless the replacement membership has also been saved. */
+export async function saveCommunityUpgrade(owner: string, records: StoredEvent[]): Promise<void> {
+  if (records.length !== 2) throw new Error("The community upgrade is incomplete.")
+  const { validateMessagingEvent } = await import("./messaging")
+  const { buildCommunityModel } = await import("./community-protocol")
+  for (const record of records) {
+    if (!record.local || record.legacy || record.event.author !== owner || record.key !== eventStorageKey(record.event)
+      || record.event.kind !== "community" || record.event.payload.community?.type !== "state"
+      || !await validateMessagingEvent(record.event)) throw new Error("The community upgrade is invalid.")
+  }
+  const first = records[0].event.payload.community!, second = records[1].event.payload.community!
+  if (first.type !== "state" || second.type !== "state") throw new Error("The community upgrade is invalid.")
+  const fence = first.state, replacement = second.state
+  if (fence.version !== undefined || replacement.version !== 2 || fence.id !== replacement.id || fence.owner !== owner
+    || fence.members.length !== 1 || fence.members[0] !== owner || !fence.joiningPaused || fence.moderators.length)
+    throw new Error("The community upgrade is invalid.")
+  const db = await database(owner)
+  try {
+    const tx = db.transaction(["events", "metadata"], "readwrite")
+    try {
+      const existing = await tx.objectStore("events").getAll()
+      const preferences = withDefaults(await tx.objectStore("metadata").get("preferences") as Partial<MessagingPreferences> | undefined)
+      const model = buildCommunityModel(existing, owner, preferences)
+      const prior = model.communities.find(item => item.id === fence.id)
+      if (!prior || prior.version === 2 || !prior.joined || prior.owner !== owner || fence.epoch !== prior.epoch + 1
+        || replacement.epoch !== prior.epoch + 2) throw new Error("The community changed while upgrading. Refresh and try again.")
+      if (replacement.members.some(address => prior.members.includes(address) && !prior.effectiveMembers.includes(address))
+        || (replacement.owner !== owner && (!prior.effectiveMembers.includes(replacement.owner)
+          || model.requests.some(request => request.communityId === prior.id && request.status === "pending"))))
+        throw new Error("Membership or join requests changed while upgrading. Review the community and try again.")
+      for (const record of records) {
+        if (await tx.objectStore("events").get(record.key)) throw new Error("Conflicting community upgrade identifier.")
+        await tx.objectStore("events").put(record)
+      }
+      await tx.done
+    } catch (error) {
+      try { tx.abort() } catch { /* The transaction may already be closed. */ }
+      await tx.done.catch(() => {})
+      throw error
+    }
+  } finally { db.close() }
+  changed(owner)
+}
 export async function saveMessagingPreferences(owner: string, preferences: MessagingPreferences) {
   const db = await database(owner)
   try {

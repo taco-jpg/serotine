@@ -8,6 +8,7 @@ const packets = [], notices = []
 const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true, archived: [], deleted: {}, deletedMessages: {} })
 const rows = owner => { if (!stores.has(owner)) stores.set(owner, new Map()); return stores.get(owner) }
 const store = {
+  createStoredEventReader: owner => ({ read: () => store.getStoredEvents(owner), dispose() {} }),
   defaultMessagingPreferences: defaults,
   eventStorageKey: event => `${event.author}:${event.conversationId}:${event.id}`,
   getMessagingPreferences: async () => defaults(),

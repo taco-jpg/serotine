@@ -13,6 +13,7 @@ const retiredIdentity = 'This identity has been permanently retired. Use your ne
 const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true, archived: [], deleted: {} })
 const recordsFor = owner => { if (!stores.has(owner)) stores.set(owner, new Map()); return stores.get(owner) }
 const store = {
+  createStoredEventReader: owner => ({ read: () => store.getStoredEvents(owner), dispose() {} }),
   defaultMessagingPreferences: defaults,
   eventStorageKey: e => `${e.author}:${e.conversationId}:${e.id}`,
   getStoredEvents: async owner => { historyReads++; return structuredClone([...recordsFor(owner).values()]) },
@@ -99,16 +100,71 @@ function deferred() {
   return { promise, resolve }
 }
 
-test('an idle sync reads local history only for refresh and outbox, including after reload', async () => {
+test('an idle sync reads local history only once, including after reload', async () => {
   const sender = await engine(alice)
   historyReads = 0
   await sender.synchronize()
-  assert.equal(historyReads, 2, 'empty feed and legacy inbox must not clone history again')
+  assert.equal(historyReads, 1, 'the outbox uses the snapshot already refreshed for this pass')
   assert.equal(sender.instance.status, 'online')
   const reloaded = await engine(alice)
   historyReads = 0
   await reloaded.synchronize()
-  assert.equal(historyReads, 2)
+  assert.equal(historyReads, 1)
+})
+
+test('unchanged durable snapshots keep conversation references and do not notify subscribers', async t => {
+  const sender = await engine(alice)
+  await sender.instance.sendText(bob.publicKey, 'Keep this conversation stable')
+  const retained = sender.instance.records
+  t.mock.method(store, 'getStoredEvents', async () => retained)
+  const prior = sender.instance.model, communityModel = sender.instance.communities.model
+  let notifications = 0
+  const unsubscribe = sender.instance.subscribe(() => { notifications++ })
+  await sender.instance.refresh()
+  await sender.instance.refresh()
+  assert.equal(sender.instance.model, prior)
+  assert.equal(sender.instance.communities.model, communityModel)
+  assert.equal(notifications, 0)
+  await sender.instance.setNotificationMode(bob.publicKey, 'muted')
+  assert.equal(notifications, 1, 'a preference change still updates the affected view')
+  assert.equal(sender.instance.model.conversations.find(row => row.id === bob.publicKey).notificationMode, 'muted')
+  unsubscribe()
+})
+
+test('delivery bookkeeping never mutates an immutable storage snapshot', async t => {
+  const sender = await engine(alice)
+  const id = await sender.instance.sendText(bob.publicKey, 'A durable immutable message')
+  const original = store.getStoredEvents
+  t.mock.method(store, 'getStoredEvents', async owner => Object.freeze((await original(owner)).map(record => Object.freeze({
+    ...record, event: Object.freeze(record.event), delivered: Object.freeze(record.delivered),
+  }))))
+  await sender.synchronize()
+  assert.equal(sender.instance.error, null)
+  assert.equal(attempts.filter(attempt => attempt.id === id).length, 1)
+  assert.equal(sender.instance.model.messages.find(message => message.id === id).delivery, 'sent')
+})
+
+test('a text queued during a file transfer joins the next small outbox batch', async t => {
+  const files = load(path.join(root, 'lib/attachments.ts'))
+  const sender = await engine(alice)
+  await files.sendAttachment(sender.instance.sendEvent, bob.publicKey,
+    new File([new Uint8Array(20 * files.ATTACHMENT_CHUNK_BYTES)], 'upload-in-progress.bin'))
+  const entered = deferred(), release = deferred()
+  const publish = relay.storeEncryptedEvent
+  let first = true
+  t.mock.method(relay, 'storeEncryptedEvent', async (...args) => {
+    if (first) { first = false; entered.resolve(); await release.promise }
+    return publish(...args)
+  })
+  const synchronize = sender.synchronize()
+  await entered.promise
+  const text = await sender.instance.sendText(bob.publicKey, 'Do not wait for the whole upload')
+  release.resolve()
+  await synchronize
+  const position = attempts.findIndex(attempt => attempt.id === text)
+  assert.ok(position >= 4 && position < 8, `expected the second four-event batch, got position ${position}`)
+  assert.equal(attempts.filter(attempt => attempt.id === text).length, 1)
+  assert.equal(attempts.length, 22, 'every file piece and both visible messages still arrive')
 })
 
 test('a successful feed clears connecting before the legacy inbox finishes', async t => {

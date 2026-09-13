@@ -13,6 +13,7 @@ let rejectRecipient, failNextUpgrade = false
 const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true, archived: [], deleted: {}, deletedMessages: {} })
 const recordsFor = owner => { if (!stores.has(owner)) stores.set(owner, new Map()); return stores.get(owner) }
 const store = {
+  createStoredEventReader: owner => ({ read: () => store.getStoredEvents(owner), dispose() {} }),
   defaultMessagingPreferences: defaults,
   eventStorageKey: event => `${event.author}:${event.conversationId}:${event.id}`,
   getStoredEvents: async owner => structuredClone([...recordsFor(owner).values()]),

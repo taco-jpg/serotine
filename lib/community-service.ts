@@ -1,7 +1,7 @@
 import type { Identity } from "./identity"
 import type { EventKind, EventPayload, MessagingEvent, MessagingPreferences, StoredEvent } from "./messaging-types"
 import { ATTACHMENT_CHUNK_BYTES } from "./attachments"
-import type { CommunityAdmission, CommunityChannel, CommunityCommand, CommunityEventData, CommunityJoinRequest, CommunityModel, CommunityRecord, CommunityState } from "./community-types"
+import type { CommunityAdmission, CommunityChannel, CommunityCommand, CommunityEventData, CommunityJoinRequest, CommunityMessage, CommunityModel, CommunityRecord, CommunityState } from "./community-types"
 import { buildCommunityInviteUrl, buildCommunityModel, canPostToCommunityChannel, communityStateReference, isCommunityAdmin, isCommunityCoOwner, isCommunityId, isCommunityModerator, parseCommunityInvite, signCommunityInvite, signCommunityState, signCommunityTransfer, validateCommunityEvent, validateCommunityInvite, validateCommunityState } from "./community-protocol"
 
 export interface CommunityServiceHost {
@@ -19,6 +19,12 @@ export interface CommunityChanges {
   name?: string; description?: string; admission?: CommunityAdmission; joiningPaused?: boolean; channels?: CommunityChannel[]
 }
 export type CommunityModerationAction = "remove" | "ban" | "unban" | "promote" | "demote"
+type CommunityAttachment = Extract<CommunityEventData, { type: "attachment" }>
+type AttachmentPieces = Array<{ index: number; data: string }>
+const NO_ATTACHMENT_PIECES: AttachmentPieces = []
+const messageKey = (id: string, channelId: string, messageId: string) => JSON.stringify([id, channelId, messageId])
+const attachmentKey = (id: string, channelId: string, sender: string, attachmentId: string, epoch: number, stateRef?: string) =>
+  JSON.stringify([id, channelId, sender, attachmentId, epoch, stateRef])
 
 // The browser lock coordinates tabs; the promise chain also serializes calls in
 // runtimes without Web Locks. Only the owner publishes membership snapshots.
@@ -42,6 +48,9 @@ function snapshot(record: CommunityRecord): CommunityState {
 
 export class CommunityService {
   private cachedModel?: { records: StoredEvent[]; preferences: MessagingPreferences; value: CommunityModel }
+  private cachedIndex?: { model: CommunityModel; messages: Map<string, CommunityMessage>; originals: Map<string, MessagingEvent>; chunks: Map<string, MessagingEvent[]> }
+  private validatedPieces = new WeakMap<MessagingEvent, { encoded: string; expected: number; valid: boolean }>()
+  private attachmentResults = new WeakMap<CommunityAttachment, { events: MessagingEvent[]; value: AttachmentPieces }>()
   constructor(private readonly host: CommunityServiceHost) {}
   get model() {
     const records = this.host.records(), preferences = this.host.preferences()
@@ -50,6 +59,29 @@ export class CommunityService {
     if (this.cachedModel?.records !== records || this.cachedModel.preferences !== preferences)
       this.cachedModel = { records, preferences, value: buildCommunityModel(records, this.address, preferences) }
     return this.cachedModel.value
+  }
+  private get index() {
+    const model = this.model
+    if (this.cachedIndex?.model === model) return this.cachedIndex
+    const messages = new Map<string, CommunityMessage>(), originals = new Map<string, MessagingEvent>(), chunks = new Map<string, MessagingEvent[]>()
+    const accepted = new Set(model.acceptedKeys)
+    for (const message of model.messages) if (!message.hidden) messages.set(messageKey(message.conversationId, message.channelId, message.id), message)
+    // Rebuild only the small envelope index when history or visibility changes.
+    // The immutable event objects keep their validated bytes across receipt,
+    // text-message and notification updates; no large file is decoded here.
+    for (const { event, key } of this.host.records()) {
+      const data = event.payload.community
+      if (event.kind !== "community" || !accepted.has(key) || !data || !("channelId" in data)) continue
+      if (data.type === "attachment-chunk") {
+        const key = attachmentKey(event.conversationId, data.channelId, event.author, data.attachmentId, data.epoch, data.stateRef)
+        const pieces = chunks.get(key) ?? []
+        pieces.push(event); chunks.set(key, pieces)
+      } else if (data.type === "message" || data.type === "attachment" || data.type === "poll") {
+        const key = messageKey(event.conversationId, data.channelId, event.id)
+        if (messages.get(key)?.senderPubKey === event.author) originals.set(key, event)
+      }
+    }
+    return this.cachedIndex = { model, messages, originals, chunks }
   }
   private get address() { return this.host.identity.publicKey }
   private assertActive() { this.host.assertActive?.() }
@@ -375,9 +407,10 @@ export class CommunityService {
     await this.publish(id, { type: "leave", epoch: community.epoch }, this.recipients(community.members), community)
   })
   private actionTarget(id: string, channelId: string, kind: EventKind, payload: EventPayload) {
-    const target = this.model.messages.find(message => message.id === payload.targetId && message.conversationId === id && message.channelId === channelId && !message.hidden)
+    const key = messageKey(id, channelId, payload.targetId ?? ""), index = this.index
+    const target = index.messages.get(key)
     if (!target) throw new Error("This message is no longer available in this channel.")
-    const original = this.host.records().find(record => record.event.id === target.id && record.event.conversationId === id && record.event.author === target.senderPubKey)?.event
+    const original = index.originals.get(key)
     if (!original || (original.author !== this.address && !original.recipients.includes(this.address))) throw new Error("This message is not part of your community history.")
     if (kind === "edit" && (target.senderPubKey !== this.address || target.attachment || target.poll)) throw new Error("You can edit your own ordinary text messages.")
     if (kind === "vote" && (!target.poll || !Number.isInteger(payload.option) || payload.option! < 0 || payload.option! >= target.poll.options.length)) throw new Error("Choose an available poll option.")
@@ -408,29 +441,39 @@ export class CommunityService {
   vote = async (id: string, channelId: string, messageId: string, option: number): Promise<void> => { await this.sendEvent(id, channelId, "vote", { targetId: messageId, option }) }
   receipt = async (id: string, channelId: string, messageId: string, receipt: "delivered" | "read"): Promise<void> => { await this.sendEvent(id, channelId, "receipt", { targetId: messageId, receipt }) }
   getAttachmentChunks = (id: string, channelId: string, messageId: string): Array<{ index: number; data: string }> => {
-    const model = this.model
-    const message = model.messages.find(item => item.id === messageId && item.conversationId === id && item.channelId === channelId && !item.hidden)
-    if (!message?.attachment) return []
-    const accepted = new Set(model.acceptedKeys)
-    const records = this.host.records()
-    const metadata = records.find(record => record.event.id === messageId && record.event.author === message.senderPubKey && record.event.conversationId === id && accepted.has(record.key))?.event.payload.community
-    if (metadata?.type !== "attachment") return []
+    const key = messageKey(id, channelId, messageId), index = this.index
+    const message = index.messages.get(key)
+    if (!message?.attachment) return NO_ATTACHMENT_PIECES
+    const metadata = index.originals.get(key)?.payload.community
+    if (metadata?.type !== "attachment") return NO_ATTACHMENT_PIECES
     return this.attachmentChunks(id, channelId, message.senderPubKey, metadata)
   }
-  private attachmentChunks(id: string, channelId: string, sender: string, metadata: Extract<CommunityEventData, { type: "attachment" }>): Array<{ index: number; data: string }> {
-    const accepted = new Set(this.model.acceptedKeys)
+  private attachmentChunks(id: string, channelId: string, sender: string, metadata: CommunityAttachment): AttachmentPieces {
+    const events = this.index.chunks.get(attachmentKey(id, channelId, sender, metadata.attachment.id, metadata.epoch, metadata.stateRef)) ?? []
+    const prior = this.attachmentResults.get(metadata)
+    if (prior && prior.events.length === events.length && prior.events.every((event, index) => event === events[index])) return prior.value
     const chunks = new Map<number, string>()
-    for (const { event, key } of this.host.records()) {
-      const data = event.payload.community
-      if (event.kind !== "community" || !accepted.has(key) || event.author !== sender || event.conversationId !== id || data?.type !== "attachment-chunk"
-        || data.channelId !== channelId || data.attachmentId !== metadata.attachment.id || data.epoch !== metadata.epoch || data.stateRef !== metadata.stateRef || data.index >= metadata.attachment.chunks) continue
+    let conflict = false
+    for (const event of events) {
+      const data = event.payload.community!
+      if (data.type !== "attachment-chunk" || data.index >= metadata.attachment.chunks) continue
       const expected = Math.min(ATTACHMENT_CHUNK_BYTES, metadata.attachment.size - data.index * ATTACHMENT_CHUNK_BYTES)
-      const binary = atob(data.data)
-      if (binary.length !== expected || btoa(binary) !== data.data) continue
-      if (chunks.has(data.index) && chunks.get(data.index) !== data.data) return []
+      let checked = this.validatedPieces.get(event)
+      if (!checked || checked.encoded !== data.data || checked.expected !== expected) {
+        let valid: boolean
+        try { const binary = atob(data.data); valid = binary.length === expected && btoa(binary) === data.data } catch { valid = false }
+        checked = { encoded: data.data, expected, valid }; this.validatedPieces.set(event, checked)
+      }
+      if (!checked.valid) continue
+      if (chunks.has(data.index) && chunks.get(data.index) !== data.data) { conflict = true; break }
       chunks.set(data.index, data.data)
     }
-    return [...chunks].map(([index, data]) => ({ index, data })).sort((a, b) => a.index - b.index)
+    const next = conflict ? NO_ATTACHMENT_PIECES : [...chunks].map(([index, data]) => ({ index, data })).sort((a, b) => a.index - b.index)
+    // Duplicate delivery or fresh record wrappers must not force media viewers
+    // to recreate an unchanged Blob and restart a GIF/video preview.
+    const value = prior && prior.value.length === next.length && prior.value.every((chunk, index) => chunk.index === next[index].index && chunk.data === next[index].data) ? prior.value : next
+    this.attachmentResults.set(metadata, { events, value })
+    return value
   }
   hideMessage = async (id: string, messageId: string): Promise<void> => this.locked(id, async () => {
     const community = this.moderator(id)

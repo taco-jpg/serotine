@@ -6,7 +6,7 @@ import { ID_PATTERN, isEnvelope, MAX_MESSAGE_LENGTH, PUBLIC_KEY_PATTERN } from "
 import { createRequestProof } from "./request-auth"
 import { deleteMessage, getEventFeed, getLegacyInbox, storeEncryptedEvent } from "./relay-client"
 import { deleteConversationHistoryFromStorage, deleteMessageHistoryFromStorage, exportAllMessagesFromStorage, migrateLegacyHistory } from "./storage"
-import { defaultMessagingPreferences, deleteStoredConversation, deleteStoredMessage, deleteStoredCommunityMessage, eventStorageKey, getMessagingPreferences, getStoredEvents, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor, saveCommunityUpgrade } from "./messaging-store"
+import { createStoredEventReader, defaultMessagingPreferences, deleteStoredConversation, deleteStoredMessage, deleteStoredCommunityMessage, eventStorageKey, getMessagingPreferences, getSyncCursor, saveMessagingPreferences, saveStoredEvent, saveSyncCursor, saveCommunityUpgrade } from "./messaging-store"
 import { isDeletedStoredEvent, isDeletedLegacyMessage } from "./messaging-history"
 import { ATTACHMENT_CHUNK_BYTES, MAX_ATTACHMENT_CHUNKS, isAttachmentMeta } from "./attachments"
 import { legacyMessageEvents, legacyStoredMessageId, legacyVisibleMessageIds } from "./legacy-messaging"
@@ -106,6 +106,13 @@ function canSendTo(record: StoredEvent, peer: string) {
   // Older failed records have no per-recipient detail and still need an
   // explicit retry. New failures leave other destinations free to continue.
   return !record.delivered.includes(peer) && (!record.error || (!!record.failedRecipients && !record.failedRecipients.includes(peer)))
+}
+function isAttachmentChunk(event: MessagingEvent) {
+  return event.kind === "attachment-chunk" || (event.kind === "community" && event.payload.community?.type === "attachment-chunk")
+}
+function compareOutbox(left: StoredEvent, right: StoredEvent) {
+  // A short message must not wait behind hundreds of already queued file pieces.
+  return Number(isAttachmentChunk(left.event)) - Number(isAttachmentChunk(right.event)) || left.receivedAt - right.receivedAt
 }
 /** Only validated immutable events may enter this reducer. Authority is checked again for controls. */
 export function buildMessagingModel(records: StoredEvent[], owner: string, contacts: Contact[], preferences: MessagingPreferences, authorizedOutput?: Set<string>, includeDeletedConversations = false): MessagingModel {
@@ -224,6 +231,10 @@ export class MessagingEngine {
   private refreshGeneration = 0
   private refreshCompletion?: Promise<void>
   private refreshPending = false
+  private queuedRevision = 0
+  private readonly storedEvents: ReturnType<typeof createStoredEventReader>
+  private preferencesText = ""
+  private contactsText = ""
   private initializedAt = Date.now()
   private authorizedKeys = new Set<string>()
   private storeListener = () => {
@@ -240,6 +251,7 @@ export class MessagingEngine {
   readonly communities: CommunityService
   constructor(identity: Identity) {
     this.identity = identity
+    this.storedEvents = createStoredEventReader(identity.publicKey)
     this.communities = new CommunityService({
       identity, records: () => this.records, preferences: () => this.preferences,
       refresh: () => this.refresh(), assertActive: () => this.assertActive(),
@@ -259,6 +271,7 @@ export class MessagingEngine {
         })))
         this.assertActive()
         try { await this.refresh() } catch (error) { this.fail(error) }
+        this.queuedRevision++
         this.requestSync()
       },
     })
@@ -329,19 +342,29 @@ export class MessagingEngine {
     this.timer = setInterval(() => { void this.sync() }, 5000)
     void this.sync()
   }
-  dispose() { this.disposed = true; this.key = undefined; clearInterval(this.timer); clearTimeout(this.refreshTimer); clearTimeout(this.expiryTimer); window.removeEventListener("serotine:events", this.storeListener); window.removeEventListener("serotine:contacts", this.storeListener); window.removeEventListener("storage", this.storeListener); window.removeEventListener("online", this.sync); window.removeEventListener("focus", this.sync); this.listeners.clear() }
+  dispose() { this.disposed = true; this.key = undefined; this.storedEvents.dispose(); clearInterval(this.timer); clearTimeout(this.refreshTimer); clearTimeout(this.expiryTimer); window.removeEventListener("serotine:events", this.storeListener); window.removeEventListener("serotine:contacts", this.storeListener); window.removeEventListener("storage", this.storeListener); window.removeEventListener("online", this.sync); window.removeEventListener("focus", this.sync); this.listeners.clear() }
   refresh = async () => {
     this.assertActive()
     const generation = ++this.refreshGeneration
     const completion = (async () => {
-      const [records, preferences] = await Promise.all([getStoredEvents(this.identity.publicKey), getMessagingPreferences(this.identity.publicKey)])
+      const [records, preferences] = await Promise.all([this.storedEvents.read(), getMessagingPreferences(this.identity.publicKey)])
       this.assertActive()
       // Permission-sensitive callers must wait for the newer snapshot, not
       // continue with old state when overlapping reads supersede their own.
       if (generation !== this.refreshGeneration) { await this.refreshCompletion; return }
       const cutoffs = privateDestroyCutoffs(records, this.identity.publicKey)
-      this.records = records.filter(record => !isPrivateEventExpired(record, this.identity.publicKey, cutoffs)); this.preferences = preferences; this.contacts = loadContacts(this.identity.publicKey)
-      this.model = buildMessagingModel(this.records, this.identity.publicKey, this.contacts, preferences, this.authorizedKeys)
+      const retained = records.some(record => isPrivateEventExpired(record, this.identity.publicKey, cutoffs))
+        ? records.filter(record => !isPrivateEventExpired(record, this.identity.publicKey, cutoffs)) : records
+      const contacts = loadContacts(this.identity.publicKey)
+      const preferencesText = JSON.stringify(preferences), contactsText = JSON.stringify(contacts)
+      // The reader retains unchanged immutable event references. An idle poll
+      // need not rebuild every conversation or re-render every retained file.
+      if (this.records === retained && this.preferencesText === preferencesText && this.contactsText === contactsText) return
+      this.records = retained
+      if (this.preferencesText !== preferencesText) this.preferences = preferences
+      if (this.contactsText !== contactsText) this.contacts = contacts
+      this.preferencesText = preferencesText; this.contactsText = contactsText
+      this.model = buildMessagingModel(this.records, this.identity.publicKey, this.contacts, this.preferences, this.authorizedKeys)
       this.scheduleExpiry()
       this.emit()
     })()
@@ -367,7 +390,7 @@ export class MessagingEngine {
   }
   private async migrateLocalHistory() {
     const owner = this.identity.publicKey
-    const existing = new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
+    const existing = new Map((await this.storedEvents.read()).map(record => [record.key, record]))
     for (const row of await exportAllMessagesFromStorage(owner)) {
       this.assertActive()
       if (isDeletedLegacyMessage(row, await getMessagingPreferences(owner))) continue
@@ -380,7 +403,7 @@ export class MessagingEngine {
   }
   private async persistLegacyEvents(events: MessagingEvent[], pending: boolean, receivedAt: number, existing?: Map<string, StoredEvent>) {
     const owner = this.identity.publicKey
-    const saved = existing ?? new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
+    const saved = existing ?? new Map((await this.storedEvents.read()).map(record => [record.key, record]))
     for (const event of events) {
       this.assertActive()
       const key = eventStorageKey(event)
@@ -398,7 +421,7 @@ export class MessagingEngine {
       } catch (error) {
         this.assertActive()
         // Concurrent tabs can sign the same migration with different valid ECDSA signatures.
-        const concurrent = (await getStoredEvents(owner)).find(record => record.key === key)
+        const concurrent = (await this.storedEvents.read()).find(record => record.key === key)
         if (!concurrent || eventText(concurrent.event) !== eventText(event)) throw error
         saved.set(key, concurrent)
       }
@@ -470,10 +493,11 @@ export class MessagingEngine {
     // piece would repeatedly clone an entire large file. Its metadata refreshes
     // and starts delivery when preparation finishes; normal sync can also recover
     // already saved pieces if preparation is interrupted.
-    if (event.kind === "attachment-chunk" || (event.kind === "community" && event.payload.community?.type === "attachment-chunk")) return
+    if (isAttachmentChunk(event)) return
     // Once durable, a view refresh failure must not make the composer resend it.
     try { await this.refresh() } catch (error) { this.fail(error) }
     this.assertActive()
+    this.queuedRevision++
     this.requestSync()
   }
   sendText = (cid: string, text: string, replyTo?: string, mentions?: string[], expectedPrivateTtlSeconds?: PrivateTtlSeconds) => {
@@ -609,7 +633,7 @@ export class MessagingEngine {
     const directMessage = this.model.messages.find(m => m.id === messageId)
     const communityMessage = directMessage ? undefined : this.communities.model.messages.find(m => m.id === messageId)
     const message = directMessage || communityMessage
-    for (const record of await getStoredEvents(this.identity.publicKey)) {
+    for (const record of await this.storedEvents.read()) {
       const communityData = record.event.payload.community
       const sameCommunityMessage = !communityMessage || (record.event.conversationId === communityMessage.conversationId && record.event.author === communityMessage.senderPubKey && communityData && "channelId" in communityData && communityData.channelId === communityMessage.channelId)
       const matchingChunk = communityMessage
@@ -630,8 +654,13 @@ export class MessagingEngine {
         // Direct/group delivery retains its established retry behavior.
         await this.refresh()
         const hasCommunities = this.records.some(record => record.event.kind === "community")
-        if (hasCommunities) { await this.readFeed(); await this.communities.reconcile() }
-        if (await this.flushOutbox()) await this.refresh()
+        if (hasCommunities) {
+          // Unrelated direct/group sends do not need to wait for the community
+          // membership feed. Community fanout still waits for its fresh state.
+          if (await this.flushOutbox({ regularOnly: true, skipChunks: true })) await this.refresh()
+          await this.readFeed(); await this.communities.reconcile()
+        }
+        if (await this.flushOutbox({ regularOnly: !hasCommunities })) await this.refresh()
         await this.readFeed()
         if (this.records.some(record => record.event.kind === "community")) {
           await this.communities.reconcile()
@@ -640,8 +669,9 @@ export class MessagingEngine {
         if (await this.readLegacyInbox()) await this.refresh()
         // Successful inbox reads establish connectivity. An older failed send
         // (including a receipt to a retired contact) says nothing about it.
-        this.status = "online"; this.error = null
-        this.emit()
+        if (this.status !== "online" || this.error) {
+          this.status = "online"; this.error = null; this.emit()
+        }
       }
       if (navigator.locks) await navigator.locks.request(`serotine:sync:${this.identity.publicKey}`, { ifAvailable: true }, async lock => { if (lock) await run() })
       else await run()
@@ -650,21 +680,31 @@ export class MessagingEngine {
       // Storage notifications during a transfer are covered by its own awaited
       // refreshes; coalesce any concurrent local changes into one final read.
       if (this.refreshPending && !this.disposed) this.storeListener()
-      this.emit()
       // A message queued after this pass captured its outbox should leave now,
       // rather than waiting for the next five-second polling interval.
       if (this.syncRequested && !this.disposed) { this.syncRequested = false; void this.sync() }
     }
   }
-  private async flushOutbox() {
+  private async flushOutbox({ regularOnly = false, skipChunks = false } = {}) {
     this.assertActive()
     if (Date.now() < this.outboxRetryAt) return false
     const owner = this.identity.publicKey
-    const pending = (await getStoredEvents(owner)).filter(r => r.local && !r.legacy && r.event.recipients.some(peer => canSendTo(r, peer))).sort((a, b) => a.receivedAt - b.receivedAt)
+    const eligible = (record: StoredEvent) => record.local && !record.legacy && (!regularOnly || record.event.kind !== "community")
+      && (!skipChunks || !isAttachmentChunk(record.event)) && record.event.recipients.some(peer => canSendTo(record, peer))
+    // sync already awaited a current snapshot. Keep its immutable records out
+    // of mutable delivery bookkeeping and avoid a second full history read.
+    let pending = this.records.filter(eligible).sort(compareOutbox)
+    const attempted = new Set<string>()
+    let queuedRevision = this.queuedRevision
+    let didWork = false
     let transportFailed = false
-    for (let index = 0; index < pending.length; index += 4) {
+    while (pending.length) {
       if (this.disposed) return
-      await Promise.all(pending.slice(index, index + 4).map(async record => {
+      const batch = pending.splice(0, 4)
+      didWork = true
+      for (const record of batch) attempted.add(record.key)
+      await Promise.all(batch.map(async snapshot => {
+        const record = { ...snapshot, delivered: [...snapshot.delivered], ...(snapshot.failedRecipients ? { failedRecipients: [...snapshot.failedRecipients] } : {}) }
         for (const recipientPubKey of record.event.recipients) {
           if (this.disposed || Date.now() < this.outboxRetryAt) return
           if (!canSendTo(record, recipientPubKey)) continue
@@ -687,7 +727,7 @@ export class MessagingEngine {
             this.assertActive()
             if (isDeletedStoredEvent(record, owner, await getMessagingPreferences(owner))) return
             if (record.event.kind === "private-message") {
-              const current = await getStoredEvents(owner)
+              const current = await this.storedEvents.read()
               if (!current.some(row => row.key === record.key) || isPrivateEventExpired(record, owner, privateDestroyCutoffs(current, owner))) return
             }
             if (record.event.kind === "community") {
@@ -723,8 +763,16 @@ export class MessagingEngine {
         }
       }))
       if (transportFailed || Date.now() < this.outboxRetryAt) break
+      if (queuedRevision !== this.queuedRevision) {
+        // Local sends refresh the live snapshot before raising this revision.
+        // Pick them up between small batches, including during a large upload.
+        queuedRevision = this.queuedRevision
+        const queued = new Map(pending.map(record => [record.key, record]))
+        for (const record of this.records) if (!attempted.has(record.key) && eligible(record)) queued.set(record.key, record)
+        pending = [...queued.values()].sort(compareOutbox)
+      }
     }
-    return pending.length > 0
+    return didWork
   }
   private async readFeed() {
     this.assertActive()
@@ -840,7 +888,7 @@ export class MessagingEngine {
       if (!result.success) throw new Error(result.error)
       // Most accounts have no legacy traffic. Avoid cloning all modern event
       // history just to check an empty compatibility inbox every five seconds.
-      if (result.messages.length && !existing) existing = new Map((await getStoredEvents(owner)).map(record => [record.key, record]))
+      if (result.messages.length && !existing) existing = new Map((await this.storedEvents.read()).map(record => [record.key, record]))
       for (const packet of result.messages) {
         this.assertActive()
         try {

@@ -25,6 +25,8 @@ import { type MessageRecord, type NotificationMode } from "@/lib/messaging-types
 import { AttachmentComposer, type AttachmentComposerHandle, type AttachmentComposerState } from "@/components/chat/attachment-composer"
 import { AttachmentView } from "@/components/chat/attachment-view"
 import { RichMessage } from "@/components/chat/rich-message"
+import { MessageFormattingPreview, MessageFormattingTools } from "@/components/chat/message-formatting"
+import type { FormattedInsertion } from "@/lib/composer-formatting"
 import { attachmentFileLimit, sendAttachment } from "@/lib/attachments"
 import { findMentionQuery, insertMention, serializeMentionDraft, updateMentionSpans, validMentionSpans, type MentionQuery } from "@/lib/composer-mentions"
 import { EditMessageDialog, GroupSettings, PollCard, PollCreator } from "@/components/chat/conversation-controls"
@@ -156,6 +158,13 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
     setContent(value)
     saveMentionDraft(value, nextSpans)
     updateMentionQuery(value, start, end)
+  }
+  function insertFormatting(result: FormattedInsertion) {
+    if (!usable || sending || !draftReady || privateMode) return
+    pendingMentionEdit.current = null
+    setContent(result.content)
+    saveMentionDraft(result.content, updateMentionSpans(content, result.content, mentionSpans, result))
+    setMentionOpen(false); setMentionQuery(null)
   }
   function chooseMention(pub: string) {
     const node = input.current
@@ -426,6 +435,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
         <form aria-label="Message composer" onSubmit={event => { event.preventDefault(); if (event.target === event.currentTarget) void submit() }}>
           <div className="rounded-[4px] border border-border bg-card p-1 transition-colors focus-within:border-primary/60 focus-within:ring-1 focus-within:ring-primary/20">
             {privateMode ? <>{messageInput}<div id="message-tools" className={`${toolsOpen ? "flex" : "hidden"} flex-wrap items-center justify-between gap-2 py-1`}><Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" />Share access key</Button><span className="text-[11px] text-muted-foreground">Plain text only · No files or polls</span></div></> : <AttachmentComposer key={`${myPub}:${conversationId}`} composerRef={attachmentComposer} onStateChange={setAttachmentState} owner={myPub} maxFileBytes={attachmentFileLimit(group)} toolbarVisible={toolsOpen} toolbarId="message-tools" extraActions={<>
+          <MessageFormattingTools key={`format:${myPub}:${conversationId}`} content={content} inputRef={input} disabled={!usable || sending || !draftReady} onInsert={insertFormatting} />
           {canUsePrivate && <Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" /><span className="hidden sm:inline">Access key</span><span className="sr-only sm:hidden">Share access key</span></Button>}
           <Button type="button" variant="ghost" size="sm" disabled={!usable} onClick={() => setPollOpen(true)}><BarChart3 className="size-4" />Poll</Button>
           {!isSelf && <Button type="button" variant="ghost" size="sm" disabled={!usable} aria-expanded={mentionOpen} onClick={() => { setMentionQuery(findMentionQuery(content, input.current?.selectionStart ?? content.length, input.current?.selectionEnd ?? content.length)); setMentionIndex(0); setMentionOpen(!mentionOpen); if (!mentionOpen) requestAnimationFrame(() => document.getElementById("message-mention-0")?.focus()); else input.current?.focus() }}><AtSign className="size-4" />Mention</Button>}
@@ -438,6 +448,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
         }} onSend={async (file, kind, onProgress, caption) => { const scope = actionScope.current; const id = await sendAttachment(messaging.sendEvent, conversationId, file, kind, onProgress, caption ? replyTo : undefined, group, caption); if (actionScope.current === scope) jumpToLatest(); return id }}>{messageInput}</AttachmentComposer>}
           </div>
         </form>
+        {!privateMode && <MessageFormattingPreview content={content} />}
         {!privateMode && mentionOpen && <div id="message-mention-options" role="listbox" aria-label="Mention suggestions" onKeyDown={event => {
           if (event.key === "Escape") { event.preventDefault(); setMentionOpen(false); input.current?.focus() }
           if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) && mentionCandidates.length) {
@@ -451,7 +462,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
           {!mentionCandidates.length && <p className="px-3 py-2 text-xs text-muted-foreground">{mentionQuery?.query ? "No matching members." : "Everyone is already mentioned."}</p>}
         </div>}
         {mentions.length > 0 && <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">{mentions.map(pub => <button type="button" key={pub} aria-label={`Remove mention of ${displayName(pub)}`} disabled={busy} onClick={() => removeMention(pub)} className="inline-flex items-center gap-1 rounded-[3px] bg-primary/15 px-2 py-1 text-primary">@{displayName(pub)}<X className="size-3" /></button>)}</div>}
-        <div className={toolsOpen || (!privateMode && !draftSaved) ? "mt-1 flex flex-wrap justify-between gap-1 text-[11px] text-muted-foreground" : "sr-only"}><span className="hidden sm:inline">Enter to send · Shift + Enter for a new line · Math: $…$ · Code: ```</span><span className={!privateMode && !draftSaved ? "text-destructive" : ""}>{privateMode ? "Private draft stays only in this tab" : !draftSaved ? draftIssue === "read" ? "Saved draft could not be loaded" : draftIssue === "clear" ? "Sent text is waiting to be cleared from storage" : "Draft is only in this tab · Do not close it" : content ? "Draft saved on this browser" : "History saved on this browser"}</span></div>{!privateMode && !draftSaved && <Button type="button" size="sm" variant="ghost" onClick={retryDraftSave}>{draftIssue === "read" ? "Try loading draft again" : draftIssue === "clear" ? "Retry draft cleanup" : "Try saving draft again"}</Button>}{content.length > MAX_MESSAGE_LENGTH - 1000 && <p className="mt-1 text-right text-xs text-muted-foreground">{content.length.toLocaleString()} / {MAX_MESSAGE_LENGTH.toLocaleString()}</p>}
+        <div className={toolsOpen || (!privateMode && !draftSaved) ? "mt-1 flex flex-wrap justify-between gap-1 text-[11px] text-muted-foreground" : "sr-only"}><span className="hidden sm:inline">Enter to send · Shift + Enter for a new line · Math and Code in message tools</span><span className={!privateMode && !draftSaved ? "text-destructive" : ""}>{privateMode ? "Private draft stays only in this tab" : !draftSaved ? draftIssue === "read" ? "Saved draft could not be loaded" : draftIssue === "clear" ? "Sent text is waiting to be cleared from storage" : "Draft is only in this tab · Do not close it" : content ? "Draft saved on this browser" : "History saved on this browser"}</span></div>{!privateMode && !draftSaved && <Button type="button" size="sm" variant="ghost" onClick={retryDraftSave}>{draftIssue === "read" ? "Try loading draft again" : draftIssue === "clear" ? "Retry draft cleanup" : "Try saving draft again"}</Button>}{content.length > MAX_MESSAGE_LENGTH - 1000 && <p className="mt-1 text-right text-xs text-muted-foreground">{content.length.toLocaleString()} / {MAX_MESSAGE_LENGTH.toLocaleString()}</p>}
       </div>
     </footer>
     {canUsePrivate && <PrivateChatControls key={`private:${myPub}:${conversationId}`} open={privateOpen} onOpenChange={setPrivateOpen} ttlSeconds={privateTtlSeconds} disabled={!usable || sending} onSetMode={seconds => messaging.setPrivateMode(conversationId, seconds)} onDestroy={async () => { await messaging.destroyPrivateHistory(conversationId); setAnnouncement("Private history destroyed here. The other person’s updated app will remove it when it receives the request.") }} />}

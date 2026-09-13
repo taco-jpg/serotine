@@ -7,7 +7,7 @@ import { isPrivateEventExpired, privateDestroyCutoffs, privateMessageTarget } fr
 export { isDeletedConversationEvent } from "./messaging-history"
 
 interface MessagingDB extends DBSchema {
-  events: { key: string; value: StoredEvent }
+  events: { key: string; value: StoredEvent; indexes: { "by-kind": string } }
   metadata: { key: string; value: unknown }
 }
 export const defaultMessagingPreferences = (): MessagingPreferences => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true, archived: [], deleted: {}, deletedMessages: {} })
@@ -16,10 +16,64 @@ function withDefaults(value?: Partial<MessagingPreferences>): MessagingPreferenc
 }
 async function database(owner: string) {
   if (!PUBLIC_KEY_PATTERN.test(owner)) throw new Error("A valid identity is required.")
-  return openDB<MessagingDB>(`serotine-events:${owner}`, 1, { upgrade(db) { db.createObjectStore("events", { keyPath: "key" }); db.createObjectStore("metadata") } })
+  return openDB<MessagingDB>(`serotine-events:${owner}`, 2, {
+    upgrade(db, oldVersion, _newVersion, tx) {
+      if (oldVersion < 1) { db.createObjectStore("events", { keyPath: "key" }); db.createObjectStore("metadata") }
+      if (oldVersion < 2) tx.objectStore("events").createIndex("by-kind", "event.kind")
+    },
+    // Release this connection for later upgrades. Opening explicitly at v2 also
+    // fences old v1 writers that do not maintain the transactional change log.
+    blocking(_currentVersion, _blockedVersion, event) { (event.target as IDBDatabase).close() },
+  })
 }
 export function eventStorageKey(event: { author: string; conversationId: string; id: string }) { return `${event.author}:${event.conversationId}:${event.id}` }
 type EventTransaction = IDBPTransaction<MessagingDB, ["events", "metadata"], "readwrite">
+interface EventChanges { generation: string; revision: number; entries: Array<{ revision: number; keys: string[] }> }
+interface EventReadCache { changes?: EventChanges; records: Map<string, StoredEvent>; result?: StoredEvent[] }
+const CHANGE_LOG_LIMIT = 128
+/** Every event mutation records its keys in the same transaction. A compacted
+ * log or bulk replacement makes readers reload instead of returning stale data. */
+async function recordEventChanges(tx: EventTransaction, keys?: string[]) {
+  if (keys?.length === 0) return
+  const prior = await tx.objectStore("metadata").get("event-changes") as EventChanges | undefined
+  const changes: EventChanges = prior && keys && keys.length <= CHANGE_LOG_LIMIT
+    ? { ...prior, revision: prior.revision + 1, entries: [...prior.entries, { revision: prior.revision + 1, keys: [...new Set(keys)] }].slice(-CHANGE_LOG_LIMIT) }
+    : { generation: crypto.randomUUID(), revision: 0, entries: [] }
+  await tx.objectStore("metadata").put(changes, "event-changes")
+}
+function freezeRecord(record: StoredEvent): StoredEvent {
+  const freeze = (value: unknown) => {
+    if (!value || typeof value !== "object" || Object.isFrozen(value)) return
+    for (const nested of Object.values(value)) freeze(nested)
+    Object.freeze(value)
+  }
+  freeze(record)
+  return record
+}
+async function readEventSnapshot(tx: EventTransaction, cache?: EventReadCache) {
+  if (!cache) return tx.objectStore("events").getAll()
+  let changes = await tx.objectStore("metadata").get("event-changes") as EventChanges | undefined
+  if (!changes) {
+    await recordEventChanges(tx)
+    changes = await tx.objectStore("metadata").get("event-changes") as EventChanges
+  }
+  const previous = cache.changes
+  if (previous?.generation === changes.generation && previous.revision === changes.revision && cache.result) return cache.result
+  const incremental = previous?.generation === changes.generation && previous.revision < changes.revision
+    && !!changes.entries.length && previous.revision >= changes.entries[0].revision - 1
+  // Do not change the cache until all reads AND the transaction have succeeded.
+  const records = incremental ? new Map(cache.records) : new Map<string, StoredEvent>()
+  if (incremental) {
+    const keys = [...new Set(changes.entries.filter(entry => entry.revision > previous.revision).flatMap(entry => entry.keys))]
+    const updated = await Promise.all(keys.map(key => tx.objectStore("events").get(key)))
+    keys.forEach((key, index) => { const record = updated[index]; if (record) records.set(key, freezeRecord(record)); else records.delete(key) })
+  } else for (const record of await tx.objectStore("events").getAll()) records.set(record.key, freezeRecord(record))
+  const result = [...records.values()]
+  Object.freeze(result)
+  await tx.done
+  cache.changes = changes; cache.records = records; cache.result = result
+  return result
+}
 const verifiedPrivate = new Map<string, string>()
 async function validatePrivateRecord(record: StoredEvent, owner: string) {
   if (record.legacy || record.key !== eventStorageKey(record.event) || (record.event.author !== owner && !record.event.recipients.includes(owner))) return false
@@ -50,13 +104,19 @@ async function savePrivateState(tx: EventTransaction, state: Awaited<ReturnType<
   await tx.objectStore("metadata").put(state.cutoffs, "private-cutoffs")
   await tx.objectStore("metadata").put([...state.targets], "private-targets")
 }
-async function readPrunedEvents(owner: string, now: number) {
+async function privateCandidates(store: { index(name: "by-kind"): { getAll(kind: string): Promise<StoredEvent[]> } }, includeEdits = false) {
+  const kinds = ["private-message", "private-destroy", "private-settings", ...(includeEdits ? ["edit"] : [])]
+  return (await Promise.all(kinds.map(kind => store.index("by-kind").getAll(kind)))).flat()
+}
+async function readPrunedEvents(owner: string, now: number, cache?: EventReadCache, pruneOnly = false) {
   const db = await database(owner)
   let removed = 0
   try {
     // Signature work must finish before opening the write transaction. IndexedDB
     // transactions auto-close while unrelated asynchronous crypto is running.
-    const initial = await db.getAll("events")
+    const initialRead = db.transaction("events", "readonly")
+    const initial = await privateCandidates(initialRead.objectStore("events"))
+    await initialRead.done
     const validPrivate: StoredEvent[] = []
     for (const record of initial) if (record.event.kind.startsWith("private-") && await validatePrivateRecord(record, owner)) validPrivate.push(record)
     const tx = db.transaction(["events", "metadata"], "readwrite")
@@ -64,23 +124,24 @@ async function readPrunedEvents(owner: string, now: number) {
       const state = await privateState(tx)
       const cutoffs = mergeCutoffs(state.cutoffs, privateDestroyCutoffs(validPrivate, owner))
       const targets = new Set([...state.targets, ...validPrivate.filter(record => record.event.kind === "private-message").map(record => privateMessageTarget(record, owner))])
-      const records = await tx.objectStore("events").getAll()
-      const retained: StoredEvent[] = []
-      for (const record of records) {
+      const removedKeys: string[] = []
+      for (const record of await privateCandidates(tx.objectStore("events"), true)) {
         if (isPrivateEventExpired(record, owner, cutoffs, now) || privateEdit(record, owner, targets)) {
-          await tx.objectStore("events").delete(record.key); removed++
-        } else retained.push(record)
+          await tx.objectStore("events").delete(record.key); removed++; removedKeys.push(record.key)
+        }
       }
       if (targets.size !== state.targets.size || JSON.stringify(cutoffs) !== JSON.stringify(state.cutoffs)) await savePrivateState(tx, { cutoffs, targets })
+      await recordEventChanges(tx, removedKeys)
+      const records = pruneOnly ? [] : await readEventSnapshot(tx, cache)
       await tx.done
-      return { records: retained, removed }
+      return { records, removed }
     } catch (error) { try { tx.abort() } catch { /* Already closed. */ } await tx.done.catch(() => {}); throw error }
   } finally { db.close() }
 }
 
 /** Physically remove expired payloads, including when an idle tab resumes. */
 export async function pruneExpiredPrivateEvents(owner: string, now = Date.now()): Promise<number> {
-  const { removed } = await readPrunedEvents(owner, now)
+  const { removed } = await readPrunedEvents(owner, now, undefined, true)
   if (removed) changed(owner)
   return removed
 }
@@ -89,6 +150,28 @@ function changed(owner: string) {
 }
 export async function getStoredEvents(owner: string): Promise<StoredEvent[]> {
   return (await readPrunedEvents(owner, Date.now())).records
+}
+/** An engine-scoped immutable snapshot. Every read checks the durable change log
+ * inside its event transaction, so another tab's writes, deletes and imports are
+ * visible without repeatedly deserializing old attachment payloads. */
+export function createStoredEventReader(owner: string) {
+  let cache: EventReadCache = { records: new Map() }
+  let disposed = false
+  let pending: Promise<unknown> = Promise.resolve()
+  return {
+    read(): Promise<StoredEvent[]> {
+      const read = pending.then(async () => {
+        if (disposed) throw new Error("The event reader is closed.")
+        const activeCache = cache
+        const result = await readPrunedEvents(owner, Date.now(), activeCache)
+        if (disposed) { activeCache.records.clear(); activeCache.result = undefined; throw new Error("The event reader is closed.") }
+        return result.records
+      })
+      pending = read.catch(() => {})
+      return read
+    },
+    dispose() { disposed = true; cache.records.clear(); cache.result = undefined; cache = { records: new Map() } },
+  }
 }
 export async function saveStoredEvent(owner: string, record: StoredEvent) {
   // Callers cannot establish a destructive boundary using an unverified event.
@@ -107,7 +190,9 @@ export async function saveStoredEvent(owner: string, record: StoredEvent) {
       if (record.event.kind === "private-destroy") state.cutoffs = mergeCutoffs(state.cutoffs, privateDestroyCutoffs([record], owner))
       if (record.event.kind === "private-message" || record.event.kind === "private-destroy") {
         await savePrivateState(tx, state)
-        for (const existing of await tx.objectStore("events").getAll()) if (isPrivateEventExpired(existing, owner, state.cutoffs) || privateEdit(existing, owner, state.targets)) await tx.objectStore("events").delete(existing.key)
+        const removed: string[] = []
+        for (const existing of await privateCandidates(tx.objectStore("events"), true)) if (isPrivateEventExpired(existing, owner, state.cutoffs) || privateEdit(existing, owner, state.targets)) { await tx.objectStore("events").delete(existing.key); removed.push(existing.key) }
+        await recordEventChanges(tx, removed)
       }
       if (isPrivateEventExpired(record, owner, state.cutoffs) || privateEdit(record, owner, state.targets)) { await tx.done; return false }
     }
@@ -117,6 +202,7 @@ export async function saveStoredEvent(owner: string, record: StoredEvent) {
     // An event is immutable. A retry may only add per-recipient confirmations.
     const value = existing ? { ...existing, ...record, local: existing.local || record.local, receivedAt: Math.min(existing.receivedAt, record.receivedAt), sequence: existing.sequence === undefined ? record.sequence : record.sequence === undefined ? existing.sequence : Math.min(existing.sequence, record.sequence), delivered: [...new Set([...existing.delivered, ...record.delivered])] } : record
     await tx.objectStore("events").put(value)
+    await recordEventChanges(tx, [record.key])
     await tx.done
     } catch (error) { try { tx.abort() } catch { /* The transaction may already have aborted. */ } await tx.done.catch(() => {}); throw error }
   } finally { db.close() }
@@ -163,6 +249,7 @@ export async function saveCommunityUpgrade(owner: string, records: StoredEvent[]
         if (await tx.objectStore("events").get(record.key)) throw new Error("Conflicting community upgrade identifier.")
         await tx.objectStore("events").put(record)
       }
+      await recordEventChanges(tx, records.map(record => record.key))
       await tx.done
     } catch (error) {
       try { tx.abort() } catch { /* The transaction may already be closed. */ }
@@ -215,6 +302,7 @@ export async function deleteStoredConversation(owner: string, cid: string) {
       const attachmentIds = [...new Set([...(prior?.attachmentIds ?? []), ...removed.flatMap(record => { const id = record.event.payload.attachmentId ?? record.event.payload.attachment?.id; return id ? [id] : [] })])]
       const deletion = { deletedAt: Math.max(Date.now(), prior?.deletedAt ?? 0), eventKeys: [...new Set([...(prior?.eventKeys ?? []), ...removed.map(record => record.key)])], attachmentIds, ...(group ? { group, leftMembers: conversation ? group.members.filter(member => !conversation.members.includes(member)) : prior?.leftMembers ?? [] } : {}) }
       for (const record of removed) await tx.objectStore("events").delete(record.key)
+      await recordEventChanges(tx, removed.map(record => record.key))
       await tx.objectStore("metadata").put({ ...preferences, archived: preferences.archived.filter(id => id !== cid), deleted: { ...preferences.deleted, [cid]: deletion } }, "preferences")
       await tx.done
     } catch (error) { try { tx.abort() } catch { /* The transaction may already have aborted. */ } await tx.done.catch(() => {}); throw error }
@@ -266,6 +354,7 @@ async function deleteStoredMessageTarget(owner: string, cid: string, messageId: 
         deletion.groupEvents.push({ key: record.key, group: record.event.group, receivedAt: record.receivedAt, timestamp: record.event.timestamp, ...(record.sequence === undefined ? {} : { sequence: record.sequence }) })
       }
       for (const record of removed) await tx.objectStore("events").delete(record.key)
+      await recordEventChanges(tx, removed.map(record => record.key))
       await tx.objectStore("metadata").put(next, "preferences")
       await tx.done
     } catch (error) { try { tx.abort() } catch { /* The transaction may already have aborted. */ } await tx.done.catch(() => {}); throw error }
@@ -362,6 +451,7 @@ export async function importMessagingSnapshot(owner: string, value: MessagingSna
       await tx.objectStore("events").put(existing ? { ...record, local: existing.local || record.local, delivered: [...new Set([...existing.delivered, ...record.delivered])] } : record)
     }
     if (snapshot.events.some(record => record.event.kind.startsWith("private-"))) await savePrivateState(tx, state)
+    await recordEventChanges(tx)
     await tx.objectStore("metadata").put(preferences, "preferences")
     // The receiving device must scan the retained feed for itself.
     await tx.objectStore("metadata").put(0, "cursor")

@@ -11,6 +11,7 @@ const history = new Map(), legacyPackets = [], acknowledgments = []
 const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true })
 const recordsFor = owner => { if (!stores.has(owner)) stores.set(owner, new Map()); return stores.get(owner) }
 const store = {
+  createStoredEventReader: owner => ({ read: () => store.getStoredEvents(owner), dispose() {} }),
   defaultMessagingPreferences: defaults,
   eventStorageKey: e => `${e.author}:${e.conversationId}:${e.id}`,
   getStoredEvents: async owner => structuredClone([...recordsFor(owner).values()]),

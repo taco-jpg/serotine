@@ -1,36 +1,53 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Download, FileText, LoaderCircle, Maximize2 } from "lucide-react"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import type { AttachmentMeta } from "@/lib/messaging-types"
 import { assembleAttachment, attachmentPreviewKind, attachmentProgress, formatFileSize, isAttachmentMeta, safeFilename, type AttachmentChunk } from "@/lib/attachments"
 
+type AttachmentSnapshot = { metadata: AttachmentMeta; chunks: AttachmentChunk[] }
+const metadataFields = ["id", "name", "mime", "size", "chunks", "sha256", "kind", "duration"] as const
+const sameChunks = (left: AttachmentChunk[], right: AttachmentChunk[]) => left.length === right.length
+  && left.every((chunk, index) => chunk.index === right[index].index && chunk.data === right[index].data)
+
+function snapshotAttachment(previous: AttachmentSnapshot | null, metadata: AttachmentMeta, chunks: AttachmentChunk[]): AttachmentSnapshot {
+  const sameMetadata = previous && metadataFields.every(field => previous.metadata[field] === metadata[field])
+  // Compare the existing base64 strings directly: serializing them here copies
+  // tens of megabytes on every message update or keystroke in a media-heavy chat.
+  if (sameMetadata && sameChunks(previous.chunks, chunks)) return previous
+  // Keep a small immutable snapshot so replacement, mutation and missing pieces
+  // invalidate the verified URL. Arrival order alone must not restart a GIF.
+  const pieces = chunks.map(({ index, data }) => ({ index, data })).sort((a, b) => a.index - b.index)
+  if (sameMetadata && sameChunks(previous.chunks, pieces)) return previous
+  return { metadata: { ...metadata }, chunks: pieces }
+}
+
 export function AttachmentView({ metadata, chunks }: { metadata: AttachmentMeta; chunks: AttachmentChunk[] }) {
-  const [result, setResult] = useState<{ key: string; url?: string; error?: string } | null>(null)
+  const [result, setResult] = useState<{ snapshot: AttachmentSnapshot; url?: string; error?: string } | null>(null)
   const [failedPreviewUrl, setFailedPreviewUrl] = useState<string | null>(null)
-  // Incoming arrays may be rebuilt by the provider while their contents stay unchanged.
-  const key = useMemo(() => JSON.stringify([metadata, chunks]), [metadata, chunks])
+  const previousSnapshot = useRef<AttachmentSnapshot | null>(null)
+  const valid = isAttachmentMeta(metadata)
+  const snapshot = valid ? snapshotAttachment(previousSnapshot.current, metadata, chunks) : null
+  previousSnapshot.current = snapshot
   const progress = attachmentProgress(metadata, chunks)
   const complete = progress === 100
-  const valid = isAttachmentMeta(metadata)
   useEffect(() => {
-    if (!valid || !complete) return
+    if (!snapshot || !complete) return
     let disposed = false
     let objectUrl: string | undefined
-    const [meta, pieces] = JSON.parse(key) as [AttachmentMeta, AttachmentChunk[]]
-    assembleAttachment(meta, pieces).then(blob => {
+    assembleAttachment(snapshot.metadata, snapshot.chunks).then(blob => {
       if (disposed) return
       objectUrl = URL.createObjectURL(blob)
-      setResult({ key, url: objectUrl })
+      setResult({ snapshot, url: objectUrl })
     }).catch(cause => {
-      if (!disposed) setResult({ key, error: cause instanceof Error ? cause.message : "Unable to open this attachment." })
+      if (!disposed) setResult({ snapshot, error: cause instanceof Error ? cause.message : "Unable to open this attachment." })
     })
     return () => { disposed = true; if (objectUrl) URL.revokeObjectURL(objectUrl) }
-  }, [key, complete, valid])
+  }, [snapshot, complete])
 
   if (!valid) return <p role="alert" className="text-sm text-destructive">This attachment has invalid details.</p>
-  const activeResult = result?.key === key ? result : null
+  const activeResult = result?.snapshot === snapshot ? result : null
   const preview = attachmentPreviewKind(metadata.mime)
   const name = safeFilename(metadata.name)
   const url = activeResult?.url

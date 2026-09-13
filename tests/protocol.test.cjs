@@ -153,6 +153,38 @@ test('expired, excessive future, and missing proofs are rejected', async () => {
   assert.equal(await auth.verifyRequestProof('message:list', data, undefined), false)
 })
 
+test('valid signatures outside the freshness window identify clock direction without accepting the request', async () => {
+  const data = { senderPubKey: alice.publicKey }
+  for (const [offset, reason] of [[-4 * 3600_000, 'expired'], [4 * 3600_000, 'future']]) {
+    const signed = await proofAt('message:list', data, bob, Date.now() + offset)
+    const result = await auth.verifyRequestProofResult('message:list', data, signed)
+    assert.equal(result.valid, false)
+    assert.equal(result.reason, reason)
+    assert.ok(Math.abs(result.differenceMs - Math.abs(offset)) < 5000)
+    assert.equal(await auth.verifyRequestProof('message:list', data, signed), false)
+    const response = await actions.getMyMessages(data, signed)
+    assert.equal(response.success, false)
+    assert.match(response.error, reason === 'expired' ? /behind/i : /ahead/i)
+    assert.match(response.error, /automatic|automatically/i)
+    assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM RequestNonce').get().count, 0)
+  }
+})
+
+test('invalid signatures and malformed proofs are never diagnosed as clock failures', async () => {
+  const data = { senderPubKey: alice.publicKey }
+  const signed = await proofAt('message:list', data, bob, Date.now() - 4 * 3600_000)
+  const tampered = { ...signed, nonce: crypto.randomUUID() }
+  const invalid = await auth.verifyRequestProofResult('message:list', data, tampered)
+  assert.deepEqual(invalid, { valid: false, reason: 'invalid-signature' })
+  const response = await actions.getMyMessages(data, tampered)
+  assert.equal(response.success, false)
+  assert.doesNotMatch(response.error, /clock|ahead|behind/i)
+  for (const malformed of [undefined, {}, { ...signed, signature: '00' }, { ...signed, timestamp: NaN }]) {
+    assert.deepEqual(await auth.verifyRequestProofResult('message:list', data, malformed), { valid: false, reason: 'malformed' })
+  }
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM RequestNonce').get().count, 0)
+})
+
 test('encrypted directional envelope rejects reflected sender-to-recipient ciphertext', async () => {
   const value = envelope()
   const encrypted = await cryptography.encryptForPeer(JSON.stringify(value), alice.pair.privateKey, bob.publicKey)

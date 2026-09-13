@@ -1,7 +1,7 @@
 "use server"
 
 import { getDB, RelayConfigurationError, type D1DatabaseBinding } from "@/lib/db"
-import { verifyRequestProof } from "@/lib/request-auth"
+import { requestProofFailureMessage, verifyRequestProofResult } from "@/lib/request-auth"
 import { relayFailureKind } from "@/lib/relay-diagnostics"
 import { ensureEventRelaySchema } from "@/lib/event-relay-schema"
 import { ensureIdentityRetirementSchema } from "@/lib/identity-retirement-schema"
@@ -55,7 +55,8 @@ function checkPacket(packet: string, limit = MAX_PACKET_LENGTH) {
   return bytes
 }
 async function authorize(action: string, payload: unknown, proof: RequestProof): Promise<D1DatabaseBinding> {
-  if (!await verifyRequestProof(action, payload, proof)) throw new RequestError("Identity verification failed. Check your device clock and reopen the app.")
+  const verification = await verifyRequestProofResult(action, payload, proof)
+  if (!verification.valid) throw new RequestError(requestProofFailureMessage(verification))
   const db = await getDB()
   await ensureIdentityRetirementSchema(db)
   // This also covers direct Server Action calls, not just the HTTP route.

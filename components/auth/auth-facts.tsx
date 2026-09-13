@@ -53,10 +53,11 @@ export function AuthFacts({ className }: { className?: string }) {
           {facts.map((fact, index) => (
             <CarouselItem key={index}>
               <div className="p-1">
-                <Card className="bg-transparent border-none shadow-none">
-                  <CardContent className="flex flex-col items-center text-center p-6 space-y-4">
-                    <h3 className="text-2xl font-bold tracking-tight text-foreground">{fact.title}</h3>
-                    <p className="text-muted-foreground text-lg leading-relaxed">{fact.description}</p>
+                <Card className="rounded-none border-x-0 border-y border-border bg-transparent shadow-none">
+                  <CardContent className="flex flex-col p-6 space-y-4">
+                    <p className="app-eyebrow">FROM THE ARCHIVE / 0{index + 1}</p>
+                    <h3 className="text-2xl font-normal tracking-[-0.04em] text-foreground">{fact.title}</h3>
+                    <p className="text-muted-foreground text-sm leading-7">{fact.description}</p>
                   </CardContent>
                 </Card>
               </div>

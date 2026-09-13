@@ -1,47 +1,15 @@
 import { cn } from "@/lib/utils"
 
-function SerotineIcon({ className }: { className?: string }) {
-  const nodes = [
-    { cx: 18, cy: 5 },
-    { cx: 4, cy: 29 },
-    { cx: 32, cy: 29 },
-  ]
-  const edges: [number, number][] = [[0, 1], [0, 2], [1, 2]]
-
+// The same geometric mark and wordmark used on the landing page.
+export function AppLogo({ className, compact = false }: { className?: string; compact?: boolean }) {
   return (
-    <svg
-      width="36" height="36" viewBox="0 0 36 36"
-      fill="none" xmlns="http://www.w3.org/2000/svg"
-      className={className}
-    >
-      {edges.map(([a, b], i) => (
-        <line
-          key={i}
-          x1={nodes[a].cx} y1={nodes[a].cy}
-          x2={nodes[b].cx} y2={nodes[b].cy}
-          stroke="currentColor" strokeOpacity="0.25"
-          strokeWidth="1.5" strokeLinecap="round"
-        />
-      ))}
-      {nodes.map((n, i) => (
-        <g key={i}>
-          <circle cx={n.cx} cy={n.cy} r="5.5"
-            fill="rgb(110 231 183)" fillOpacity="0.15" />
-          <circle cx={n.cx} cy={n.cy} r="3"
-            fill="rgb(110 231 183)" fillOpacity="0.9" />
-        </g>
-      ))}
-    </svg>
-  )
-}
-
-export function AppLogo({ className }: { className?: string }) {
-  return (
-    <div className={cn("flex items-center gap-2.5", className)}>
-      <SerotineIcon />
-      <span className="font-syne text-[18px] font-extrabold tracking-[0.18em] text-foreground">
-        Serotine
+    <span className={cn("inline-flex shrink-0 items-center gap-2.5", className)}>
+      <svg className="size-8 shrink-0 text-primary" viewBox="0 0 36 36" fill="none" aria-hidden="true" focusable="false">
+        <path d="M27 7H14L5 16h17l-9 13H4M32 7l-9 13H10l-5 9M14 7l-9 9M22 16l-9 13h14l5-9" stroke="currentColor" strokeWidth="2.3" strokeLinejoin="round" />
+      </svg>
+      <span className={compact ? "sr-only" : "text-[25px] font-semibold leading-none tracking-[-0.06em] text-foreground"}>
+        serotine<span className="text-primary">.</span>
       </span>
-    </div>
+    </span>
   )
 }

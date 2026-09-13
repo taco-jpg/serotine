@@ -5,84 +5,84 @@
 
 :root {
   /* Canvas, raised surfaces, and sidebar remain distinct in both themes. */
-  --background: #f8fafc;
-  --foreground: #1e293b;
-  --card: #ffffff;
-  --card-foreground: #1e293b;
-  --popover: #ffffff;
-  --popover-foreground: #1e293b;
-  --primary: #4f46e5;
+  --background: #eeefe7;
+  --foreground: #171b14;
+  --card: #f6f7ef;
+  --card-foreground: #171b14;
+  --popover: #f6f7ef;
+  --popover-foreground: #171b14;
+  --primary: #3c5f22;
   --primary-foreground: #ffffff;
-  --secondary: #e9eef5;
-  --secondary-foreground: #334155;
-  --muted: #e9eef5;
-  --muted-foreground: #526176;
-  --accent: #e5eafa;
-  --accent-foreground: #3730a3;
-  --destructive: #dc2626;
+  --secondary: #e6e8e0;
+  --secondary-foreground: #171b14;
+  --muted: #e6e8e0;
+  --muted-foreground: #5d6655;
+  --accent: #e0e5d6;
+  --accent-foreground: #3c5f22;
+  --destructive: #b91c1c;
   --destructive-foreground: #ffffff;
-  --border: #d8e0eb;
-  --input: #cbd5e1;
-  --ring: #6366f1;
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --radius: 0.75rem;
-  --sidebar: #eef2f7;
-  --sidebar-foreground: #1e293b;
-  --sidebar-primary: var(--primary);
-  --sidebar-primary-foreground: var(--primary-foreground);
-  --sidebar-accent: #dfe6f7;
-  --sidebar-accent-foreground: #3730a3;
-  --sidebar-border: #d8e0eb;
-  --sidebar-ring: var(--ring);
-  --message-incoming: #ffffff;
-  --message-incoming-foreground: #1e293b;
-  --message-outgoing: #dfe6ff;
-  --message-outgoing-foreground: #283967;
-  --theme-chrome: #f8fafc;
+  --border: #d0d1c9;
+  --input: #c3c5bd;
+  --ring: #3c5f22;
+  --chart-1: #3c5f22;
+  --chart-2: #334e1f;
+  --chart-3: #2a3d1b;
+  --chart-4: #698353;
+  --chart-5: #95a785;
+  --radius: 0.375rem;
+  --sidebar: #e5e8dd;
+  --sidebar-foreground: #171b14;
+  --sidebar-primary: #3c5f22;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #cad2bf;
+  --sidebar-accent-foreground: #3c5f22;
+  --sidebar-border: #c8cbc1;
+  --sidebar-ring: #3c5f22;
+  --message-incoming: #f3f4ec;
+  --message-incoming-foreground: #171b14;
+  --message-outgoing: #dce8ce;
+  --message-outgoing-foreground: #233019;
+  --theme-chrome: #eeefe7;
 }
 
 .dark {
-  --background: #151922;
-  --foreground: #e5eaf2;
-  --card: #1d2430;
-  --card-foreground: #e5eaf2;
-  --popover: #222b39;
-  --popover-foreground: #e5eaf2;
-  --primary: #a5b4fc;
-  --primary-foreground: #1e2850;
-  --secondary: #293345;
-  --secondary-foreground: #e5eaf2;
-  --muted: #252e3c;
-  --muted-foreground: #a3afc2;
-  --accent: #2d3850;
-  --accent-foreground: #dce4ff;
+  --background: #0b0e0b;
+  --foreground: #eeefe7;
+  --card: #131812;
+  --card-foreground: #eeefe7;
+  --popover: #131812;
+  --popover-foreground: #eeefe7;
+  --primary: #ccff89;
+  --primary-foreground: #000000;
+  --secondary: #222721;
+  --secondary-foreground: #eeefe7;
+  --muted: #222721;
+  --muted-foreground: #a1aa99;
+  --accent: #293420;
+  --accent-foreground: #ccff89;
   --destructive: #fb7185;
-  --destructive-foreground: #32101c;
-  --border: #354154;
-  --input: #3b4960;
-  --ring: #a5b4fc;
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: #10151e;
-  --sidebar-foreground: #e5eaf2;
-  --sidebar-primary: var(--primary);
-  --sidebar-primary-foreground: var(--primary-foreground);
-  --sidebar-accent: #28334d;
-  --sidebar-accent-foreground: #dce4ff;
-  --sidebar-border: #2b3545;
-  --sidebar-ring: var(--ring);
-  --message-incoming: #222b39;
-  --message-incoming-foreground: #e5eaf2;
-  --message-outgoing: #303d66;
-  --message-outgoing-foreground: #edf2ff;
-  --theme-chrome: #151922;
+  --destructive-foreground: #000000;
+  --border: #2b2e2a;
+  --input: #383b37;
+  --ring: #ccff89;
+  --chart-1: #ccff89;
+  --chart-2: #d5fba1;
+  --chart-3: #ddf7b8;
+  --chart-4: #9cc36a;
+  --chart-5: #6c874a;
+  --sidebar: #0f130e;
+  --sidebar-foreground: #eeefe7;
+  --sidebar-primary: #ccff89;
+  --sidebar-primary-foreground: #000000;
+  --sidebar-accent: #2d3922;
+  --sidebar-accent-foreground: #ccff89;
+  --sidebar-border: #2e322c;
+  --sidebar-ring: #ccff89;
+  --message-incoming: #171d14;
+  --message-incoming-foreground: #eeefe7;
+  --message-outgoing: #24301c;
+  --message-outgoing-foreground: #eff5e7;
+  --theme-chrome: #0b0e0b;
 }
 
 @theme inline {
@@ -225,4 +225,31 @@
   input:not([type="checkbox"]):not([type="radio"]), select {
     min-height: 2.75rem;
   }
+}
+
+/* App-only vocabulary. The landing page keeps its independent module styles. */
+.app-eyebrow {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.6;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.chat-shell [data-slot="dropdown-menu-label"],
+.serotine-dialog [data-slot="label"] {
+  font-size: 11px;
+  letter-spacing: 0.025em;
+}
+
+.app-surface, .chat-shell, .serotine-dialog,
+[data-slot="dropdown-menu-content"], [data-slot="dropdown-menu-sub-content"] {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+.app-surface :where(h1, h2, h3, h4, h5, h6),
+.chat-shell :where(h1, h2, h3, h4, h5, h6),
+.serotine-dialog :where(h1, h2, h3, h4, h5, h6) {
+  font-family: inherit;
 }

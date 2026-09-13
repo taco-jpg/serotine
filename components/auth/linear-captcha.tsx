@@ -151,13 +151,13 @@ export function LinearCaptcha({ onVerify, className }: LinearCaptchaProps) {
     <div className={cn("flex flex-col items-center space-y-4 w-full max-w-md mx-auto", className)}>
       <div className="flex items-center justify-between w-full">
         <div className="text-sm font-medium">Select the function that matches the graph</div>
-        <Button type="button" variant="ghost" size="icon" onClick={generateCaptcha} className="h-8 w-8">
+        <Button type="button" variant="ghost" size="icon" onClick={generateCaptcha} className="h-8 w-8" aria-label="Generate another graph">
           <RefreshCw className="h-4 w-4" />
         </Button>
       </div>
 
-      <div className="relative bg-background/50 border rounded-lg p-4 select-none flex justify-center">
-        <svg width={WIDTH} height={HEIGHT} className="overflow-visible">
+      <div className="relative flex w-full justify-center rounded-sm border border-border bg-background p-3 select-none">
+        <svg width={WIDTH} height={HEIGHT} viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="h-auto max-w-full">
           <defs>
             <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
               <polygon points="0 0, 10 3.5, 0 7" className="fill-foreground" />
@@ -219,16 +219,14 @@ export function LinearCaptcha({ onVerify, className }: LinearCaptchaProps) {
           <text
             x={toSvgX(yIntercept.x) + 10}
             y={toSvgY(yIntercept.y) - 10}
-            className="text-[14px] fill-purple-500 font-extrabold"
-            style={{ textShadow: "0px 0px 4px rgba(0,0,0,1)" }}
+            className="text-[14px] fill-primary font-mono font-medium"
           >
             (0, {yIntercept.y})
           </text>
           <text
             x={toSvgX(xIntercept.x) + 10}
             y={toSvgY(xIntercept.y) + 15}
-            className="text-[14px] fill-purple-500 font-extrabold"
-            style={{ textShadow: "0px 0px 4px rgba(0,0,0,1)" }}
+            className="text-[14px] fill-primary font-mono font-medium"
           >
             ({Number(xIntercept.x.toFixed(1))}, 0)
           </text>
@@ -243,7 +241,7 @@ export function LinearCaptcha({ onVerify, className }: LinearCaptchaProps) {
             variant={selectedId === opt.id ? (isCorrect ? "default" : "destructive") : "outline"}
             className={cn(
               "w-full font-mono text-xs sm:text-sm transition-all",
-              selectedId === opt.id && isCorrect && "bg-green-600 hover:bg-green-700 border-green-600",
+              selectedId === opt.id && isCorrect && "border-primary bg-primary text-primary-foreground",
             )}
             onClick={() => handleOptionClick(opt.id)}
             disabled={isCorrect === true}

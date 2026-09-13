@@ -119,7 +119,7 @@ async function main() {
       async function resolvedTheme(target, expected) {
         await target.waitForFunction(value => document.documentElement.classList.contains(value) && document.documentElement.style.colorScheme === value, expected)
         const chrome = await target.locator('meta[name="theme-color"]').evaluateAll(nodes => nodes.map(node => node.content))
-        assert.ok(chrome.length && chrome.every(color => color.toLowerCase() === (expected === 'dark' ? '#151922' : '#f8fafc')), `Browser chrome follows ${expected}: ${chrome}`)
+        assert.ok(chrome.length && chrome.every(color => color.toLowerCase() === (expected === 'dark' ? '#0b0e0b' : '#eeefe7')), `Browser chrome follows ${expected}: ${chrome}`)
       }
       async function chooseTheme(target, label) {
         await target.getByRole('button', { name: /^Theme: / }).click()
@@ -258,7 +258,7 @@ async function main() {
       await inbox.locator(`a[href="/chat/${owner.publicKey}"]:visible`).click()
       await message.waitFor()
       await inbox.getByRole('button', { name: 'Expand sidebar', exact: true }).click()
-      await page.waitForFunction(() => document.querySelector('#serotine-sidebar').getBoundingClientRect().width === 248)
+      await page.waitForFunction(() => document.querySelector('#serotine-sidebar').getBoundingClientRect().width === 264)
       console.log('PASS sidebar collapse, rail actions/navigation, persisted preference and expansion')
 
       await message.fill('Browser sent theme check')

@@ -88,7 +88,7 @@ export function AccountTools({ identity }: { identity: Identity }) {
         <li>Keep Serotine open to receive new messages on either device. This backup carries your existing history.</li>
       </ol>}
       {error && <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
-      {status && <p role="status" className="rounded-md border border-emerald-600/30 bg-emerald-600/10 p-3 text-sm text-emerald-700 dark:text-emerald-300">{status}</p>}
+      {status && <p role="status" className="rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-primary">{status}</p>}
       {mode === "security" ? <IdentitySecurity identity={identity} onBusyChange={setBusy} /> : <>
       {source && mode === "backup" && <p className="text-sm text-muted-foreground">Previous address: <span className="font-mono">{shortAddress(source.publicKey)}</span>. {source.retired && "This address is retired. This backup preserves its history but cannot restore relay access."} Choose a fresh password for this file.</p>}
       {conflict && <RestoreConfirmation conflict={conflict} busy={busy} onConfirm={() => void run(conflict.existingPublicKey)} onCancel={() => { setConflict(null); setSource(null) }} />}

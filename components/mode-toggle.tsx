@@ -52,8 +52,8 @@ export function ModeToggle() {
             <Icon className="size-4" aria-hidden="true" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" style={recoveryStyle} className="w-60 rounded-xl p-1.5">
-          <DropdownMenuLabel className="text-xs text-muted-foreground">Appearance</DropdownMenuLabel>
+        <DropdownMenuContent align="end" style={recoveryStyle} className="w-60 rounded-lg p-1.5">
+          <DropdownMenuLabel className="app-eyebrow">Appearance</DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuRadioGroup value={mounted ? theme : undefined} onValueChange={setTheme} aria-label="Theme">
             {themeOptions.map(({ value, label: optionLabel, icon: OptionIcon }) => (

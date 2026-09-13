@@ -25,7 +25,7 @@ function AttachmentCard({ attachment, query, mine, onRemove, disabled }: {
   const url = resource?.attachment === attachment ? resource.url : undefined
   const previewable = isPreviewableImage(attachment)
   const label = `${attachment.name}, ${formatFileSize(attachment.size)}`
-  return <li className={`min-w-0 overflow-hidden rounded-xl border ${mine ? "border-current/20 bg-current/5" : "border-border bg-card text-card-foreground"}`}>
+  return <li className={`min-w-0 overflow-hidden rounded-[4px] border ${mine ? "border-current/20 bg-current/5" : "border-border bg-card text-card-foreground"}`}>
     {previewable && <div className="flex h-48 min-w-40 items-center justify-center bg-current/5">
       {url && failedImage !== attachment
         ? <img src={url} alt={`Attachment preview: ${attachment.name}`} loading="lazy" decoding="async" className="h-full w-full object-contain" onError={() => setFailedImage(attachment)} />

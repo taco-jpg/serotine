@@ -5,9 +5,9 @@ import { ModeToggle } from "@/components/mode-toggle"
 
 export function SiteHeader() {
   return (
-    <header className="sticky top-0 z-50 w-full border-b border-border/80 bg-card/90 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-screen-2xl items-center gap-3 px-4">
-        <Link href="/" className="flex items-center gap-2">
+    <header className="app-surface sticky top-0 z-50 w-full border-b border-border bg-background">
+      <div className="mx-auto flex min-h-18 max-w-screen-2xl flex-wrap items-center gap-3 px-5 py-3 sm:px-8">
+        <Link href="/" aria-label="Serotine home" className="flex min-h-11 items-center gap-2">
           <AppLogo />
         </Link>
         <nav aria-label="Main navigation" className="ml-auto flex items-center gap-2">

@@ -24,6 +24,9 @@ test('all built-in variants remain readable and expose color-only semantic token
       const colors = theme[mode]
       assert.deepEqual(getContrastWarnings(colors), [], `${theme.id} ${mode}`)
       const variables = themeVariables(colors)
+      const errorTextWarnings = getContrastWarnings({ ...colors, foreground: variables['--destructive'] })
+        .filter(warning => ['Main text', 'Surface text', 'Sidebar text'].includes(warning.label))
+      assert.deepEqual(errorTextWarnings, [], `${theme.id} ${mode} error text must meet 4.5:1 contrast`)
       assert.equal(variables['--background'], colors.background)
       assert.equal(variables['--sidebar'], colors.sidebar)
       assert.equal(variables['--message-outgoing'], colors.outgoing)
@@ -32,7 +35,7 @@ test('all built-in variants remain readable and expose color-only semantic token
       assert.ok(Object.keys(variables).every(key => !/radius|spacing|font|height|width/.test(key)))
     }
   }
-  const warnings = getContrastWarnings({ ...PRESET_THEMES[0].light, foreground: '#f8fafc' })
+  const warnings = getContrastWarnings({ ...PRESET_THEMES[0].light, foreground: PRESET_THEMES[0].light.background })
   assert.ok(warnings.some(warning => warning.label === 'Main text' && warning.ratio === 1))
 })
 

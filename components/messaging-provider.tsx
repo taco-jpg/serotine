@@ -8,7 +8,7 @@ import type { CommunityService } from "@/lib/community-service"
 import type { CommunityModel } from "@/lib/community-types"
 import type { MessagingContextValue } from "@/lib/messaging-types"
 
-type CommunityMethods = Pick<CommunityService, "createCommunity" | "createInvite" | "joinCommunity" | "updateCommunity" | "moderate" | "approveRequest" | "rejectRequest" | "leave" | "sendMessage" | "reportMessage" | "hideMessage" | "revokeInvites">
+type CommunityMethods = Pick<CommunityService, "createCommunity" | "createInvite" | "joinCommunity" | "updateCommunity" | "moderate" | "approveRequest" | "rejectRequest" | "leave" | "sendMessage" | "reportMessage" | "hideMessage" | "revokeInvites" | "setCoOwner" | "transferOwnership" | "deleteCommunity">
 export type CommunityContextValue = CommunityMethods & Pick<MessagingContextValue, "identity" | "contacts" | "ready" | "error" | "status" | "preferences" | "setNotificationMode" | "sync" | "retry"> & {
   model: CommunityModel
   deliveryIssues: Array<{ id: string; communityId: string; kind: string; error: string }>
@@ -95,7 +95,12 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     identity: value.identity, contacts: value.contacts, ready, error: value.error, status: value.status, preferences: value.preferences,
     model: engine?.communities.model ?? emptyCommunityModel,
     deliveryIssues: engine?.records.filter(record => record.local && record.event.kind === "community" && record.error && record.event.recipients.some(peer => !record.delivered.includes(peer)))
-      .map(record => ({ id: record.event.id, communityId: record.event.conversationId, kind: record.event.payload.community!.type, error: record.error! })) ?? [],
+      .map(record => {
+        const data = record.event.payload.community!
+        const kind = data.type === "state" && data.state.deleted ? "delete"
+          : data.type === "state" && data.state.transfers?.at(-1)?.epoch === data.state.epoch ? "transfer" : data.type
+        return { id: record.event.id, communityId: record.event.conversationId, kind, error: record.error! }
+      }) ?? [],
     createCommunity: engine?.communities.createCommunity ?? unavailable,
     createInvite: engine?.communities.createInvite ?? unavailable,
     joinCommunity: engine?.communities.joinCommunity ?? unavailable,
@@ -108,6 +113,9 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     reportMessage: engine?.communities.reportMessage ?? unavailable,
     hideMessage: engine?.communities.hideMessage ?? unavailable,
     revokeInvites: engine?.communities.revokeInvites ?? unavailable,
+    setCoOwner: engine?.communities.setCoOwner ?? unavailable,
+    transferOwnership: engine?.communities.transferOwnership ?? unavailable,
+    deleteCommunity: engine?.communities.deleteCommunity ?? unavailable,
     markRead: engine?.markCommunityRead ?? unavailable,
     setNotificationMode: value.setNotificationMode, sync: value.sync, retry: value.retry,
   }), [engine, ready, value])

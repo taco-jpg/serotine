@@ -36,16 +36,18 @@ Drafts stay local to each browser and conversation. Backups do not include draft
 
 ## Communities (SIP 1)
 
-Open **Communities** in the inbox sidebar to create an invitation-only community or preview a shared invitation. Communities support up to 20 members and eight text channels, including channels where only the owner and moderators may post. Private groups are not converted automatically.
+Open **Communities** in the inbox sidebar to create an invitation-only community or preview a shared invitation. Communities support up to 20 members and eight text channels, including channels where only owners and moderators may post. Private groups are not converted automatically.
 
 - Invitations can permit direct admission or require approval. Joining always requires a click and is confirmed only after the owner sends an authenticated membership update. **The owner's Serotine device must be open and connected to process admissions and membership changes.**
 - Share the invitation link or its QR code. Invitations expire after seven days by default. Owners can revoke all existing invitations or pause joining.
 - New members receive messages sent after admission. Earlier history is not distributed to them.
-- Owners manage channels and moderator roles. Owners review admission requests. Owners and moderators can review reports, hide messages for cooperating clients, and remove or ban member addresses. Moderator membership actions wait for the owner to process them.
+- The primary owner can assign co-owners, transfer ownership to another member, or delete the community. Co-owners can manage settings, channels, moderators, and ordinary members; their changes are queued for the primary owner to process. Moderators retain reporting, hiding, and member controls. Ownership changes and deletion require the primary owner.
 - Each channel has unread counts and notification controls. Messages and preferences are included in the existing full backup.
 - Community text is signed and encrypted separately for each recipient through the existing relay. Once a client has synchronized a removal, it stops sending to that address. Removal cannot recall already delivered content, and a stale device may not yet know that membership changed.
 
-This first stage does not include a public directory, community file uploads, voice rooms, ownership transfer, or unbounded membership. All participants need an updated client; older clients reject community events safely. See [the implementation protocol](docs/SIP-1-communities.md).
+Ownership transfer keeps the community ID, channels, and existing history. Previous invitations are revoked; pending requests to the former owner are declined so applicants can use a new invitation. Deletion closes the community after members synchronize and hides its history in cooperating clients; it cannot recall retained copies. Older clients must update before using upgraded communities.
+
+This first stage does not include a public directory, community file uploads, voice rooms, or unbounded membership. All participants need an updated client; older clients reject community events safely. See [the implementation protocol](docs/SIP-1-communities.md).
 
 ## Run locally
 

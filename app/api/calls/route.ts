@@ -39,7 +39,7 @@ export async function POST(request: Request): Promise<Response> {
     catch { throw new CallRelayError("Invalid calling request.") }
     if (!isCallObject(body) || body.version !== 1 || typeof body.action !== "string" || !isCallObject(body.proof)
       || Object.keys(body).length !== 4 || !Object.hasOwn(body, "data")) throw new CallRelayError("Invalid calling request.")
-    return json(await handleCallRequest(body.action, body.data, body.proof as unknown as RequestProof))
+    return json({ ...(await handleCallRequest(body.action, body.data, body.proof as unknown as RequestProof)), serverTime: Date.now() })
   } catch (error) {
     if (error instanceof CallRelayError) return json({ success: false, error: error.message, ...(error.code ? { code: error.code } : {}) }, error.status)
     // No raw negotiation, credentials, request bodies, or infrastructure errors in logs.

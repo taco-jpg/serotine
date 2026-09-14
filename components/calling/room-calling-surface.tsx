@@ -1,6 +1,8 @@
 "use client"
 
 import Link from "next/link"
+import type { CallConnectionDiagnostics } from "@/lib/call-ice"
+import { ConnectionDetails } from "./connection-details"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Camera, Expand, Loader2, Mic, MicOff, Phone, PhoneOff, RotateCw, Settings2, Shield, Users, Video, VideoOff, Volume2, X } from "lucide-react"
 import { useCalling } from "@/components/calling-provider"
@@ -56,10 +58,10 @@ function RoomVideo({ stream, label, mirror }: { stream: MediaStream | null; labe
   </div>
 }
 
-function ParticipantTile({ stream, label, microphoneMuted, cameraEnabled, status, error, local, voiceOnly }: { stream: MediaStream | null; label: string; microphoneMuted: boolean; cameraEnabled: boolean; status: string; error?: string | null; local?: boolean; voiceOnly?: boolean }) {
+function ParticipantTile({ stream, label, microphoneMuted, cameraEnabled, status, error, local, voiceOnly, connection }: { stream: MediaStream | null; label: string; microphoneMuted: boolean; cameraEnabled: boolean; status: string; error?: string | null; local?: boolean; voiceOnly?: boolean; connection?: CallConnectionDiagnostics | null }) {
   return <figure className="min-w-0 overflow-hidden rounded-md border border-border bg-card">
     {!voiceOnly && (cameraEnabled ? <RoomVideo stream={stream} label={label} mirror={local} /> : <div className="flex aspect-video min-h-24 items-center justify-center gap-2 bg-muted p-4 text-sm text-muted-foreground"><VideoOff className="size-5 shrink-0" />Camera off</div>)}
-    <figcaption className={`space-y-1 px-3 py-2 ${voiceOnly ? "" : "border-t border-border"}`}><p className="flex min-w-0 items-center gap-2 text-sm">{microphoneMuted ? <MicOff aria-label="Microphone muted" className="size-4 shrink-0 text-muted-foreground" /> : <Mic aria-label="Microphone on" className="size-4 shrink-0 text-primary" />}<span className="min-w-0 truncate">{label}</span></p><p className="text-xs text-muted-foreground">{status}</p>{error && <p role="status" className="break-words text-xs text-destructive">{error}</p>}</figcaption>
+    <figcaption className={`space-y-1 px-3 py-2 ${voiceOnly ? "" : "border-t border-border"}`}><p className="flex min-w-0 items-center gap-2 text-sm">{microphoneMuted ? <MicOff aria-label="Microphone muted" className="size-4 shrink-0 text-muted-foreground" /> : <Mic aria-label="Microphone on" className="size-4 shrink-0 text-primary" />}<span className="min-w-0 truncate">{label}</span></p><p className="text-xs text-muted-foreground">{status}</p><ConnectionDetails connection={connection ?? null} />{error && <p role="status" className="break-words text-xs text-destructive">{error}</p>}</figcaption>
   </figure>
 }
 
@@ -136,7 +138,7 @@ export function RoomCallingSurface() {
           <ParticipantTile stream={snapshot.localStream} label="You" microphoneMuted={snapshot.microphoneMuted} cameraEnabled={snapshot.cameraEnabled} status={voiceOnly ? "Your microphone is not shared yet" : "Only you can see this preview"} local voiceOnly={voiceOnly} />
           <RoomDeviceControls />
         </>}
-        <p className="flex items-start gap-2 text-xs leading-5 text-muted-foreground"><Shield className="mt-0.5 size-4 shrink-0" /><span>Calls connect directly between participants. Other participants may see your network address. Audio and video stay encrypted between your devices. Some restrictive networks cannot connect.</span></p>
+        <p className="flex items-start gap-2 text-xs leading-5 text-muted-foreground"><Shield className="mt-0.5 size-4 shrink-0" /><span>Calls prefer a direct connection and use Cloudflare TURN when needed. Other participants may see your network address. Audio and video stay encrypted between your devices. Cloudflare TURN provides a fallback for restricted networks.</span></p>
         <p className="text-xs leading-5 text-muted-foreground">Up to 8 people can join. Keep Serotine open during the call. Joining does not ring other members.</p>
         {snapshot.notice && <p role="status" className="text-sm text-muted-foreground">{snapshot.notice}</p>}
         {(error || snapshot.error) && <p role="alert" className="text-sm text-destructive">{error || snapshot.error}</p>}
@@ -149,7 +151,7 @@ export function RoomCallingSurface() {
         <DialogHeader><DialogTitle>{snapshot.targetLabel}</DialogTitle><DialogDescription>{count}/8 participants · {duration}. Collapse this view to keep chatting.</DialogDescription></DialogHeader>
         <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <ParticipantTile stream={snapshot.localStream} label="You" microphoneMuted={snapshot.microphoneMuted} cameraEnabled={snapshot.cameraEnabled} status={snapshot.phase === "joining" ? "Joining call" : "In call"} local voiceOnly={voiceOnly} />
-          {snapshot.participants.map(participant => <ParticipantTile key={`${participant.publicKey}:${participant.sessionId}`} stream={participant.stream} label={participant.label} microphoneMuted={participant.microphoneMuted} cameraEnabled={participant.cameraEnabled} status={participantLabels[participant.phase]} error={participant.error} voiceOnly={voiceOnly} />)}
+          {snapshot.participants.map(participant => <ParticipantTile key={`${participant.publicKey}:${participant.sessionId}`} stream={participant.stream} label={participant.label} microphoneMuted={participant.microphoneMuted} cameraEnabled={participant.cameraEnabled} connection={participant.connection} status={participantLabels[participant.phase]} error={participant.error} voiceOnly={voiceOnly} />)}
         </div>
         {snapshot.participants.length === 0 && snapshot.phase === "joined" && <p role="status" className="text-sm text-muted-foreground">You are the first here. Other members can join from the {target?.kind === "channel" ? "voice channel" : "group’s call menu"}.</p>}
         <RoomDeviceControls />

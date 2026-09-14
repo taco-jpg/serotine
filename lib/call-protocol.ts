@@ -1,5 +1,7 @@
 import { ID_PATTERN, PUBLIC_KEY_PATTERN } from "./protocol"
 
+// Bound small clock/latency differences without disabling expiry or replay checks.
+export const CALL_CLOCK_SKEW_MS = 5_000
 export const CALL_INVITE_TTL_MS = 40_000
 export const CALL_SIGNAL_TTL_MS = 30_000
 export const CALL_PRESENCE_TTL_MS = 30_000
@@ -45,7 +47,7 @@ export interface EncryptedCallSignal extends Omit<CallSignal, "payload"> {
   encryptedData: string
   sequence?: number
 }
-export interface CallConfiguration { iceServers: RTCIceServer[]; relayAvailable: boolean; expiresAt: number }
+export interface CallConfiguration { iceServers: RTCIceServer[]; relayAvailable: boolean; expiresAt: number; turnStatus?: "ready" | "not-configured" | "unavailable" }
 /** RFC 7064 server URI without userinfo, paths, query parameters or credentials. */
 export function isStunUrl(value: unknown): value is string {
   if (typeof value !== "string" || value.length > 512) return false

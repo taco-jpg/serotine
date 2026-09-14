@@ -1,3 +1,4 @@
+import { callConfiguration, type CallTurnEnvironment } from "./call-turn"
 import { getCloudflareContext } from "@opennextjs/cloudflare"
 import { getDB, type D1DatabaseBinding } from "./db"
 import { ensureCallRelaySchema } from "./call-relay-schema"
@@ -6,8 +7,8 @@ import { handleCallRoomRequest } from "./call-room-relay"
 import { ensureIdentityRetirementSchema } from "./identity-retirement-schema"
 import { requestProofFailureMessage, verifyRequestProofResult } from "./request-auth"
 import { AUTH_WINDOW_MS, type RequestProof } from "./protocol"
-import { CALL_INVITE_TTL_MS, CALL_LEASE_TTL_MS, CALL_PAGE_SIZE, CALL_PRESENCE_TTL_MS, CALL_SIGNAL_TTL_MS,
-  isCallId, isCallObject, isCallPeer, isCallReason, isEncryptedCallSignal, isStunUrl,
+import { CALL_CLOCK_SKEW_MS, CALL_INVITE_TTL_MS, CALL_LEASE_TTL_MS, CALL_PAGE_SIZE, CALL_PRESENCE_TTL_MS, CALL_SIGNAL_TTL_MS,
+  isCallId, isCallObject, isCallPeer, isCallReason, isEncryptedCallSignal,
   type CallConfiguration, type CallSession, type EncryptedCallSignal } from "./call-protocol"
 
 const COLUMNS = "callId, caller, recipient, callerSession, recipientSession, status, createdAt, inviteExpiresAt, expiresAt, reason, noHistory"
@@ -70,14 +71,9 @@ async function touch(db: D1DatabaseBinding, publicKey: string, device: string, n
 }
 
 async function configuration(policy: "all" | "relay"): Promise<CallConfiguration> {
-  if (policy !== "all") throw new CallRelayError("Calling now uses direct peer-to-peer connections only. Reload Serotine to use direct calling.", 409, "direct-only")
+  if (policy !== "all") throw new CallRelayError("Calling now chooses direct or managed TURN routes automatically. Reload Serotine to update calling.", 409, "direct-only")
   const { env } = await getCloudflareContext({ async: true })
-  const config = env as unknown as { CALL_STUN_URLS?: string }
-  // STUN discovers a peer's network address; no credentials or media relay are
-  // supported. Ignore any obsolete relay bindings left on an older deployment.
-  const configured = typeof config.CALL_STUN_URLS === "string" ? config.CALL_STUN_URLS : "stun:stun.l.google.com:19302"
-  const urls = [...new Set(configured.split(",").map(url => url.trim()).filter(isStunUrl))].slice(0, 4)
-  return { iceServers: urls.length ? [{ urls }] : [], relayAvailable: false, expiresAt: Date.now() + 10 * 60_000 }
+  return callConfiguration(env as unknown as CallTurnEnvironment)
 }
 
 function sessionNotification(session: CallSession | null) {
@@ -128,7 +124,7 @@ export async function handleCallRequest(action: string, data: unknown, proof: Re
     if (!isEncryptedCallSignal(data.signal) || typeof data.noHistory !== "boolean") throw invalid()
     const signal = data.signal
     if (signal.sender !== self || signal.senderSession !== device || signal.targetSession !== null
-      || signal.expiresAt <= now || signal.expiresAt > now + CALL_INVITE_TTL_MS) throw invalid()
+      || signal.expiresAt <= now || signal.expiresAt > now + CALL_INVITE_TTL_MS + CALL_CLOCK_SKEW_MS) throw invalid()
     // A SINGLE SQLite statement arbitrates BOTH roles, including crossed calls
     // and concurrent callers on linked devices. Never use read-then-insert locks.
     const inserted = await db.prepare(`INSERT INTO CallSession(callId, caller, recipient, callerSession, recipientSession, status,
@@ -168,7 +164,7 @@ export async function handleCallRequest(action: string, data: unknown, proof: Re
   if (action === "call:send") {
     shape(data, ["sessionId", "signal", "noHistory"])
     if (typeof data.noHistory !== "boolean" || !isEncryptedCallSignal(data.signal) || data.signal.sender !== self || data.signal.senderSession !== device
-      || data.signal.targetSession === null || data.signal.expiresAt <= now || data.signal.expiresAt > now + CALL_SIGNAL_TTL_MS) throw invalid()
+      || data.signal.targetSession === null || data.signal.expiresAt <= now || data.signal.expiresAt > now + CALL_SIGNAL_TTL_MS + CALL_CLOCK_SKEW_MS) throw invalid()
     if (data.noHistory) await db.prepare(`UPDATE CallSession SET noHistory = 1 WHERE callId = ?
       AND ((caller = ? AND callerSession = ?) OR (recipient = ? AND recipientSession = ?))`)
       .bind(data.signal.callId, self, device, self, device).run()

@@ -245,10 +245,10 @@ test('room heartbeat is device-bound and expired sessions cannot be revived or r
   assert.equal((await bob.room.status(target)).participants.length, 1)
 })
 
-test('room admission rejects legacy relay policy and permits only direct P2P participants', async t => {
+test('room admission rejects legacy forced relay policy and permits automatic ICE participants', async t => {
   const h = harness(t), [alice, bob] = await Promise.all([h.identity(), h.identity()])
   const target = await group(h, [alice, bob])
-  await assert.rejects(alice.room.join(target, 'voice', 'relay'), /direct peer-to-peer/)
+  await assert.rejects(alice.room.join(target, 'voice', 'relay'), /chooses direct or managed TURN routes automatically/)
   assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM CallRoomMember').get().n, 0)
   await alice.room.join(target, 'voice', 'all')
   assert.equal((await bob.room.join(target, 'voice', 'all')).participants.length, 2)

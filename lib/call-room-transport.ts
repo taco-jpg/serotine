@@ -2,7 +2,7 @@ import type { Identity } from "./identity"
 import type { RequestProof } from "./protocol"
 import { decryptFromPeer, encryptForPeer, importKey } from "./crypto"
 import { createRequestProof, verifyRequestProof } from "./request-auth"
-import { CALL_PAGE_SIZE, CALL_SIGNAL_TTL_MS, isCallId, isCallObject, type CallRoutingPolicy } from "./call-protocol"
+import { CALL_CLOCK_SKEW_MS, CALL_PAGE_SIZE, CALL_SIGNAL_TTL_MS, isCallId, isCallObject, type CallRoutingPolicy } from "./call-protocol"
 import { CallTransportError, createCallSocket } from "./call-socket"
 import { canJoinCommunityVoiceChannel } from "./community-protocol"
 import { callRoomId, isCallRoomState, isCallRoomPayload, isEncryptedCallRoomSignal,
@@ -18,6 +18,7 @@ export function createCallRoomTransport(identity: Identity, sessionId = crypto.r
   const seen = new Map<string, number>()
   const socket = createCallSocket(identity, sessionId)
   const request = socket.request
+  const now = () => socket.now?.() ?? Date.now()
   function room(result: Record<string, unknown>, target: CallRoomTarget): CallRoomState {
     const members = target.kind === "group" ? target.group.members : target.community.members.filter(p => canJoinCommunityVoiceChannel(target.community, p, target.channelId))
     if (!isCallRoomState(result.room) || result.room.roomId !== callRoomId(target) || result.room.participants.some(p => !members.includes(p.publicKey))) throw new CallTransportError(UNEXPECTED)
@@ -25,11 +26,11 @@ export function createCallRoomTransport(identity: Identity, sessionId = crypto.r
   }
   async function open(wire: EncryptedCallRoomSignal, state: CallRoomState): Promise<CallRoomSignal | null> {
     try {
-      const now = Date.now()
-      if (wire.roomId !== state.roomId || wire.recipient !== identity.publicKey || wire.targetSession !== sessionId || wire.expiresAt <= now
-        || wire.expiresAt > now + CALL_SIGNAL_TTL_MS || seen.has(wire.id)
-        || !state.participants.some(p => p.publicKey === wire.sender && p.sessionId === wire.senderSession && p.expiresAt > now)
-        || !state.participants.some(p => p.publicKey === identity.publicKey && p.sessionId === sessionId && p.expiresAt > now)) return null
+      const time = now()
+      if (wire.roomId !== state.roomId || wire.recipient !== identity.publicKey || wire.targetSession !== sessionId || wire.expiresAt <= time
+        || wire.expiresAt > time + CALL_SIGNAL_TTL_MS + CALL_CLOCK_SKEW_MS || seen.has(wire.id)
+        || !state.participants.some(p => p.publicKey === wire.sender && p.sessionId === wire.senderSession && p.expiresAt > time)
+        || !state.participants.some(p => p.publicKey === identity.publicKey && p.sessionId === sessionId && p.expiresAt > time)) return null
       const decoded: unknown = JSON.parse(await decryptFromPeer(wire.encryptedData, await key, wire.sender))
       if (!isCallObject(decoded) || !isCallObject(decoded.envelope) || !isCallObject(decoded.proof)) return null
       const envelope = decoded.envelope
@@ -42,6 +43,7 @@ export function createCallRoomTransport(identity: Identity, sessionId = crypto.r
   }
   return {
     sessionId,
+    now,
     subscribe: socket.subscribe,
     dispose: socket.dispose,
     async join(target: CallRoomTarget, mode: "voice" | "video", policy: CallRoutingPolicy): Promise<CallRoomState> {
@@ -59,15 +61,15 @@ export function createCallRoomTransport(identity: Identity, sessionId = crypto.r
       let last = after
       for (const signal of result.signals) { if (!Number.isSafeInteger(signal.sequence) || Number(signal.sequence) <= last) throw new CallTransportError(UNEXPECTED); last = Number(signal.sequence) }
       if (result.nextCursor !== last) throw new CallTransportError(UNEXPECTED)
-      for (const [id, expires] of seen) if (expires <= Date.now()) seen.delete(id)
+      for (const [id, expires] of seen) if (expires <= now()) seen.delete(id)
       const decoded = await Promise.all(result.signals.map(signal => open(signal, state)))
       return { room: state, signals: decoded.filter((signal): signal is CallRoomSignal => signal !== null), nextCursor: last, hasMore: result.signals.length === CALL_PAGE_SIZE }
     },
     async send(roomId: string, peer: string, targetSession: string, payload: CallRoomPayload): Promise<void> {
       if (!isCallRoomPayload(payload)) throw new CallTransportError("Invalid room negotiation.")
       const envelope: CallRoomSignal = { id: crypto.randomUUID(), roomId, sender: identity.publicKey, recipient: peer, senderSession: sessionId,
-        targetSession, expiresAt: Date.now() + CALL_SIGNAL_TTL_MS, payload }
-      const proof = await createRequestProof("room:envelope", envelope, identity.privateKey, identity.publicKey)
+        targetSession, expiresAt: now() + CALL_SIGNAL_TTL_MS, payload }
+      const proof = await createRequestProof("room:envelope", envelope, identity.privateKey, identity.publicKey, now())
       const encryptedData = await encryptForPeer(JSON.stringify({ envelope, proof }), await key, peer)
       const { payload: _payload, ...routing } = envelope
       await request("room:send", { sessionId, signal: { ...routing, encryptedData } })

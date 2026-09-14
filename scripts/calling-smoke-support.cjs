@@ -68,7 +68,7 @@ function signalingObserver() {
   function verify(requiredActions = []) {
     assert.ok(sockets.length > 0, 'Used real browser WebSocket connections to the calling Worker')
     assert.ok(frames.length > 0, 'Exchanged actual WebSocket signaling frames')
-    assert.deepEqual(http, [], 'Calling makes no HTTP polling, ICE credential, or TURN provider requests')
+    assert.deepEqual(http, [], 'Browser calling makes no HTTP polling or direct TURN credential-provider requests')
     assert.ok(frames.every(({ body }) => !body.includes('a=fingerprint:') && !body.includes('a=ice-pwd:') && !body.includes('candidate:')), 'SDP and ICE remain encrypted inside signaling frames')
     for (const action of requiredActions) assert.ok(frames.some(({ direction, body }) => direction === 'framesent' && body.includes(action)), `Sent ${action} through WebSocket`)
   }
@@ -76,17 +76,20 @@ function signalingObserver() {
 }
 
 async function verifyDirectConfiguration(page, field = 'peerConnections') {
-  const configurations = await page.evaluate(field => window[field].map(pc => pc.getConfiguration()), field)
+  // Return only booleans to the test process, never ICE credentials.
+  const configurations = await page.evaluate(field => window[field].map(pc => {
+    const configuration = pc.getConfiguration()
+    return {
+      directAllowed: configuration.iceTransportPolicy === 'all',
+      hasStun: configuration.iceServers.some(server => (Array.isArray(server.urls) ? server.urls : [server.urls]).some(url => /^stuns?:/.test(url))),
+      managedOnly: configuration.iceServers.every(server => (Array.isArray(server.urls) ? server.urls : [server.urls]).every(url => /^stuns?:/.test(url) || /^turns?:turn\.cloudflare\.com:/.test(url))),
+    }
+  }), field)
   assert.ok(configurations.length > 0, 'Created native WebRTC peer connections')
   for (const configuration of configurations) {
-    assert.notEqual(configuration.iceTransportPolicy, 'relay', 'Never forces relayed media')
-    assert.ok(configuration.iceServers.length > 0, 'STUN is configured for direct NAT discovery')
-    for (const server of configuration.iceServers) {
-      const urls = Array.isArray(server.urls) ? server.urls : [server.urls]
-      assert.ok(urls.length > 0 && urls.every(url => /^stuns?:/i.test(url)), 'ICE servers are exclusively STUN')
-      assert.ok(!server.username, 'No relay username')
-      assert.ok(!server.credential, 'No relay credential')
-    }
+    assert.equal(configuration.directAllowed, true, 'Standard ICE keeps direct routing enabled')
+    assert.equal(configuration.hasStun, true, 'STUN is configured for NAT discovery')
+    assert.equal(configuration.managedOnly, true, 'Only managed Cloudflare TURN can supplement STUN')
   }
 }
 

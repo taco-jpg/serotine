@@ -1,9 +1,11 @@
+import type { CallConnectionDiagnostics } from "./call-ice"
 import type { Identity } from "./identity"
 import type { CallMode, CallSettings } from "./call-types"
 import type { CallRoomTarget } from "./call-room-transport"
 
 export type CallRoomPhase = "idle" | "preparing" | "preview" | "joining" | "joined" | "ended" | "failed"
 export interface CallRoomParticipantSnapshot {
+  connection: CallConnectionDiagnostics | null
   publicKey: string
   sessionId: string
   label: string

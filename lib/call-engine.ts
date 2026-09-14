@@ -1,5 +1,5 @@
 import { createCallTransport } from "./call-transport"
-import { assertDirectCandidate, assertDirectDescription, directIceConfiguration } from "./call-ice"
+import { callIceConfiguration, observeCallConnection } from "./call-ice"
 import type { CallSession, CallSignal, CallSignalPayload } from "./call-protocol"
 import { loadContacts, shortAddress } from "./identity"
 import type { CallController, CallEngineOptions, CallMode, CallPhase, CallSettings, CallSnapshot, CompletedCall } from "./call-types"
@@ -65,7 +65,10 @@ export class CallEngine implements CallController {
   private accepted = false
   private recorded = false
   private recentCompleted = new Map<string, CompletedCall>()
-  private configuration: RTCConfiguration = directIceConfiguration([])
+  private configuration: RTCConfiguration = callIceConfiguration([])
+  private configurationRefreshAt = 0
+  private configurationExpiresAt = 0
+  private stopDiagnostics: (() => void) | null = null
   private remoteFingerprint: string | null = null
   private reconnectAttempted = false
   private connectingPreview = false
@@ -76,9 +79,9 @@ export class CallEngine implements CallController {
   constructor(private readonly options: CallEngineOptions, private readonly dependencies: CallEngineDependencies = {}) {
     this.transport = dependencies.transport ?? createCallTransport(options.identity)
     this.mediaDevices = dependencies.mediaDevices ?? (typeof navigator !== "undefined" ? navigator.mediaDevices : undefined)
-    this.now = dependencies.now ?? Date.now
+    this.now = dependencies.now ?? this.transport.now ?? Date.now
     this.initial = {
-      phase: "idle", callId: null, peer: null, peerLabel: "", direction: null, mode: "audio",
+      connection: null, phase: "idle", callId: null, peer: null, peerLabel: "", direction: null, mode: "audio",
       microphoneMuted: false, cameraEnabled: false, remoteMicrophoneMuted: false, remoteCameraEnabled: false,
       localStream: null, remoteStream: null, connectedAt: null, error: null, notice: null,
       devices: [], microphoneId: "", cameraId: "", settings: { silenceIncoming: Boolean(options.settings?.silenceIncoming) },
@@ -145,6 +148,12 @@ export class CallEngine implements CallController {
         await this.transport.heartbeat(peers, peers.filter(peer => this.eligible(peer, true)))
         this.heartbeatAt = this.now()
       }
+      if (this.pc && this.snapshot.phase === "connected" && this.now() >= this.configurationRefreshAt) {
+        this.configurationRefreshAt = this.now() + 30_000
+        const generation = this.generation
+        const configuration = await this.transport.configuration("all")
+        if (this.live(generation)) this.applyConfiguration(configuration)
+      }
       const response = await this.transport.poll(this.cursor)
       if (this.disposed) return
       this.cursor = response.nextCursor
@@ -206,7 +215,7 @@ export class CallEngine implements CallController {
     this.localCandidateCount = 0
     this.remoteCandidateCount = 0
     this.iceServerFailed = false
-    this.update({ phase: direction === "incoming" ? "incoming" : "preparing", callId, peer, direction, mode,
+    this.update({ connection: null, phase: direction === "incoming" ? "incoming" : "preparing", callId, peer, direction, mode,
       peerLabel: this.options.getPeerPolicy(peer).label || shortAddress(peer), microphoneMuted: false, cameraEnabled: false,
       remoteMicrophoneMuted: false, remoteCameraEnabled: mode === "video", localStream: null, remoteStream: null,
       connectedAt: null, error: null, notice: null })
@@ -249,7 +258,7 @@ export class CallEngine implements CallController {
   private async prepareMedia(mode: CallMode, generation: number) {
     const configuration = await this.transport.configuration("all")
     if (!this.live(generation)) return
-    this.configuration = directIceConfiguration(configuration.iceServers)
+    this.applyConfiguration(configuration)
     const audio = await this.mediaDevices!.getUserMedia({ audio: this.snapshot.microphoneId ? { deviceId: { exact: this.snapshot.microphoneId } } : true, video: false })
     if (!this.live(generation)) { stopStream(audio); return }
     stopStream(this.snapshot.localStream)
@@ -269,6 +278,18 @@ export class CallEngine implements CallController {
     if (!this.live(generation)) return
     await this.refreshDevices()
     if (this.live(generation)) this.update({ phase: "preview" })
+  }
+
+  private applyConfiguration(configuration: import("./call-protocol").CallConfiguration) {
+    if (!configuration.relayAvailable && this.configuration.iceServers?.some(server => !!server.credential) && this.configurationExpiresAt > this.now() + 30_000) {
+      this.configurationRefreshAt = this.now() + 30_000
+      return
+    }
+    this.configurationExpiresAt = configuration.expiresAt
+    this.configuration = callIceConfiguration(configuration.iceServers)
+    this.configurationRefreshAt = Math.max(this.now() + 30_000, configuration.expiresAt - 120_000)
+    this.pc?.setConfiguration(this.configuration)
+    this.update({ notice: configuration.relayAvailable ? null : "TURN fallback is unavailable. This call can connect only if your networks allow a direct route." })
   }
 
   async connectPreview() {
@@ -372,7 +393,6 @@ export class CallEngine implements CallController {
           if (this.live(generation)) await this.send({ kind: "answer", description: { type: "answer", sdp: pc.localDescription!.sdp } })
         }
       } else if (payload.kind === "ice") {
-        assertDirectCandidate(payload.candidate.candidate || "")
         this.remoteCandidateCount++
         if (this.pc.remoteDescription) await this.pc.addIceCandidate(payload.candidate)
         else if (this.pendingIce.length < 128) this.pendingIce.push(payload.candidate)
@@ -386,7 +406,6 @@ export class CallEngine implements CallController {
   }
 
   private authenticateDescription(sdp: string) {
-    assertDirectDescription(sdp)
     // The encrypted, signed signaling envelope authenticates this DTLS fingerprint.
     // Keep it pinned through ICE restarts rather than accepting a different media identity.
     const fingerprints = [...sdp.matchAll(/^a=fingerprint:sha-256 ([A-Fa-f0-9:]+)\r?$/gm)].map(match => match[1].toUpperCase())
@@ -400,14 +419,15 @@ export class CallEngine implements CallController {
     const generation = this.generation
     const pc = this.dependencies.createPeerConnection?.(this.configuration) ?? new RTCPeerConnection(this.configuration)
     this.pc = pc
+    this.stopDiagnostics = observeCallConnection(pc, connection => {
+      if (this.live(generation) && this.pc === pc) this.update({ connection })
+    })
     const stream = this.snapshot.localStream!
     this.audioSender = pc.addTransceiver(stream.getAudioTracks()[0] ?? "audio", { direction: "sendrecv", streams: [stream] }).sender
     // Reserve video up front; explicit camera toggles can replace the track without renegotiating.
     this.videoSender = pc.addTransceiver(stream.getVideoTracks()[0] ?? "video", { direction: "sendrecv", streams: [stream] }).sender
     pc.onicecandidate = event => {
       if (event.candidate && this.live(generation)) {
-        try { assertDirectCandidate(event.candidate.candidate) }
-        catch (error) { void this.finish("failed", descriptionError(error)); return }
         this.localCandidateCount++
         void this.sendCandidate(event.candidate.toJSON(), generation)
       }
@@ -424,6 +444,7 @@ export class CallEngine implements CallController {
       if (pc.connectionState === "connected") {
         if (this.deadline) clearTimeout(this.deadline)
         this.deadline = null
+        this.reconnectAttempted = false
         this.update({ phase: "connected", connectedAt: this.snapshot.connectedAt ?? this.now(), error: null })
         void this.sendMediaState()
       } else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") this.beginReconnect()
@@ -432,8 +453,9 @@ export class CallEngine implements CallController {
   }
 
   private connectionFailure() {
-    if (this.iceServerFailed || !this.localCandidateCount || !this.remoteCandidateCount) return "A direct connection could not be established. Keep both pages open and try another network. This network or browser may block direct calls."
-    return "A direct connection could not be established between these networks. Try a different Wi-Fi or mobile network. The call ended without sending audio or video through a server."
+    return this.configuration.iceServers?.some(server => !!server.credential)
+      ? "The WebRTC connection failed, including the managed TURN fallback. Check your connection and try again."
+      : "A direct connection could not be established and TURN fallback is unavailable. Check your connection; the site owner may need to configure calling."
   }
 
   private async sendCandidate(candidate: RTCIceCandidateInit, generation: number) {
@@ -465,7 +487,7 @@ export class CallEngine implements CallController {
     if (this.reconnectAttempted) { void this.finish("failed", "The connection was interrupted again. Ended the call; you can try a new call."); return }
     this.reconnectAttempted = true
     this.update({ phase: "reconnecting" })
-    this.timer(this.dependencies.reconnectTimeoutMs ?? 15_000, "failed", () => this.connectionFailure())
+    this.timer(this.dependencies.reconnectTimeoutMs ?? 30_000, "failed", () => this.connectionFailure())
     void this.refreshConnection()
   }
   private async refreshConnection() {
@@ -475,8 +497,7 @@ export class CallEngine implements CallController {
     try {
       const configuration = await this.transport.configuration("all")
       if (!this.live(generation) || pc !== this.pc) return
-      this.configuration = directIceConfiguration(configuration.iceServers)
-      pc.setConfiguration(this.configuration)
+      this.applyConfiguration(configuration)
       if (this.snapshot.direction === "outgoing") await this.offer(true)
       else await this.send({ kind: "restart" })
     } catch (error) { if (this.live(generation)) await this.finish("failed", descriptionError(error)) }
@@ -646,6 +667,7 @@ export class CallEngine implements CallController {
     this.pendingCapture.clear()
     if (this.deadline) clearTimeout(this.deadline)
     this.deadline = null
+    this.stopDiagnostics?.(); this.stopDiagnostics = null
     const pc = this.pc
     this.pc = null
     if (pc) { pc.onicecandidate = null; pc.onicecandidateerror = null; pc.ontrack = null; pc.onconnectionstatechange = null; pc.close() }

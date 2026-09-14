@@ -5,7 +5,7 @@ import type { D1DatabaseBinding } from "./db"
 import { authorize, CallRelayError } from "./call-relay"
 import { validateGroup } from "./messaging"
 import { canJoinCommunityVoiceChannel, validateCommunityState } from "./community-protocol"
-import { CALL_PAGE_SIZE, CALL_SIGNAL_TTL_MS, isCallId, isCallObject } from "./call-protocol"
+import { CALL_CLOCK_SKEW_MS, CALL_PAGE_SIZE, CALL_SIGNAL_TTL_MS, isCallId, isCallObject } from "./call-protocol"
 import { CALL_ROOM_LEASE_MS, CALL_ROOM_LIMIT, callRoomId, isCallRoomId, isEncryptedCallRoomSignal,
   type CallRoomTarget, type CallRoomState, type CallRoomParticipant, type EncryptedCallRoomSignal } from "./call-room-protocol"
 
@@ -108,7 +108,7 @@ export async function handleCallRoomRequest(action: string, data: unknown, proof
   if (action === "room:send") {
     shape(data, ["sessionId", "signal"])
     if (!isEncryptedCallRoomSignal(data.signal) || data.signal.sender !== self || data.signal.senderSession !== device
-      || data.signal.expiresAt <= now || data.signal.expiresAt > now + CALL_SIGNAL_TTL_MS) throw invalid()
+      || data.signal.expiresAt <= now || data.signal.expiresAt > now + CALL_SIGNAL_TTL_MS + CALL_CLOCK_SKEW_MS) throw invalid()
     const s = data.signal
     const inserted = await db.prepare(`INSERT INTO CallRoomSignal(id, roomId, sender, recipient, senderSession, targetSession, expiresAt, encryptedData)
       SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS(SELECT 1 FROM CallRoomMember m WHERE m.publicKey = ? AND m.sessionId = ? AND m.roomId = ? AND m.expiresAt > ? AND ${ALLOWED})
@@ -121,7 +121,7 @@ export async function handleCallRoomRequest(action: string, data: unknown, proof
   }
   shape(data, action === "room:join" ? ["sessionId", "target", "mode", "policy"] : action === "room:poll" ? ["sessionId", "target", "after"] : ["sessionId", "target"])
   if (action === "room:join" && (!["voice", "video"].includes(String(data.mode)) || !["all", "relay"].includes(String(data.policy)))) throw invalid()
-  if (action === "room:join" && data.policy !== "all") throw new CallRelayError("Calling now uses direct peer-to-peer connections only. Reload Serotine to use direct calling.", 409, "direct-only")
+  if (action === "room:join" && data.policy !== "all") throw new CallRelayError("Calling now chooses direct or managed TURN routes automatically. Reload Serotine to update calling.", 409, "direct-only")
   if (action === "room:poll" && (!Number.isSafeInteger(data.after) || Number(data.after) < 0)) throw invalid()
   const { target, scopeId, state } = await checkpoint(db, data.target, self, action === "room:status")
   const roomId = callRoomId(target)

@@ -164,3 +164,20 @@ test('disposal immediately cancels connecting work even when close emits no even
   await assert.rejects(h.request(), /signaling server/)
   assert.equal(h.sockets.length, 1)
 })
+
+
+test('server time calibrates call expiry and subsequent proofs without changing the device clock', async t => {
+  const h = await harness(t), ws = await h.connected()
+  const response = h.request('call:poll', { after: 0 })
+  await until(() => ws.sent.filter(frame => frame.type === 'request').length === 2)
+  const serverTime = Date.now() - 45_000
+  ws.response(ws.sent.filter(frame => frame.type === 'request').at(-1), { success: true, serverTime })
+  await response
+  assert.ok(Math.abs(h.client.now() - serverTime) < 100)
+  const next = h.request('call:poll', { after: 0 })
+  await until(() => ws.sent.filter(frame => frame.type === 'request').length === 3)
+  const frame = ws.sent.filter(frame => frame.type === 'request').at(-1)
+  assert.ok(Math.abs(frame.body.proof.timestamp - serverTime) < 200)
+  assert.equal(await verifyRequestProof(frame.body.action, frame.body.data, frame.body.proof), true)
+  ws.response(frame); await next
+})

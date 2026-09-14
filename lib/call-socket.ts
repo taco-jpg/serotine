@@ -22,6 +22,7 @@ export function createCallSocket(identity: Identity, sessionId: string, options:
   const pending = new Map<string, Pending>(), listeners = new Set<() => void>()
   let socket: WebSocket | null = null, opening: Promise<void> | null = null
   let authenticated = false, disposed = false, attempts = 0
+  let clockOffset = 0
   let cancelOpening: { socket: WebSocket; cancel(error: Error): void } | null = null
   let reconnect: ReturnType<typeof setTimeout> | undefined
   const timeoutMs = options.timeoutMs ?? 10_000
@@ -55,7 +56,7 @@ export function createCallSocket(identity: Identity, sessionId: string, options:
   async function exchange(ws: WebSocket, action: string, data: Record<string, unknown>, auth = false) {
     if (disposed || ws !== socket || ws.readyState !== 1) throw unavailable()
     if (pending.size >= CALL_SOCKET_PENDING_LIMIT || ws.bufferedAmount > CALL_SOCKET_REQUEST_BYTES * 2) throw new CallTransportError("Calling is busy. Wait a moment and retry.")
-    const proof = await createRequestProof(action, data, identity.privateKey, identity.publicKey)
+    const proof = await createRequestProof(action, data, identity.privateKey, identity.publicKey, Date.now() + clockOffset)
     if (disposed || ws !== socket || ws.readyState !== 1) throw unavailable()
     if (pending.size >= CALL_SOCKET_PENDING_LIMIT || ws.bufferedAmount > CALL_SOCKET_REQUEST_BYTES * 2) throw new CallTransportError("Calling is busy. Wait a moment and retry.")
     const id = crypto.randomUUID()
@@ -81,7 +82,12 @@ export function createCallSocket(identity: Identity, sessionId: string, options:
     if (!entry || entry.socket !== ws) return
     clearTimeout(entry.timer); pending.delete(value.id)
     const body = value.body
-    if (Number(value.status) >= 200 && Number(value.status) < 300 && body.success === true) entry.resolve(body)
+    if (Number(value.status) >= 200 && Number(value.status) < 300 && body.success === true) {
+      // Server response time is conservative by the response's transit delay.
+      // Use it for call deadlines instead of comparing different device clocks.
+      if (Number.isSafeInteger(body.serverTime) && Number(body.serverTime) > 0) clockOffset = Number(body.serverTime) - Date.now()
+      entry.resolve(body)
+    }
     else {
       const message = body.error
       const safe = typeof message === "string" && message.length > 0 && message.length <= 500 && !/[<>]/.test(message) && ![...message].some(character => character.charCodeAt(0) < 32)
@@ -124,6 +130,7 @@ export function createCallSocket(identity: Identity, sessionId: string, options:
     try { await opening } finally { opening = null }
   }
   return {
+    now: () => Date.now() + clockOffset,
     async request(action: string, data: Record<string, unknown>): Promise<Record<string, unknown>> {
       if (data.sessionId !== sessionId || action === "call:socket") throw unexpected()
       await connect()

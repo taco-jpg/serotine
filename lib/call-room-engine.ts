@@ -1,5 +1,5 @@
 import { createCallTransport } from "./call-transport"
-import { assertDirectCandidate, assertDirectDescription, directIceConfiguration } from "./call-ice"
+import { callIceConfiguration, observeCallConnection } from "./call-ice"
 import { callRoomId, createCallRoomTransport, type CallRoomTarget } from "./call-room-transport"
 import type { CallRoomSignal, CallRoomState } from "./call-room-protocol"
 import type { CallSignalPayload } from "./call-protocol"
@@ -23,6 +23,7 @@ interface Peer {
   deadline: ReturnType<typeof setTimeout> | null
   restarted: boolean
   closed: boolean
+  stopDiagnostics: () => void
 }
 export interface CallRoomEngineDependencies {
   /** Each join needs a fresh device session and signaling socket. */
@@ -74,6 +75,7 @@ export class CallRoomEngine implements CallRoomController {
   private readonly connectionPolicy = "all" as const
   private configuration: RTCConfiguration = { iceServers: [], iceTransportPolicy: "all" }
   private configurationExpiresAt = 0
+  private configurationRefreshAt = 0
   private mediaGeneration = { audio: 0, video: 0 }
   private mediaQueue: Record<"audio" | "video", Promise<void>> = { audio: Promise.resolve(), video: Promise.resolve() }
   private readonly pendingCapture = new Set<MediaStream>()
@@ -81,7 +83,7 @@ export class CallRoomEngine implements CallRoomController {
   constructor(private readonly options: CallRoomEngineOptions, private readonly dependencies: CallRoomEngineDependencies = {}) {
     this.configurationTransport = dependencies.configurationTransport ?? createCallTransport(options.identity)
     this.mediaDevices = dependencies.mediaDevices ?? (typeof navigator !== "undefined" ? navigator.mediaDevices : undefined)
-    this.now = dependencies.now ?? Date.now
+    this.now = dependencies.now ?? (() => this.transport?.now?.() ?? Date.now())
     this.initial = {
       phase: "idle", target: null, targetLabel: "", roomId: null, mode: "audio", localStream: null,
       participants: [], microphoneMuted: false, cameraEnabled: false, devices: [], microphoneId: "", cameraId: "",
@@ -215,7 +217,7 @@ export class CallRoomEngine implements CallRoomController {
       this.currentTarget()
       if (this.options.isBusy?.()) throw new Error("Leave the current call before joining another one.")
       this.update({ phase: "joining" })
-      if (this.configurationExpiresAt <= this.now() + 30_000) await this.refreshConfiguration(generation)
+      if (this.configurationRefreshAt <= this.now()) await this.refreshConfiguration(generation)
       if (!this.live(generation)) return
       const room = await transport.join(this.currentTarget(), this.snapshot.cameraEnabled ? "video" : "voice", this.connectionPolicy)
       if (!this.live(generation)) { await transport.leave(roomId).catch(() => {}); return }
@@ -234,8 +236,12 @@ export class CallRoomEngine implements CallRoomController {
   private async refreshConfiguration(generation: number) {
     const configuration = await this.configurationTransport.configuration(this.connectionPolicy)
     if (!this.live(generation)) return
-    this.configuration = directIceConfiguration(configuration.iceServers)
+    this.configurationRefreshAt = Math.max(this.now() + 30_000, configuration.expiresAt - 120_000)
+    if (!configuration.relayAvailable && this.configuration.iceServers?.some(server => !!server.credential) && this.configurationExpiresAt > this.now() + 30_000) return
+    this.configuration = callIceConfiguration(configuration.iceServers)
     this.configurationExpiresAt = configuration.expiresAt
+    for (const peer of this.peers.values()) if (!peer.closed) peer.pc.setConfiguration(this.configuration)
+    this.update({ notice: configuration.relayAvailable ? null : "TURN fallback is unavailable. Participants need a working direct route." })
   }
   private async reconcile(room: CallRoomState, generation: number) {
     if (!this.live(generation)) return
@@ -249,8 +255,8 @@ export class CallRoomEngine implements CallRoomController {
     for (const [key, peer] of this.peers) {
       if (!members.some(member => member.publicKey === key && member.sessionId === peer.member.sessionId)) { this.closePeer(peer); this.peers.delete(key) }
     }
-    if (members.some(member => member.policy !== this.connectionPolicy)) throw new Error("This room contains an incompatible calling session. Ask the participants to update Serotine and rejoin for a direct call.")
-    if (members.some(member => !this.peers.has(member.publicKey)) && this.configurationExpiresAt <= this.now() + 30_000) await this.refreshConfiguration(generation)
+    if (members.some(member => member.policy !== this.connectionPolicy)) throw new Error("This room contains an incompatible calling session. Ask the participants to update Serotine and rejoin.")
+    if (this.configurationRefreshAt <= this.now()) await this.refreshConfiguration(generation)
     if (!this.live(generation)) return
     const latest = this.currentTarget()
     for (const [key, peer] of this.peers) {
@@ -276,15 +282,16 @@ export class CallRoomEngine implements CallRoomController {
     const peer: Peer = {
       member, pc, audioSender: pc.addTransceiver(stream.getAudioTracks()[0] ?? "audio", { direction: "sendrecv", streams: [stream] }).sender,
       videoSender: pc.addTransceiver(stream.getVideoTracks()[0] ?? "video", { direction: this.snapshot.target?.kind === "channel" ? "inactive" : "sendrecv", streams: [stream] }).sender,
-      snapshot: { publicKey: member.publicKey, sessionId: member.sessionId, label: this.options.getPeerLabel?.(member.publicKey) || `${member.publicKey.slice(0, 10)}…`,
+      snapshot: { connection: null, publicKey: member.publicKey, sessionId: member.sessionId, label: this.options.getPeerLabel?.(member.publicKey) || `${member.publicKey.slice(0, 10)}…`,
         phase: "connecting", stream: null, microphoneMuted: false, cameraEnabled: this.snapshot.target?.kind !== "channel" && member.mode === "video", error: null },
-      queue: Promise.resolve(), pendingIce: [], fingerprint: null, deadline: null, restarted: false, closed: false,
+      queue: Promise.resolve(), pendingIce: [], fingerprint: null, deadline: null, restarted: false, closed: false, stopDiagnostics: () => {},
     }
     this.peers.set(member.publicKey, peer)
+    peer.stopDiagnostics = observeCallConnection(pc, connection => {
+      if (this.peerLive(peer, generation)) this.updatePeer(peer, { connection })
+    })
     pc.onicecandidate = event => {
       if (event.candidate && this.peerLive(peer, generation)) {
-        try { assertDirectCandidate(event.candidate.candidate) }
-        catch (error) { this.failPeer(peer, generation, message(error)); return }
         void this.sendCandidate(peer, event.candidate.toJSON(), generation)
       }
     }
@@ -300,6 +307,7 @@ export class CallRoomEngine implements CallRoomController {
       if (pc.connectionState === "connected") {
         if (peer.deadline) clearTimeout(peer.deadline)
         peer.deadline = null
+        peer.restarted = false
         this.updatePeer(peer, { phase: "connected", error: null })
         void this.send(peer, this.mediaState(), generation).catch(error => this.failPeer(peer, generation, message(error)))
       } else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") this.reconnect(peer, generation)
@@ -310,7 +318,7 @@ export class CallRoomEngine implements CallRoomController {
   }
   private peerDeadline(peer: Peer, generation: number, milliseconds: number) {
     if (peer.deadline) clearTimeout(peer.deadline)
-    peer.deadline = setTimeout(() => this.failPeer(peer, generation, "A direct connection to this participant could not be established. One of your networks may block peer-to-peer calls. Try a different network and rejoin."), milliseconds)
+    peer.deadline = setTimeout(() => this.failPeer(peer, generation, "Could not establish a WebRTC connection to this participant. Check your connection and whether TURN fallback is available, then rejoin."), milliseconds)
   }
   private async send(peer: Peer, payload: RoomPayload, generation: number) {
     if (!this.peerLive(peer, generation) || !this.joined || !this.transport || !this.snapshot.roomId) return
@@ -334,7 +342,6 @@ export class CallRoomEngine implements CallRoomController {
     if (!this.peerLive(peer, generation) || !this.isOfferer(peer)) return
     const description = await peer.pc.createOffer({ iceRestart: restart })
     if (!this.peerLive(peer, generation)) return
-    assertDirectDescription(description.sdp ?? "")
     await peer.pc.setLocalDescription(description)
     if (this.peerLive(peer, generation)) await this.send(peer, { kind: "offer", description: { type: "offer", sdp: peer.pc.localDescription!.sdp } }, generation)
   }
@@ -358,19 +365,17 @@ export class CallRoomEngine implements CallRoomController {
           if (!this.peerLive(peer, generation)) return
         }
         if (payload.kind === "offer") {
-          if (this.configurationExpiresAt <= this.now() + 30_000) {
+          if (this.configurationRefreshAt <= this.now()) {
             await this.refreshConfiguration(generation)
             if (!this.peerLive(peer, generation)) return
             peer.pc.setConfiguration(this.configuration)
           }
           const description = await peer.pc.createAnswer()
           if (!this.peerLive(peer, generation)) return
-          assertDirectDescription(description.sdp ?? "")
           await peer.pc.setLocalDescription(description)
           if (this.peerLive(peer, generation)) await this.send(peer, { kind: "answer", description: { type: "answer", sdp: peer.pc.localDescription!.sdp } }, generation)
         }
       } else if (payload.kind === "ice") {
-        assertDirectCandidate(payload.candidate.candidate ?? "")
         if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(payload.candidate)
         else if (peer.pendingIce.length < 128) peer.pendingIce.push(payload.candidate)
       } else if (payload.kind === "restart") {
@@ -379,7 +384,6 @@ export class CallRoomEngine implements CallRoomController {
     })
   }
   private authenticateDescription(peer: Peer, sdp: string) {
-    assertDirectDescription(sdp)
     const fingerprints = [...sdp.matchAll(/^a=fingerprint:sha-256 ([A-Fa-f0-9:]+)\r?$/gm)].map(match => match[1].toUpperCase())
     if (!fingerprints.length || fingerprints.some(value => !/^(?:[A-F0-9]{2}:){31}[A-F0-9]{2}$/.test(value) || value !== fingerprints[0])) throw new Error("This participant's media identity could not be verified.")
     if (peer.fingerprint && peer.fingerprint !== fingerprints[0]) throw new Error("This participant's media identity changed. They need to rejoin the call.")
@@ -390,7 +394,7 @@ export class CallRoomEngine implements CallRoomController {
     if (peer.restarted) { this.failPeer(peer, generation, "This participant's connection was interrupted again. They need to rejoin the call."); return }
     peer.restarted = true
     this.updatePeer(peer, { phase: "reconnecting" })
-    this.peerDeadline(peer, generation, this.dependencies.reconnectTimeoutMs ?? 15_000)
+    this.peerDeadline(peer, generation, this.dependencies.reconnectTimeoutMs ?? 30_000)
     void this.enqueue(peer, generation, async () => {
       await this.refreshConfiguration(generation)
       if (!this.peerLive(peer, generation)) return
@@ -406,6 +410,7 @@ export class CallRoomEngine implements CallRoomController {
   }
   private closePeer(peer: Peer) {
     peer.closed = true
+    peer.stopDiagnostics()
     if (peer.deadline) clearTimeout(peer.deadline)
     peer.deadline = null
     peer.pendingIce = []

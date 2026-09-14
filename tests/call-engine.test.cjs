@@ -362,7 +362,7 @@ test('ending while replaceTrack is pending immediately stops the pending capture
   assert.equal(f.engine.getSnapshot().localStream, null)
 })
 
-test('TURN or credential-bearing configuration is rejected before capture even with an injected transport', async t => {
+test('unmanaged TURN and credentials attached to STUN are rejected before capture', async t => {
   for (const server of [
     { urls: 'turn:relay.example.test:3478' },
     { urls: ['stun:stun.example.test:3478', 'turns:relay.example.test:443'] },
@@ -371,7 +371,7 @@ test('TURN or credential-bearing configuration is rejected before capture even w
     const f = fixture(t, { transport: { async configuration() { return { iceServers: [server], relayAvailable: true } } } })
     await f.engine.prepareOutgoing(PEER, 'audio')
     assert.equal(f.engine.getSnapshot().phase, 'failed')
-    assert.match(f.engine.getSnapshot().error, /STUN/)
+    assert.match(f.engine.getSnapshot().error, /configuration/i)
     assert.equal(f.captures.length, 0); assert.equal(f.pcs.length, 0)
   }
 })
@@ -453,12 +453,12 @@ test('an authenticated recipient restart causes a bounded caller ICE restart', a
   assert.equal(f.pcs[0].offers.at(-1).iceRestart, true)
 })
 
-test('direct connection timeout gives a graceful network diagnosis without proposing a relay', async t => {
+test('connection timeout identifies unavailable TURN fallback and releases capture', async t => {
   const f = fixture(t, { dependencies: { connectTimeoutMs: 5 } })
   await f.engine.prepareOutgoing(PEER, 'audio'); await f.engine.connectPreview(); await f.acceptOutgoing()
   await new Promise(resolve => setTimeout(resolve, 15))
   assert.equal(f.engine.getSnapshot().phase, 'failed')
-  assert.match(f.engine.getSnapshot().error, /direct connection.*another network/)
+  assert.match(f.engine.getSnapshot().error, /direct connection.*TURN fallback/)
   assert.ok(f.tracks.every(track => track.readyState === 'ended'))
 })
 
@@ -513,7 +513,7 @@ test('a full filtered signaling page drains the next page without waiting for a 
   assert.equal(f.engine.getSnapshot().phase, 'incoming')
 })
 
-test('a peer cannot introduce relay candidates through either SDP or trickle ICE', async t => {
+test('authenticated relay candidates pass through SDP and trickle ICE without changing the peer fingerprint', async t => {
   for (const kind of ['answer', 'ice']) {
     const f = fixture(t)
     await f.engine.prepareOutgoing(PEER, 'audio'); await f.engine.connectPreview(); await f.acceptOutgoing()
@@ -523,10 +523,11 @@ test('a peer cannot introduce relay candidates through either SDP or trickle ICE
       targetSession: f.transport.sessionId, expiresAt: Date.now() + 30_000,
       payload: kind === 'answer' ? { kind, description: { type: 'answer', sdp: SDP + 'a=' + candidate + '\r\n' } } : { kind, candidate: { candidate, sdpMid: '0' } } })
     await f.poll()
-    assert.equal(f.engine.getSnapshot().phase, 'failed')
-    assert.match(f.engine.getSnapshot().error, /unsupported media relay/)
-    assert.equal(f.pcs[0].candidates.length, 0)
-    assert.ok(f.tracks.every(track => track.readyState === 'ended'))
+    assert.equal(f.engine.getSnapshot().phase, 'connecting')
+    assert.equal(f.engine.getSnapshot().error, null)
+    if (kind === 'answer') assert.ok(f.pcs[0].remoteDescription.sdp.includes('typ relay'))
+    else assert.equal(f.engine.pendingIce.length, 1)
+    assert.ok(f.tracks.every(track => track.readyState === 'live'))
   }
 })
 
@@ -538,7 +539,30 @@ test('ICE restart rejects a changed TURN configuration and releases devices', as
   f.pcs[0].state('disconnected')
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(f.engine.getSnapshot().phase, 'failed')
-  assert.match(f.engine.getSnapshot().error, /STUN/)
+  assert.match(f.engine.getSnapshot().error, /configuration/i)
   assert.equal(f.pcs[0].configuration.iceTransportPolicy, 'all')
   assert.ok(f.tracks.every(track => track.readyState === 'ended'))
+})
+
+
+test('managed TURN is gathered alongside direct routes and refreshed before reconnect', async t => {
+  let credential = 0
+  const f = fixture(t, { transport: { async configuration() { return { iceServers: [
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'turns:turn.cloudflare.com:443?transport=tcp', username: 'short-user', credential: `short-${++credential}` },
+  ], relayAvailable: true, expiresAt: Date.now() + 3_600_000 } } } })
+  await f.engine.prepareOutgoing(PEER, 'video'); await f.engine.connectPreview(); await f.acceptOutgoing()
+  const pc = f.pcs[0]
+  assert.equal(pc.configuration.iceTransportPolicy, 'all')
+  assert.equal(pc.configuration.iceServers[1].credential, 'short-1')
+  assert.equal(pc.senders.filter(sender => sender.track).length, 2)
+  pc.state('connected'); pc.state('disconnected'); await new Promise(resolve => setImmediate(resolve))
+  assert.equal(pc.configuration.iceServers[1].credential, 'short-2')
+  assert.equal(pc.offers.at(-1).iceRestart, true)
+  pc.state('connected'); pc.state('disconnected'); await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.engine.getSnapshot().phase, 'reconnecting', 'a later interruption gets its own bounded recovery')
+  pc.state('connected')
+  f.engine.configurationRefreshAt = 0; await f.poll()
+  assert.equal(pc.configuration.iceServers[1].credential, 'short-4', 'long calls renew credentials')
+  await f.engine.end(); assert.ok(f.tracks.every(track => track.readyState === 'ended'))
 })

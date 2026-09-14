@@ -120,7 +120,7 @@ test('preview requires local consent and never joins or creates senders before c
   assert.ok(f.tracks.every(track => track.readyState === 'ended')); assert.equal(f.bus.joins.length, 0)
 })
 
-test('stored legacy routing settings cannot enable TURN or block direct calls', async t => {
+test('stored legacy routing settings cannot force relay or block direct calls', async t => {
   const f = fixture(t, { settings: { relayOnly: true }, relayAvailable: false })
   f.addPeer(); await f.join()
   assert.deepEqual(f.configurations, ['all'])
@@ -300,7 +300,7 @@ test('camera off during a pending sender replacement stops both camera tracks an
   assert.equal(sender.track, null)
 })
 
-test('TURN configuration is rejected before capture even if it also contains a valid STUN server', async t => {
+test('unmanaged TURN configuration is rejected before capture even alongside a valid STUN server', async t => {
   for (const iceServers of [
     [{ urls: ['stun:stun.example.test', 'turn:relay.example.test'] }],
     [{ urls: 'turns:relay.example.test:443', username: 'user', credential: 'secret' }],
@@ -323,7 +323,7 @@ test('relay-only room members cannot start a connection under a direct-call poli
   assert.equal(f.pcs.length, 0); assert.ok(f.tracks.every(track => track.readyState === 'ended'))
 })
 
-test('relayed ICE in signed SDP or trickled candidates closes only the offending peer', async t => {
+test('authenticated room relay candidates are accepted while other participants remain connected', async t => {
   const relayCandidate = 'candidate:relay 1 udp 1 192.0.2.10 12345 typ relay raddr 0.0.0.0 rport 0'
   for (const payload of [
     { kind: 'offer', description: { type: 'offer', sdp: `${SDP}a=${relayCandidate}\r\n` } },
@@ -331,9 +331,10 @@ test('relayed ICE in signed SDP or trickled candidates closes only the offending
   ]) {
     const f = fixture(t, { key: C }), peer = f.addPeer(A); f.addPeer(B); await f.join()
     f.signal(peer, payload); await f.poll()
-    assert.equal(f.engine.getSnapshot().participants.find(value => value.publicKey === A).phase, 'failed')
-    assert.equal(f.pcs[0].connectionState, 'closed'); assert.equal(f.pcs[0].candidates.length, 0)
-    assert.equal(f.pcs[0].remoteDescription, undefined)
+    assert.equal(f.engine.getSnapshot().participants.find(value => value.publicKey === A).phase, 'connecting')
+    assert.notEqual(f.pcs[0].connectionState, 'closed')
+    if (payload.kind === 'offer') assert.ok(f.pcs[0].remoteDescription.sdp.includes('typ relay'))
+    else assert.equal(f.engine.peers.get(A).pendingIce.length, 1)
     assert.notEqual(f.pcs[1].connectionState, 'closed'); assert.equal(f.engine.getSnapshot().phase, 'joined')
   }
 })
@@ -344,7 +345,7 @@ test('a blocked direct connection times out while other participants stay connec
   f.pcs[1].state('connected')
   await new Promise(resolve => setTimeout(resolve, 50))
   const peers = f.engine.getSnapshot().participants
-  assert.equal(peers[0].phase, 'failed'); assert.match(peers[0].error, /direct connection.*network/i)
+  assert.equal(peers[0].phase, 'failed'); assert.match(peers[0].error, /WebRTC connection/i)
   assert.equal(f.pcs[0].connectionState, 'closed'); assert.equal(failedAudio.readyState, 'ended')
   assert.equal(peers[1].phase, 'connected'); assert.equal(f.engine.getSnapshot().phase, 'joined')
   assert.equal(f.captures.length, 1); assert.ok(f.configurations.every(value => value === 'all'))

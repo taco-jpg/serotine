@@ -89,7 +89,7 @@ function harness(t) {
       assert.equal(init.cache, 'no-store')
       return POST(new Request(`${origin}${url}`, init))
     }
-    new Function('require', 'module', 'exports', 'fetch', 'Date', output)(sourceRequire, module, module.exports, localFetch, Clock)
+    new Function('require', 'module', 'exports', 'fetch', 'Date', output)(sourceRequire, module, module.exports, localFetch, filename.endsWith("lib/call-transport.ts") ? class extends Clock { static now() { return state.now + (state.clientOffset || 0) } } : Clock)
     return module.exports
   }
   const POST = load(path.join(root, 'app/api/calls/route.ts')).POST
@@ -261,7 +261,7 @@ test('private history suppression is sticky through terminal races and returned 
   assert.equal((await bob.transport.finish(another.callId, 'ended', true)).noHistory, true, 'late private completion can only suppress history')
 })
 
-test('configuration is STUN-only and ignores all obsolete relay credentials without a provider request', async t => {
+test('missing or invalid managed TURN setup preserves direct calling and ignores self-hosted settings', async t => {
   const h = harness(t), alice = await h.identity()
   Object.assign(h.env, { CALL_TURN_URLS: 'turn:relay.example:3478', CALL_TURN_SECRET: 'obsolete-secret-with-long-test-value',
     CALL_TURN_KEY_ID: 'obsolete-turn-key-id', CALL_TURN_API_TOKEN: 'obsolete-provider-token' })
@@ -269,8 +269,8 @@ test('configuration is STUN-only and ignores all obsolete relay credentials with
   h.state.turnFetch = async () => { providerRequests++; throw new Error('No provider requests are allowed') }
   const direct = await alice.transport.configuration('all')
   assert.equal(direct.relayAvailable, false)
-  assert.equal(direct.expiresAt - h.state.now, 600000)
-  assert.deepEqual(direct.iceServers, [{ urls: ['stun:stun.l.google.com:19302'] }])
+  assert.equal(direct.expiresAt - h.state.now, 60000)
+  assert.deepEqual(direct.iceServers, [{ urls: ['stun:stun.cloudflare.com:3478'] }])
   assert.equal(providerRequests, 0)
   assert.equal(JSON.stringify(direct).includes('obsolete'), false)
   const action = 'call:configuration', data = { sessionId: alice.transport.sessionId, policy: 'relay' }
@@ -312,7 +312,7 @@ test('socket authentication binds a fresh signed device and rejects replay, tamp
   const body = { version: 1, action, data, proof }
   const response = await h.post(body)
   assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), { success: true, publicKey: alice.publicKey, sessionId: data.sessionId })
+  assert.deepEqual(await response.json(), { success: true, publicKey: alice.publicKey, sessionId: data.sessionId, serverTime: h.state.now })
   assert.equal((await h.post(body)).status, 409)
   assert.equal((await h.post({ ...body, data: { sessionId: crypto.randomUUID() } })).status, 401)
   h.sqlite.prepare('INSERT INTO RetiredIdentity(publicKey, retiredAt) VALUES (?, ?)').run(alice.publicKey, h.state.now)
@@ -343,4 +343,69 @@ test('successful call mutations notify only verified participants and failed mut
   assert.deepEqual((await claimed.json())._notify.sort(), [alice.publicKey, bob.publicKey].sort())
   const ended = await signed(alice, 'call:finish', { sessionId: alice.transport.sessionId, callId: call.callId, reason: 'ended', noHistory: false })
   assert.deepEqual((await ended.json())._notify.sort(), [alice.publicKey, bob.publicKey].sort())
+})
+
+
+test('the reported invalid-request failure is fixed for small caller clock skew without accepting unbounded expiry', async t => {
+  const h = harness(t), [alice, bob] = await pair(h)
+  h.state.clientOffset = 1500
+  const session = await alice.transport.invite(bob.publicKey, crypto.randomUUID(), invite)
+  assert.equal(session.status, 'ringing')
+  assert.equal((await bob.transport.poll()).signals[0].payload.kind, 'invite')
+  const claimed = await bob.transport.claim(session.callId)
+  await bob.transport.send(session.callId, alice.publicKey, session.callerSession, { kind: 'accept', mode: 'voice', private: false })
+  assert.equal((await alice.transport.poll()).signals[0].payload.kind, 'accept')
+  const last = h.requests.at(-2)
+  const data = structuredClone(last.data)
+  data.signal.id = crypto.randomUUID(); data.signal.expiresAt = h.state.now + 100_000
+  const proof = await h.auth.createRequestProof('call:send', data, bob.privateKey, bob.publicKey)
+  assert.equal((await h.post({ version: 1, action: 'call:send', data, proof })).status, 400)
+  assert.equal(claimed.status, 'active')
+})
+
+const managedServers = [
+  { urls: ['stun:stun.cloudflare.com:3478'] },
+  { urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turn:turn.cloudflare.com:3478?transport=tcp', 'turns:turn.cloudflare.com:443?transport=tcp', 'turn:turn.cloudflare.com:53?transport=udp'], username: 'expiring-test-user', credential: 'expiring-test-password' },
+]
+function managedTurn(h) { Object.assign(h.env, { CALL_TURN_KEY_ID: 'a'.repeat(32), CALL_TURN_API_TOKEN: 'permanent-server-only-test-key' }) }
+
+test('authenticated configuration mints expiring Cloudflare credentials without disclosing permanent keys', async t => {
+  const h = harness(t), alice = await h.identity(); managedTurn(h)
+  let requests = 0
+  h.state.turnFetch = async (url, init) => {
+    requests++
+    assert.equal(url, `https://rtc.live.cloudflare.com/v1/turn/keys/${'a'.repeat(32)}/credentials/generate-ice-servers`)
+    assert.equal(init.method, 'POST'); assert.equal(init.redirect, 'error')
+    assert.equal(init.headers.Authorization, 'Bearer permanent-server-only-test-key')
+    assert.deepEqual(JSON.parse(init.body), { ttl: 3600 })
+    return Response.json({ iceServers: managedServers }, { status: 201 })
+  }
+  const result = await alice.transport.configuration('all')
+  assert.equal(result.relayAvailable, true); assert.equal(result.turnStatus, 'ready')
+  assert.equal(result.expiresAt, h.state.now + 3_570_000)
+  const turn = result.iceServers.find(server => server.credential)
+  assert.equal(turn.username, 'expiring-test-user'); assert.equal(turn.credential, 'expiring-test-password')
+  assert.equal(turn.urls.some(url => url.includes(':53?')), false)
+  assert.ok(turn.urls.some(url => url.includes(':443?transport=tcp')))
+  assert.equal(JSON.stringify(result).includes('permanent-server-only'), false)
+  assert.equal(JSON.stringify(result).includes(h.env.CALL_TURN_KEY_ID), false)
+  assert.equal(requests, 1)
+  // Identity verification still runs before any credential provider request.
+  assert.equal((await h.post({ version: 1, action: 'call:configuration', data: { sessionId: crypto.randomUUID(), policy: 'all' }, proof: {} })).status, 401)
+  assert.equal(requests, 1)
+})
+
+test('provider denial, invalid ICE servers, and oversized credential responses preserve direct mode without exposing errors', async t => {
+  const h = harness(t), alice = await h.identity(); managedTurn(h)
+  for (const response of [
+    new Response('permanent-server-only-test-key', { status: 403 }),
+    Response.json({ iceServers: [{ urls: 'turn:untrusted.example:3478', username: 'user', credential: 'secret' }] }),
+    Response.json({ iceServers: managedServers, padding: 'x'.repeat(20_000) }),
+  ]) {
+    h.state.turnFetch = async () => response
+    const result = await alice.transport.configuration('all')
+    assert.equal(result.relayAvailable, false); assert.equal(result.turnStatus, 'unavailable')
+    assert.ok(result.iceServers.every(server => !server.credential))
+    assert.equal(JSON.stringify(result).includes('permanent-server-only'), false)
+  }
 })

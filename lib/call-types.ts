@@ -1,3 +1,4 @@
+import type { CallConnectionDiagnostics } from "./call-ice"
 import type { Identity } from "./identity"
 
 export type CallMode = "audio" | "video"
@@ -7,6 +8,7 @@ export type CallAvailability = "checking" | "available" | "unavailable"
 export interface CallPeerPolicy { accepted: boolean; blocked?: boolean; archived?: boolean; muted?: boolean; private?: boolean; label?: string }
 export interface CallSettings { silenceIncoming: boolean }
 export interface CallSnapshot {
+  connection: CallConnectionDiagnostics | null
   phase: CallPhase
   callId: string | null
   peer: string | null

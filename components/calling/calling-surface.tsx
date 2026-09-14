@@ -1,6 +1,7 @@
 "use client"
 
 import Link from "next/link"
+import { ConnectionDetails } from "./connection-details"
 import { useEffect, useRef, useState } from "react"
 import { Camera, Expand, Loader2, Mic, MicOff, Phone, PhoneOff, RotateCw, Settings2, Shield, Video, VideoOff, Volume2, X } from "lucide-react"
 import { useCalling } from "@/components/calling-provider"
@@ -59,9 +60,10 @@ function CallSettingsDialog() {
     <DialogContent className="max-h-[90dvh] overflow-y-auto">
       <DialogHeader><DialogTitle>Call privacy and notifications</DialogTitle><DialogDescription>These preferences apply to this identity on this browser.</DialogDescription></DialogHeader>
       <label className="flex min-h-11 cursor-pointer items-start gap-3"><input type="checkbox" className="mt-1 size-5 shrink-0 accent-primary" checked={snapshot.settings.silenceIncoming} onChange={event => engine.updateSettings({ silenceIncoming: event.target.checked })} /><span><span className="block text-sm font-medium">Silence all incoming calls</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">Messaging stays on. Muted and archived conversations also stay silent.</span></span></label>
-      <p className="border-t border-border pt-4 text-sm text-muted-foreground">Calls connect directly between participants. Your network address may be visible to the other participants. Audio and video stay encrypted between your devices.</p>
-      <p className="text-sm text-muted-foreground">Some school, work, or restricted networks may block direct calls. If a call cannot connect, try a different Wi-Fi or mobile network.</p>
+      <p className="border-t border-border pt-4 text-sm text-muted-foreground">Calls prefer a direct connection and use Cloudflare TURN when needed. Your network address may be visible to the other participants. Audio and video stay encrypted between your devices.</p>
+      <p className="text-sm text-muted-foreground">Cloudflare relays encrypted WebRTC packets when a direct route is unavailable. Audio and video never pass through Serotine’s signaling server.</p>
       <div className="space-y-2 border-t border-border pt-4 text-xs leading-5 text-muted-foreground"><p>Both people need Serotine open and running. A closed or suspended browser may miss calls, and switching apps on a phone can interrupt them.</p><p>Serotine does not record calls. The other participant can still record externally. The signaling service can see connection timing and who is calling, but does not carry call audio or video.</p></div>
+      <ConnectionDetails connection={snapshot.connection} />
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <DialogFooter><Button type="button" className="min-h-11" onClick={() => setSettingsOpen(false)}>Done</Button></DialogFooter>
     </DialogContent>
@@ -152,6 +154,7 @@ export function CallingSurface() {
         {snapshot.phase === "ringing" && <p className="w-full text-xs text-muted-foreground">Waiting for {snapshot.peerLabel} to answer in Serotine. Calls need both pages open.</p>}
         {["incoming", "ringing"].includes(snapshot.phase) && soundStatus !== "ready" && <div className="flex w-full flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{soundStatus === "blocked" ? "Your browser has paused call sounds." : "Call sounds are unavailable in this browser. The call controls still work."}</span>{soundStatus === "blocked" && <Button type="button" variant="outline" className="min-h-11" onClick={() => ringer.current?.unlock()}><Volume2 />Enable call sounds</Button>}</div>}
         {(snapshot.error || error) && <p role="alert" className="w-full break-words text-xs text-destructive">{error || snapshot.error}</p>}
+        <ConnectionDetails connection={snapshot.connection} />
         {snapshot.notice && <p role="status" className="w-full break-words text-xs text-muted-foreground">{snapshot.notice}</p>}
         {audioBlocked && <Button type="button" variant="outline" className="min-h-11" onClick={() => { void audio.current?.play().then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(true)) }}>Play call audio</Button>}
       </div>

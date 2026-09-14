@@ -16,6 +16,8 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 // Restricted runners may be unable to gather even localhost ICE candidates.
 // This opt-in mode exercises signaling/capture/UI, and never claims RTP passed.
 const signalingOnly = process.env.SEROTINE_CALL_SMOKE_SIGNALING_ONLY === '1'
+const blockDirect = process.env.SEROTINE_CALL_SMOKE_BLOCK_DIRECT === '1'
+assert.ok(!(blockDirect && signalingOnly), 'TURN fallback verification requires actual received RTP')
 
 async function identity() {
   const keys = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits', 'deriveKey'])
@@ -47,7 +49,7 @@ async function main() {
       wire.observe(page)
       await callingFixture(page, origin, 'Calling smoke fixture')
       await page.addScriptTag({ content: bundle })
-      await page.evaluate(async ({ owner, contact }) => {
+      await page.evaluate(async ({ owner, contact, blockDirect }) => {
         localStorage.setItem('serotine_identity_v2', JSON.stringify(owner))
         SerotineCalling.saveContacts(owner.publicKey, [{ pub: contact.publicKey, alias: contact.alias }])
         window.captureRequests = []
@@ -67,6 +69,14 @@ async function main() {
         const NativeConnection = window.RTCPeerConnection
         window.RTCPeerConnection = new Proxy(NativeConnection, { construct(target, args) {
           const connection = Reflect.construct(target, args)
+          if (blockDirect) {
+            // Test-only network constraint: neither peer learns a usable direct
+            // candidate. Production still uses ordinary, unfiltered ICE and all.
+            const add = connection.addIceCandidate.bind(connection)
+            const remote = connection.setRemoteDescription.bind(connection)
+            connection.addIceCandidate = candidate => !candidate?.candidate || /\btyp relay\b/.test(candidate.candidate) ? add(candidate) : Promise.resolve()
+            connection.setRemoteDescription = description => remote({ ...description, sdp: description.sdp?.split('\r\n').filter(line => !line.startsWith('a=candidate:') || /\btyp relay\b/.test(line)).join('\r\n') })
+          }
           window.peerConnections.push(connection)
           return connection
         } })
@@ -76,7 +86,7 @@ async function main() {
           onCompleted: async call => { window.completedCalls.push(call); await SerotineCalling.saveCallHistory(owner.publicKey, call) },
         }, { reconnectTimeoutMs: 1000 })
         await window.calls.start()
-      }, { owner, contact })
+      }, { owner, contact, blockDirect })
       return page
     }
 
@@ -157,6 +167,18 @@ async function main() {
       }
       return false
     }), 'Real RTP audio reached the other peer')
+    if (!signalingOnly) {
+      await until(async () => await b.evaluate(async () => {
+        for (const pc of window.peerConnections) for (const report of (await pc.getStats()).values()) {
+          if (report.type === 'inbound-rtp' && report.kind === 'video' && report.framesDecoded > 0) return true
+        }
+        return false
+      }), 'Real video frames decoded at the recipient')
+      if (blockDirect) {
+        await until(async () => (await Promise.all([a, b].map(page => page.evaluate(() => window.calls.getSnapshot().connection?.route)))).every(route => route === 'turn'), 'Selected ICE pairs use TURN when direct candidates are unavailable')
+        console.log('PASS automatic TURN route selected with direct candidates blocked and real audio/video received')
+      }
+    }
     await a.evaluate(() => window.calls.toggleMicrophone())
     assert.equal((await state(a)).muted, true)
     assert.ok((await state(a)).liveTracks.filter(t => t.kind === 'audio').every(t => !t.enabled), 'Mute disables actual audio tracks')
@@ -199,7 +221,7 @@ async function main() {
       pc.dispatchEvent(new Event('connectionstatechange'))
     })
     await phase(a, 'failed')
-    assert.match((await state(a)).error || '', /direct connection.*could not be established/i)
+    assert.match((await state(a)).error || '', /WebRTC connection failed|direct connection.*could not be established/i)
     await Promise.all([released(a), released(b)])
     console.log('PASS direct ICE retry times out gracefully, ends the remote call, and stops every captured track')
 
@@ -212,8 +234,7 @@ async function main() {
 
     for (const page of pages) await page.evaluate(() => window.calls.dispose())
 
-    // Exercise real chat controls. Direct-only calling goes straight to preview
-    // without requesting relay credentials or presenting a TURN setup flow.
+    // Exercise real chat controls. Routing is automatic with no TURN setup prompt.
     const uiPages = await Promise.all(contexts.map(context => context.newPage()))
     const [uiA, uiB] = uiPages
     for (const page of uiPages) {
@@ -270,7 +291,7 @@ async function main() {
     await uiA.screenshot({ path: path.join(artifacts, 'calling-mobile-320.png'), ...screenshotOptions })
     await uiA.getByRole('button', { name: 'End call', exact: true }).click()
     await remoteBar.getByRole('status').filter({ hasText: /^Call ended/ }).waitFor()
-    console.log('PASS direct-only chat calling controls and narrow composer layout')
+    console.log('PASS chat calling controls and narrow composer layout')
 
     wire.verify(['call:socket', 'call:invite', 'call:claim', 'call:send', 'call:finish'])
     const signedCommand = wire.frames.find(({ direction, body }) => direction === 'framesent' && JSON.parse(body).type === 'request')?.body

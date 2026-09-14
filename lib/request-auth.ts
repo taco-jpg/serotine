@@ -3,8 +3,8 @@ import { hexToArrayBuffer, arrayBufferToHex } from "./crypto"
 
 // Existing addresses are P-256 public points. Proofs require possession of their
 // matching private key, without a server account or a public-key registry.
-export async function createRequestProof(action: string, payload: unknown, privateJwk: JsonWebKey, publicKey: string): Promise<RequestProof> {
-  const proof = { publicKey, timestamp: Date.now(), nonce: crypto.randomUUID() }
+export async function createRequestProof(action: string, payload: unknown, privateJwk: JsonWebKey, publicKey: string, timestamp = Date.now()): Promise<RequestProof> {
+  const proof = { publicKey, timestamp, nonce: crypto.randomUUID() }
   const key = await crypto.subtle.importKey("jwk", { ...privateJwk, key_ops: ["sign"] }, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"])
   const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(requestText(action, payload, proof)))
   return { ...proof, signature: arrayBufferToHex(signature) }

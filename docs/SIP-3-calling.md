@@ -12,7 +12,7 @@ The call bar remains visible across conversations. It includes connection state,
 
 Incoming invitations play a local ringtone and outgoing calls play a quieter waiting tone. **Calling · Waiting for answer** means the invitation has not been accepted; it does not confirm that another device is making sound. Browsers require an interaction before playing audio; use **Enable call sounds** when shown. Sounds stop on answer, cancel, timeout, silence, or identity change. A fast answer is retained even when the outgoing invitation response arrives later.
 
-Invitations expire after 40 seconds. Connection setup has a 30-second deadline; interruption permits a bounded 15-second reconnection attempt, preserving media choices. A new call requires another explicit action. Browsers can suspend background tabs, especially on phones; suspended or closed browsers cannot reliably ring or maintain calls.
+Invitations expire after 40 seconds. Connection setup has a 30-second deadline; interruption permits a bounded 30-second reconnection attempt, preserving media choices. A new call requires another explicit action. Browsers can suspend background tabs, especially on phones; suspended or closed browsers cannot reliably ring or maintain calls.
 
 One live call reserves both participants' identities on the relay. A conditional database write selects the first incoming device that accepts. Other tabs/devices stop ringing when their WebSocket state refreshes. Concurrent outgoing calls cannot reserve the same identity twice.
 
@@ -32,13 +32,13 @@ Rooms have no durable call history. Active membership and encrypted negotiation 
 
 ## Direct media and WebSocket signaling
 
-Audio and video use direct WebRTC peer connections. STUN and ICE discover network addresses and attempt NAT hole punching. Calls always use `iceTransportPolicy: "all"` with STUN-only servers; no TURN configuration, credentials, provider requests, or server media fallback are supported. Relay candidates in remote ICE/SDP are rejected. An older client requiring relay-only calling must update before calling this version.
+Audio and video remain WebRTC peer connections. Each browser constructs the existing `RTCPeerConnection` with `iceTransportPolicy: "all"`, `bundlePolicy: "max-bundle"`, STUN, and authenticated Cloudflare-managed TURN credentials. ICE gathers candidate routes concurrently and prioritizes working direct/reflexive routes; a relay candidate is available when those routes fail. This is standard ICE selection, not a manually sequenced transport or a WebSocket media fallback. Signed remote relay candidates are permitted; peer DTLS fingerprint verification remains intact.
 
-Participants can learn each other's network addresses. This is disclosed in call preparation and settings. Starting or answering remains an explicit action; an incoming invitation never captures a microphone or camera. A restrictive firewall or NAT can prevent a direct connection. Setup then ends with a clear error and releases local media. Group calls use the same direct mesh: an unreachable participant can fail independently while connected participants continue.
+Starting or answering remains explicit. Incoming invitations never capture devices. Each group/community peer pair uses the same mesh and ICE configuration. An unreachable participant can fail independently while other participants continue. Reconnect attempts renew credentials, use the existing ICE restart negotiation, and terminate after a bounded deadline (30 seconds by default). A later interruption after a successful reconnect gets a fresh bounded recovery attempt.
 
 The browser connects to `/api/calls/socket` over WSS for invitations, ringing state, accept/reject, SDP offer/answer, ICE candidates, room membership, and hangup. Local development permits `ws:` only on localhost. There is no browser HTTP polling fallback. Successful changes trigger targeted content-free notifications; clients fetch authenticated encrypted state over the same WebSocket and immediately drain remaining pages. Presence leases renew every 8 seconds for direct calls and 10 seconds for joined rooms.
 
-Socket loss rejects requests with uncertain outcomes rather than automatically replaying mutations. Reconnection obtains a fresh signed authentication proof, wakes the engines, and resynchronizes their cursors. Existing invitation and connection deadlines bound failures. A disconnected browser never changes to a server media path.
+Socket loss rejects requests with uncertain outcomes rather than automatically replaying mutations. Reconnection obtains a fresh signed authentication proof, wakes the engines, and resynchronizes their cursors. Existing invitation and connection deadlines bound failures. WebSocket disconnection never switches media to a Worker. TURN relays encrypted WebRTC packets independently of the signaling service.
 
 ## Server setup
 
@@ -51,7 +51,23 @@ npm run deploy:built
 
 Keep the existing `WORKER_SELF_REFERENCE` and `serotine_db` bindings. The Durable Object forwards signed requests internally to the existing `/api/calls` handler, preserving its D1 arbitration and authorization. These internal requests carry signaling only. The message relay, R2 attachments, homepage, and themes are unaffected by the calling transport change.
 
-No TURN secrets are needed or read. `CALL_STUN_URLS` optionally supplies comma-separated `stun:`/`stuns:` URLs; otherwise the app uses the existing Google STUN default. Only URLs are accepted, without usernames or credentials. STUN helps discover a route and cannot guarantee connectivity through every network.
+Create a **Cloudflare Realtime TURN key** using the [official dashboard/API instructions](https://developers.cloudflare.com/realtime/turn/generate-credentials/). No SFU app, VPS, coturn, or additional Worker/DO migration is needed. The existing deployment is OpenNext on Workers with static assets; hosting is unchanged.
+
+| Worker secret / variable | Value |
+| --- | --- |
+| `CALL_TURN_KEY_ID` | The TURN key's `uid` / Token ID. Store as a Worker secret or variable. |
+| `CALL_TURN_API_TOKEN` | The **TURN key's** server-side `key` / API token. Store as a Worker secret. This is not the account API token. |
+| `CALL_STUN_URLS` | Optional comma-separated STUN URLs; defaults to `stun:stun.cloudflare.com:3478`. |
+
+Set secrets on the existing `serotine` Worker using `npx wrangler secret put CALL_TURN_KEY_ID` and `npx wrangler secret put CALL_TURN_API_TOKEN`, then deploy the reviewed build. Use an ignored `.dev.vars` for local workerd. Never set `NEXT_PUBLIC_*` credentials or commit `.dev.vars`.
+
+Provisioning uses `POST https://api.cloudflare.com/client/v4/accounts/{account_id}/calls/turn_keys` with a descriptive `name`. The [official create-key API](https://developers.cloudflare.com/api/resources/calls/subresources/turn/methods/create/) requires **Calls Write**; read/list operations use Calls Read. Cloudflare Realtime SDK permissions alone are not evidence that this separate TURN permission is present. Writing Worker secrets additionally requires Workers Scripts Write on this account. Once the key is created, the application uses its separate returned bearer token and does not need the account management token at runtime.
+
+After existing identity/signature verification, nonce replay protection, and action rate limiting, `call:configuration` makes the documented server-side request:
+
+`POST https://rtc.live.cloudflare.com/v1/turn/keys/{TURN_KEY_ID}/credentials/generate-ice-servers` with `Authorization: Bearer {TURN_KEY_API_TOKEN}` and JSON `{ "ttl": 3600 }`.
+
+Clients receive only provider-issued `iceServers` plus an expiry and status. Credentials remain in memory, renew before expiry with `setConfiguration()`, and refresh on ICE restart. A brief provider outage preserves still-valid credentials. Browser-blocked port 53 is removed; documented UDP, TCP, and TLS/443 alternatives remain. Provider requests time out after eight seconds; bodies are bounded to 16 KiB; provider errors and tokens are never logged or forwarded. Missing/failed TURN setup keeps direct calls available and displays a clear fallback-unavailable notice. The release is not TURN-ready until the secrets are configured and a relayed media call passes.
 
 The custom entrypoint follows [OpenNext's custom Worker guide](https://opennext.js.org/cloudflare/howtos/custom-worker); the signaling hub uses [Cloudflare WebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/). Running `next dev` alone does not serve this WebSocket upgrade. Use the built app with local `wrangler dev` for calling development.
 
@@ -75,10 +91,29 @@ Switching an ordinary call to private suppresses its summary on both participant
 
 ## Validation
 
-Run `npm test`, `npm run typecheck`, and `npm run lint`. Tests cover real Web Crypto and SQLite, signed WebSocket authentication, replay and identity isolation, targeted notifications, frame/backpressure bounds, hibernation, socket lifecycle, and direct-only ICE configurations. A local workerd integration test exercises the actual WebSocket server, self binding, D1 backend, and STUN-only configuration.
+Run `npm test`, `npm run typecheck`, and `npm run lint`. Tests cover real Web Crypto and SQLite, signed WebSocket authentication, replay and identity isolation, targeted notifications, frame/backpressure bounds, hibernation, socket lifecycle, clock-skew calibration, and STUN/managed-TURN configurations. A local workerd integration test exercises the actual WebSocket server, self binding, D1 backend, and STUN-only configuration.
 
 After `npm run build`, `npm run test:calling` and `npm run test:call-rooms` run the complete built app in local workerd. Alternatively set `SEROTINE_BROWSER_ORIGIN` to an already running local workerd origin. Set `SEROTINE_CHROMIUM_PATH` for a non-default Chromium installation. Run the browser suites sequentially. `npm run test:ringing` independently checks browser autoplay restrictions, synthesized sound, and cleanup.
 
-The default browser checks require received live RTP. A restricted runner that cannot gather native ICE candidates can explicitly set `SEROTINE_CALL_SMOKE_SIGNALING_ONLY=1`. This verifies WSS exchange, permissions, capture/cleanup, call state, no-TURN configuration, and graceful direct-connection failure; it does **not** establish successful remote audio/video. Keep that limitation in test reports.
+The default browser checks require received live RTP. A restricted runner that cannot gather native ICE candidates can explicitly set `SEROTINE_CALL_SMOKE_SIGNALING_ONLY=1`. This verifies WSS exchange, permissions, capture/cleanup, call state, ICE configuration and graceful connection failure; it does **not** establish successful remote audio/video. Keep that limitation in test reports.
 
-Before release, test real microphone output, cameras, and calls across physical devices/networks. Successful direct calling depends on those networks; a restrictive-network failure is expected to end clearly without a media relay fallback.
+Before release, test real microphone output and cameras on two physical devices: one call on a direct-friendly network, one across different networks, then one with direct traffic blocked. Open **Call settings → Connection** (or a participant's connection details in the room view). `TURN relay` must reflect a **selected** local or remote `relay` candidate; merely gathering a relay candidate is insufficient. Confirm received audio and moving video, not just a Connected label. Diagnostics expose only route/candidate types, transport, round-trip time, and byte counters, never IPs, ports, credentials, SDP, or raw stats.
+
+The browser suite also supports `SEROTINE_CALL_SMOKE_BLOCK_DIRECT=1 npm run test:calling`. Configure real managed TURN credentials in local workerd first. This test keeps the production `all` policy while filtering non-relay remote ICE candidates in its browser fixture. It requires selected TURN pairs, received audio RTP, and decoded video frames. It cannot run in signaling-only mode. Repeat without the flag to verify ordinary direct-compatible behavior. The standard suite also verifies ringing, accept/reject, linked-device arbitration, hangup, and media cleanup.
+
+### Investigation before this change
+
+| Question | Confirmed existing behavior at `5d096b8` |
+| --- | --- |
+| Initiation | `CallEngine.prepareOutgoing` previews devices; `connectPreview` sends a signed encrypted invitation after contact capability checks. |
+| SDP | Encrypted `offer` / `answer` envelopes through `call:send` or `room:send`. |
+| ICE | Trickle candidates through those same encrypted envelopes; early candidates buffer until remote SDP. |
+| Signaling | WSS `/api/calls/socket` → `CallSignalingHub` Durable Object → internal authenticated `/api/calls` handler/D1. Push notifications trigger state reads over WSS; lease timers also synchronize. No browser HTTP fallback. |
+| Peer connections | `lib/call-engine.ts:createConnection`; `lib/call-room-engine.ts:createPeer`. |
+| ICE config | `all`, `max-bundle`, STUN-only; default Google STUN. |
+| TURN / fallback | No live TURN provider or credentials; relay candidates actively rejected. No media fallback. |
+| Reproduced rejection | The unchanged implementation rejected a legitimate invite with a caller clock +1,500 ms using the exact screenshot error; aligned clocks reached ringing. Expiry upper bounds had zero skew tolerance. This happens before ICE, so TURN alone cannot fix it. |
+| Network diagnosis | STUN-only topology cannot supply a relay route through restrictive NAT/firewalls. The screenshots do not prove which network condition applied; physical cross-network transport needs a real acceptance test. |
+| Scope | Authenticated expiring TURN config, accepted relay candidates, safe selected-pair diagnostics, credential renewal, and bounded clock calibration. Existing signaling/auth, call state machines, peer topology, messaging, communities, and deployment remain. |
+
+Successful authenticated responses include server time. Calling clients use that clock for their signed envelopes, subsequent request proofs, and lease comparisons; the device clock is never changed. A five-second upper-bound allowance covers small residual skew/latency. Existing signature verification, nonce replay checks, and bounded expiry remain enforced.

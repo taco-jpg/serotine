@@ -4,50 +4,117 @@ title: Force P2P mode
 author: louisliu
 status: Draft
 created: 2026-09-12
+updated: 2026-09-14
 ---
 
 # SIP-9: Force P2P mode
 
 ## Summary
 
-Add an optional mode that prefers or requires direct peer-to-peer transport for a conversation instead of the retained relay path.
+Add **Force P2P** as a fourth messaging mode alongside the existing choices. In this mode, two people exchange encrypted messages and small files directly while both have Serotine open and connected. Conversation content never enters the message relay, attachment storage, or TURN. If a direct connection cannot be established, sending stays unavailable; Serotine never silently falls back to a relay.
+
+Start with basic one-to-one messaging. Smaller file limits and fewer relay-dependent features are acceptable tradeoffs for reducing server traffic and storage.
 
 ## Motivation
 
-Serotine still contains a legacy direct WebRTC transport, while the current feature-rich conversation interface primarily uses the retained encrypted event relay for synchronization and delivery. Some users may prefer a direct path for specific conversations, especially when they want to avoid retained relay delivery and accept the tradeoffs that come with stricter peer-to-peer operation.
+Sending conversation content through servers uses bandwidth and storage even when both people are online and could communicate directly. This proposal restores the direct-communication approach described in the supplied discussion about Serotine's earlier design, while giving users an explicit choice about delivery guarantees.
+
+The goal is **no server-relayed message or file payloads for these conversations**. It is not a promise of zero total server cost: app hosting, connection setup, presence, and STUN may still involve services. A separate setup without Serotine-hosted signaling is a possible later extension.
 
 ## Proposal
 
-- Add a user-visible `Force P2P` conversation mode.
-- When enabled, Serotine attempts direct peer-to-peer transport and clearly reports whether the direct path is actually established.
-- In strict mode, if P2P cannot be established, Serotine should not silently fall back to the relay; sending should pause or fail with a clear explanation.
-- A softer `Prefer P2P` mode may be considered separately, where fallback is allowed.
-- Both peers should know when the conversation is currently direct versus relay-backed.
-- Group-chat behavior can be deferred until the direct transport model for more than two participants is clear.
+### Fourth mode and connection agreement
+
+- Offer **Force P2P** as an explicit conversation choice. Preserve the existing modes and default.
+- Explain before activation: **“Both people must have Serotine open and connected. Messages and files travel directly. Offline delivery is unavailable, and the other person may learn your network address.”**
+- Both clients must support and agree to direct-only delivery before content is exchanged. Neither client can override the other's relay-only privacy preference.
+- Advertised presence is a hint. Sending requires an authenticated, working direct connection.
+- Show **Connecting directly**, **Connected directly**, **Peer unavailable**, or **Direct connection failed**, with a readable reason where known. Do not show “Connected directly” merely because a peer is online.
+- If either client lacks support or the peers disagree about routing, explain the incompatibility and keep sending disabled. An explicit change to another mode is a separate user decision.
+
+### No relay fallback
+
+While Force P2P is active:
+
+- Messages, attachments, thumbnails, reactions, receipts, edits, deletion events, and any other conversation payload supported in this mode travel only over the direct connection.
+- Do not enqueue these payloads for the retained event relay, upload them to server attachment storage, or send them through TURN.
+- Automatic retry, reconnect, history synchronization, backups, and other devices must not later upload content created under the direct-only policy.
+- Connection failure pauses or fails delivery. Do not offer a misleading success state or automatically retry through a relay.
+- Changing modes cannot automatically release pending direct-only messages or files to a relay. Keep their routing restriction; the sender must explicitly choose to resend any such item under a different mode.
+
+Tiny, short-lived, authenticated connection-setup messages may pass through a signaling service. They contain negotiation data, not chat text, file content, or a disguised offline mailbox. TURN relays WebRTC traffic and is excluded even though its payload is encrypted. Signaling, STUN, and TURN serve different purposes; allowing setup assistance does not authorize payload relay. See the [WebRTC peer-connection guide](https://webrtc.org/getting-started/peer-connections).
+
+### Online-only delivery and interruptions
+
+| Situation | Expected behavior |
+| --- | --- |
+| Both clients are open and a direct connection succeeds | Allow direct text and supported file transfers. |
+| Recipient is offline, suspended, or unreachable | Keep the composition as a local unsent draft; no server queue or offline delivery. |
+| Both appear online but their networks block a direct path | Show a direct-connection failure and keep the content unsent. |
+| Connection drops before receipt is acknowledged | Show delivery as unconfirmed; retry directly with the same message ID and suppress duplicates. |
+| File transfer is interrupted | Mark it incomplete and allow a direct retry when both peers reconnect. |
+| A peer returns later | Establish a fresh direct connection; local drafts require a send action. There is no relay mailbox to collect. |
+
+The sender must also be connected when delivery happens. Previously received local history remains readable offline. A suspended browser is not guaranteed to remain reachable. A message is “delivered” only after the recipient's authenticated acknowledgement; a file is complete only after receipt and integrity verification.
+
+### Basic feature set and smaller limits
+
+The first version supports accepted one-to-one contacts, encrypted text, and small file/image attachments. Group chats, communities, live multi-device catch-up, offline push delivery, and voice/video changes are outside this version. Unsupported features should be visibly unavailable in this mode.
+
+Use a separate, lower per-file limit for Force P2P, displayed before selection and enforced before transfer and on receipt. Select the exact cap after browser/device testing; this SIP does not assume a measured safe value. Limit concurrent transfers and bound memory buffers, with progress and cancellation controls. A file above the cap stays local and gets a clear explanation; it is never uploaded automatically.
+
+A smaller cap is a product limit for resource use and reliability, not a WebRTC requirement. Direct transfers can be fast or slow depending on both connections and devices; smaller caps alone do not ensure speed.
+
+### Later option without hosted signaling
+
+Explore manual, authenticated connection-info exchange, such as a copyable invitation or QR-assisted flow, so a basic session can start without Serotine's signaling service. This is separate follow-up work: exchanging offers, answers, and candidates, preserving identity authentication, and reconnecting require more design.
+
+That option must disclose any remaining STUN or other service dependency. Removing signaling or STUN does not guarantee that two arbitrary networks can connect; see the [WebRTC TURN guidance](https://webrtc.org/getting-started/turn-server). It also does not eliminate the cost of serving the application.
 
 ## Security & Privacy
 
-P2P changes transport and metadata exposure, not the trust model of the endpoint. It does not by itself add forward secrecy, anonymity, or protection against a compromised client.
+Keep Serotine's existing contact identity checks and application encryption. Authenticate negotiation data and bind it to the intended peers, session, and direct-only policy, so an intermediary cannot silently substitute an endpoint or change the route.
 
-Direct peer-to-peer transport may expose network-address metadata between participants. The UI should not imply that direct transport is automatically more private in every threat model.
+Direct connections can expose network addresses to the other participant. P2P does not itself add anonymity, forward secrecy, or protection against compromised endpoints. Signaling/STUN operators may still see connection metadata. Setup records should expire promptly and logs should omit negotiation payloads and addresses.
+
+Force P2P controls delivery, not message expiry. It does not erase history already stored on a relay before activation or make a conversation self-destructing. Any compatible private-chat settings continue to apply.
 
 ## Compatibility
 
-Force P2P should not create a second incompatible message format. Where practical, the same encrypted message/event representation should travel over either transport.
+Reuse existing encrypted event formats where practical, with explicit capability negotiation and persistent routing metadata. Older clients may continue ordinary conversations, but cannot participate in Force P2P or receive its content through an automatic fallback.
 
-Features that fundamentally depend on relay retention or multi-device catch-up may be unavailable or degraded in strict P2P mode; the UI should make that tradeoff explicit. Unsupported clients should continue to use ordinary relay-backed messaging rather than misrepresenting a direct connection.
+Apply the policy in shared transport and synchronization code, not only in the composer. Switching an existing conversation requires a clear boundary: show any earlier relay submissions as earlier traffic, quiesce outgoing work, and establish agreement before new direct-only sends. A second device cannot silently override that agreement.
+
+Local backups may preserve eligible received history according to existing retention rules, but must preserve direct-only restrictions on restore. Restoring a backup must never replay that history into the relay. Local history viewing is not live synchronization.
 
 ## Alternatives
 
-Use the retained relay exclusively. This preserves the current delivery and synchronization behavior but offers no strict direct-only option. Another alternative is `Prefer P2P`, which attempts a direct path while allowing relay fallback and therefore provides weaker transport guarantees but better availability.
+**Prefer P2P:** Attempt direct transport and allow relay fallback. This may improve availability and reduce traffic, but is a separate proposal because it cannot provide Force P2P's no-fallback guarantee.
+
+**Relay-only:** Keep current retained delivery and catch-up behavior for users who need it.
+
+**Manual setup from the first release:** Avoid hosted signaling immediately, at the cost of a harder setup and recovery flow. Defer this until the basic direct-only mode is usable.
 
 ## Open Questions
 
-- Should `Force P2P` and `Prefer P2P` both exist?
-- How should linked devices behave when a strict P2P conversation is active?
-- Which relay-dependent features should be disabled or visibly degraded?
-- What connection metadata should the UI expose to explain the active transport accurately?
+- What smaller file cap, transfer concurrency, and reconnect timeout work reliably on supported phones and browsers?
+- Which optional message features can reuse the direct transport without introducing relay dependencies?
+- How should a later version support multiple devices or groups while preserving each participant's routing choice?
+- What manual pairing flow would make the later signaling-independent option practical?
 
 ## Implementation Notes
 
-Reuse the existing encrypted message/event representation where possible and keep transport selection separate from message semantics. Verify strict no-fallback behavior, direct-path state reporting, reconnect behavior, and unsupported-client handling across real network conditions.
+WebRTC has no built-in `iceTransportPolicy: "direct-only"`; the standard policies are `all` and `relay`. Configure both clients without TURN servers, reject relay candidates in both initial session descriptions and later candidate updates, and verify the selected candidate pair before sending content and after route changes. If the client cannot establish that the path meets the policy, sending remains blocked. See the [W3C WebRTC specification](https://www.w3.org/TR/webrtc/).
+
+Use chunked file transfer with backpressure instead of treating an entire file as one data-channel message. Chunk size must respect the negotiated data-channel message limit; that limit differs from the product's total file-size cap.
+
+Before implementation is accepted, verify:
+
+- Successful direct text and file delivery between real devices on different networks.
+- Offline peers, suspended tabs, blocked direct paths, and unsupported clients produce clear states and no payload relay.
+- TURN configuration, relay candidates, connection restarts, and mid-transfer drops cannot bypass the policy.
+- No message, attachment, or derived event reaches relay storage during send, retry, reload, mode changes, backup restore, or second-device use.
+- Duplicate retries, acknowledgements, file integrity, cancellation, and advertised limits behave correctly.
+- A local or same-network test is not presented as proof of universal direct connectivity.
+
+Measure the reduction in relay payload bytes and storage separately from remaining signaling traffic. Keep status **Draft** until the proposal is reviewed and implementation work is explicitly undertaken.

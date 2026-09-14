@@ -239,10 +239,10 @@ test('active call leases require both selected devices, and an unrelated linked 
   await linkedBob.heartbeat([alice.publicKey])
   const session = await alice.transport.invite(bob.publicKey, crypto.randomUUID(), invite)
   await bob.transport.claim(session.callId)
-  h.state.now += 15000
+  h.state.now += 60000
   await alice.transport.poll()
   await linkedBob.poll()
-  h.state.now += 15001
+  h.state.now += 60001
   const ended = await alice.transport.poll()
   assert.equal(ended.sessions[0].status, 'ended')
   assert.equal(ended.sessions[0].reason, 'failed')

@@ -89,6 +89,10 @@ export function CallingProvider({ messaging, communities, children, onCompleted 
         saveSettings(settings)
         if (room && room.getSnapshot().settings.silenceIncoming !== settings.silenceIncoming) room.updateSettings(settings)
       },
+    }, {
+      // Push notifications still drain immediately; this only slows the fallback
+      // presence renewal / resync timer that otherwise hits D1 every eight seconds.
+      pollIntervalMs: 30_000,
     })
     const room: CallRoomEngine = new CallRoomEngine({
       identity,

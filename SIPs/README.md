@@ -14,11 +14,13 @@ Serotine Improvement Proposals live in this directory.
 | [SIP-8](SIP-8-share-selected-messages.md) | Share selected messages | Draft |
 | [SIP-9](SIP-9-force-p2p-mode.md) | Force P2P mode | Draft |
 | [SIP-10](SIP-10-android-and-ios-apps.md) | Android and iOS apps | Draft |
+| [SIP-11](SIP-11-custom-user-avatars.md) | Custom user avatars | Draft |
+| [SIP-12](SIP-12-custom-profiles-and-per-friend-sharing.md) | Custom profiles and per-friend sharing | Draft |
 
 These proposals are open for discussion. Draft status does not mean a feature has been accepted or implemented.
 
 When adding one, use a filename like:
 
-`SIP-11-example-title.md`
+`SIP-13-example-title.md`
 
 The repository root contains the process, format, status definitions, and template.

@@ -8,6 +8,8 @@ created: 2026-09-13
 
 # SIP-11: Custom user avatars
 
+Related draft: [SIP-12: Custom profiles and per-friend sharing](SIP-12-custom-profiles-and-per-friend-sharing.md) extends this proposal with animated pictures, GIF banners, and other profile fields. If adopted, its explicit per-friend sharing rules replace the broad avatar visibility described below. Both proposals remain Draft.
+
 ## Summary
 
 Add optional custom profile avatars to Serotine. Users can choose an image for their identity, replace it later, or remove it and return to the existing fallback avatar. The same avatar should appear consistently anywhere that identity is shown. This SIP records a proposal for discussion; it does not authorize or contain an implementation.

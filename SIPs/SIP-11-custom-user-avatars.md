@@ -1,7 +1,7 @@
 ---
 sip: 11
 title: Custom user avatars
-author: sodium-qed
+author: louisliu
 status: Draft
 created: 2026-09-13
 ---

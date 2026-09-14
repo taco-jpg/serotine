@@ -4,8 +4,11 @@ import { ID_PATTERN, PUBLIC_KEY_PATTERN } from "./protocol"
 export const CALL_CLOCK_SKEW_MS = 5_000
 export const CALL_INVITE_TTL_MS = 40_000
 export const CALL_SIGNAL_TTL_MS = 30_000
-export const CALL_PRESENCE_TTL_MS = 30_000
-export const CALL_LEASE_TTL_MS = 30_000
+// Presence and active-call leases intentionally outlive the 30s fallback refresh.
+// WSS change pushes still trigger immediate resync; these TTLs only absorb timer
+// throttling or a missed renewal without returning to an 8s D1 write cadence.
+export const CALL_PRESENCE_TTL_MS = 120_000
+export const CALL_LEASE_TTL_MS = 120_000
 export const CALL_PAGE_SIZE = 64
 export const CALL_PACKET_LIMIT = 96_000
 /** The legacy relay value is decoded only so updated clients can reject it explicitly. */

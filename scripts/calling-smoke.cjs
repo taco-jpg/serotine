@@ -1,18 +1,17 @@
 /* eslint-disable no-console */
 /* global SerotineCalling */
-// Real browser capture, RTCPeerConnection, authenticated HTTP and local D1.
+// Real browser capture, RTCPeerConnection, authenticated WebSockets and local D1.
 // Fake devices keep this test independent of microphones/cameras on the runner.
 const fs = require('node:fs')
 const path = require('node:path')
 const assert = require('node:assert/strict')
-const { spawn } = require('node:child_process')
+const { callingFixture, callingRuntime, signalingObserver, verifyDirectConfiguration, verifySocketRejections } = require('./calling-smoke-support.cjs')
 const { chromium } = require('playwright')
 const esbuild = require('esbuild')
 
 const root = path.resolve(__dirname, '..')
 const port = process.env.SEROTINE_BROWSER_PORT || '3183'
 assert.match(port, /^\d+$/)
-const origin = `http://localhost:${port}`
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 // Restricted runners may be unable to gather even localhost ICE candidates.
 // This opt-in mode exercises signaling/capture/UI, and never claims RTP passed.
@@ -29,33 +28,24 @@ async function main() {
   }, bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'SerotineCalling', tsconfig: path.join(root, 'tsconfig.json') })).outputFiles[0].text
   const artifacts = process.env.SEROTINE_BROWSER_ARTIFACTS || fs.mkdtempSync('/tmp/serotine-calling-')
   fs.mkdirSync(artifacts, { recursive: true })
-  const logPath = path.join(artifacts, 'server.log'), log = fs.openSync(logPath, 'w')
-  const server = spawn(process.execPath, [path.join(root, 'node_modules/next/dist/bin/next'), 'dev', '--webpack', '--port', port, '--hostname', '127.0.0.1'], { cwd: root, stdio: ['ignore', log, log] })
-  let browser, serverError
-  server.on('error', error => { serverError = error })
+  const runtime = await callingRuntime(root, port, artifacts)
+  const { origin } = runtime
+  const wire = signalingObserver()
+  let browser
   try {
-    let ready = false
-    const deadline = Date.now() + 120000
-    while (Date.now() < deadline) {
-      if (serverError || server.exitCode !== null) throw new Error(`Server failed: ${serverError?.message || fs.readFileSync(logPath, 'utf8').slice(-4000)}`)
-      try { if ((await fetch(origin, { signal: AbortSignal.timeout(3000) })).ok) { ready = true; break } } catch { /* Wait for compilation. */ }
-      await pause(500)
-    }
-    assert.ok(ready, `Server did not start: ${logPath}`)
     browser = await chromium.launch({ executablePath: process.env.SEROTINE_CHROMIUM_PATH, headless: true, args: [
       '--no-sandbox', '--disable-dev-shm-usage', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required',
     ] })
-    const errors = [], requests = [], pages = []
+    const errors = [], pages = []
     const [alice, bob] = await Promise.all([identity(), identity()])
     const contexts = await Promise.all([0, 1].map(() => browser.newContext({ permissions: ['microphone', 'camera'], viewport: { width: 1280, height: 900 }, serviceWorkers: 'block' })))
 
     async function fixture(context, owner, contact) {
       const page = await context.newPage()
       pages.push(page)
-      page.on('pageerror', error => errors.push(error.message))
-      page.on('request', request => { if (new URL(request.url()).pathname === '/api/calls') requests.push(request.postData() || '') })
-      await page.route(`${origin}/__calling-fixture`, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Calling smoke fixture</title>' }))
-      await page.goto(`${origin}/__calling-fixture`)
+      page.on('pageerror', error => errors.push(error.stack || error.message))
+      wire.observe(page)
+      await callingFixture(page, origin, 'Calling smoke fixture')
       await page.addScriptTag({ content: bundle })
       await page.evaluate(async ({ owner, contact }) => {
         localStorage.setItem('serotine_identity_v2', JSON.stringify(owner))
@@ -84,8 +74,7 @@ async function main() {
           identity: await SerotineCalling.loadIdentity(),
           getPeerPolicy: peer => peer === contact.publicKey ? window.peerPolicy : { accepted: false },
           onCompleted: async call => { window.completedCalls.push(call); await SerotineCalling.saveCallHistory(owner.publicKey, call) },
-          settings: { relayOnly: false },
-        })
+        }, { reconnectTimeoutMs: 1000 })
         await window.calls.start()
       }, { owner, contact })
       return page
@@ -141,25 +130,14 @@ async function main() {
     await released(a)
     console.log('PASS explicit audio preview, no recipient capture before acceptance, and cross-tab cancellation')
 
-    // Publish a signed relay-only invitation without making a media connection.
-    // The recipient must never override the sender's routing requirement.
-    await a.evaluate(async peer => {
-      window.calls.dismiss()
-      await window.calls.prepareOutgoing(peer, 'audio')
-      window.calls.connectionPolicy = 'relay'
-      await window.calls.connectPreview()
-    }, bob.publicKey)
+    // An explicit rejection is delivered promptly over the signaling socket.
+    await start(a, bob.publicKey, 'audio')
     await phase(b, 'incoming')
-    await b.evaluate(() => window.calls.prepareIncoming('audio'))
-    await phase(b, 'routing')
-    assert.equal(await b.evaluate(() => window.calls.getSnapshot().relayRequiredByPeer), true)
-    await b.evaluate(() => window.calls.retryPreparation(true))
-    assert.equal((await state(b)).phase, 'routing', 'Relay requirement cannot be bypassed by direct consent on recipient')
-    assert.equal((await state(b)).captureRequests, 0)
-    await a.evaluate(() => window.calls.end())
-    await phase(b, 'ended')
+    await b.evaluate(() => window.calls.decline())
+    await phase(a, 'declined')
     await released(a)
-    console.log('PASS authenticated relay-only invitation refuses recipient direct fallback before capture')
+    await until(async () => (await state(b2)).phase !== 'incoming', 'Reject dismisses the other recipient tab')
+    console.log('PASS recipient rejection terminates ringing and capture')
 
     // A video invitation can be accepted with audio only. Actual RTC stats
     // prove media packets cross the browser connection after acceptance.
@@ -208,6 +186,23 @@ async function main() {
     console.log(`PASS ${signalingOnly ? 'authenticated SDP exchange' : 'real video/audio WebRTC'}, audio-only answer, single selected tab, mute, camera stop and hangup cleanup`)
     console.log('PASS immediate private switch and hangup suppresses both participants\' persistent and backup history')
 
+    // Trigger a native connection-state failure after real negotiation. The
+    // engine gets one direct ICE retry, then its real deadline must release all
+    // devices and report the network limitation without changing transports.
+    await start(a, bob.publicKey, 'audio')
+    await phase(b, 'incoming')
+    await accept(b, 'audio')
+    await until(async () => (await state(a)).connections.some(pc => pc.state !== 'closed' && pc.localDescription && pc.remoteDescription && pc.signaling === 'stable'), 'Negotiation completes before simulated network failure')
+    await a.evaluate(() => {
+      const pc = window.peerConnections.at(-1)
+      Object.defineProperty(pc, 'connectionState', { configurable: true, get: () => 'failed' })
+      pc.dispatchEvent(new Event('connectionstatechange'))
+    })
+    await phase(a, 'failed')
+    assert.match((await state(a)).error || '', /direct connection.*could not be established/i)
+    await Promise.all([released(a), released(b)])
+    console.log('PASS direct ICE retry times out gracefully, ends the remote call, and stops every captured track')
+
     await a.evaluate(async peer => { window.calls.dismiss(); window.denyCapture = true; await window.calls.prepareOutgoing(peer, 'audio') }, bob.publicKey)
     await phase(a, 'failed')
     await released(a)
@@ -217,14 +212,14 @@ async function main() {
 
     for (const page of pages) await page.evaluate(() => window.calls.dispose())
 
-    // Exercise the actual chat controls as well as the engine. The default is
-    // relay-only; an unconfigured server must require an explicit user choice.
+    // Exercise real chat controls. Direct-only calling goes straight to preview
+    // without requesting relay credentials or presenting a TURN setup flow.
     const uiPages = await Promise.all(contexts.map(context => context.newPage()))
     const [uiA, uiB] = uiPages
     for (const page of uiPages) {
       page.setDefaultTimeout(30000)
-      page.on('pageerror', error => errors.push(error.message))
-      page.on('request', request => { if (new URL(request.url()).pathname === '/api/calls') requests.push(request.postData() || '') })
+      page.on('pageerror', error => errors.push(error.stack || error.message))
+      wire.observe(page)
       await page.addInitScript(() => {
         window.uiCaptureCount = 0
         const nativeCapture = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
@@ -238,15 +233,6 @@ async function main() {
       await page.getByRole('menuitem', { name: 'Voice call', exact: true }).click()
     }
     await openVoice(uiA)
-    const routing = uiA.getByRole('dialog', { name: /Call Bob/ })
-    await routing.getByRole('alert').filter({ hasText: /relay.*not configured/i }).waitFor()
-    assert.equal(await uiA.evaluate(() => window.uiCaptureCount), 0, 'Missing relay fails before requesting devices')
-    assert.equal(await uiB.evaluate(() => window.uiCaptureCount), 0)
-    assert.equal(await uiA.getByRole('dialog').count(), 1, 'Only one preflight dialog is visible')
-    await routing.getByRole('button', { name: 'Retry relay', exact: true }).click()
-    await routing.getByRole('alert').filter({ hasText: /relay.*not configured/i }).waitFor()
-    assert.equal(await uiA.evaluate(() => window.uiCaptureCount), 0, 'Retry does not implicitly choose direct or capture')
-    await routing.getByRole('button', { name: 'Allow direct and continue', exact: true }).click()
     const preview = uiA.getByRole('dialog', { name: /Call Bob/ })
     await preview.getByRole('button', { name: 'Turn camera on', exact: true }).waitFor()
     assert.equal(await uiB.evaluate(() => window.uiCaptureCount), 0)
@@ -254,10 +240,7 @@ async function main() {
     const remoteBar = uiB.getByRole('region', { name: 'Current call', exact: true })
     await remoteBar.getByRole('button', { name: 'Answer', exact: true }).click()
     const answerPreview = uiB.getByRole('dialog', { name: /Answer Alice/ })
-    await answerPreview.getByRole('button', { name: 'Allow direct and continue', exact: true }).waitFor()
-    assert.equal(await uiB.evaluate(() => window.uiCaptureCount), 0, 'Recipient reviews routing before capture')
-    assert.equal(await uiB.getByRole('dialog').count(), 1, 'Incoming routing uses one dialog')
-    await answerPreview.getByRole('button', { name: 'Allow direct and continue', exact: true }).click()
+    assert.equal(await uiB.getByRole('dialog').count(), 1, 'Incoming preview uses one dialog')
     await answerPreview.getByRole('button', { name: 'Accept and connect', exact: true }).click()
     for (const page of uiPages) await page.getByRole('region', { name: 'Current call', exact: true }).getByRole('status').filter({ hasText: signalingOnly ? /^(Connecting|Connected)/ : /^Connected/ }).waitFor()
     const screenshotOptions = { animations: 'disabled', style: 'nextjs-portal { display: none; }' }
@@ -287,21 +270,26 @@ async function main() {
     await uiA.screenshot({ path: path.join(artifacts, 'calling-mobile-320.png'), ...screenshotOptions })
     await uiA.getByRole('button', { name: 'End call', exact: true }).click()
     await remoteBar.getByRole('status').filter({ hasText: /^Call ended/ }).waitFor()
-    console.log('PASS real chat calling controls, relay-only failure without fallback, explicit direct opt-in and narrow composer layout')
+    console.log('PASS direct-only chat calling controls and narrow composer layout')
 
-    assert.ok(requests.length > 0, 'Used the actual calling relay')
-    assert.ok(requests.every(body => !body.includes('a=fingerprint:') && !body.includes('a=ice-pwd:') && !body.includes('candidate:')), 'Negotiation is encrypted on the wire')
+    wire.verify(['call:socket', 'call:invite', 'call:claim', 'call:send', 'call:finish'])
+    const signedCommand = wire.frames.find(({ direction, body }) => direction === 'framesent' && JSON.parse(body).type === 'request')?.body
+    assert.ok(signedCommand, 'Captured an actual signed calling command')
+    await verifySocketRejections(contexts[0], origin, signedCommand)
+    console.log('PASS workerd rejects unauthenticated commands and binary media frames')
+    for (const page of [a, b]) await verifyDirectConfiguration(page)
     assert.deepEqual(errors, [], 'No uncaught browser errors')
     console.log(`Calling browser smoke ${signalingOnly ? '(signaling/capture/UI only; RTP not verified) ' : ''}passed. Logs: ${artifacts}`)
   } catch (error) {
     console.error(`Calling smoke artifacts: ${artifacts}`)
+    console.error('Signaling responses:', JSON.stringify(wire.frames.filter(frame => frame.direction === 'framereceived').map(frame => {
+      const value = JSON.parse(frame.body)
+      return { type: value.type, status: value.status, error: value.body?.error, success: value.body?.success }
+    }).slice(-8)))
     throw error
   } finally {
     if (browser) await browser.close()
-    server.kill('SIGTERM')
-    await Promise.race([new Promise(resolve => server.once('exit', resolve)), pause(5000)])
-    if (server.exitCode === null) server.kill('SIGKILL')
-    fs.closeSync(log)
+    await runtime.stop()
   }
 }
 

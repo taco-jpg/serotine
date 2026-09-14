@@ -33,8 +33,8 @@ const noSubscription = () => () => undefined
 function loadSettings(owner: string): Partial<CallSettings> {
   try {
     const saved = JSON.parse(localStorage.getItem(`serotine_call_settings:${owner}`) || "{}")
-    return { silenceIncoming: saved.silenceIncoming === true, relayOnly: saved.relayOnly !== false }
-  } catch { return { silenceIncoming: false, relayOnly: true } }
+    return { silenceIncoming: saved.silenceIncoming === true }
+  } catch { return { silenceIncoming: false } }
 }
 
 export function CallingProvider({ messaging, communities, children, onCompleted }: { messaging: MessagingContextValue; communities: CommunityRecord[]; children: ReactNode; onCompleted?: (call: CompletedCall) => void | Promise<void> }) {
@@ -87,7 +87,7 @@ export function CallingProvider({ messaging, communities, children, onCompleted 
       },
       onSettingsChange(settings) {
         saveSettings(settings)
-        if (room && (room.getSnapshot().settings.relayOnly !== settings.relayOnly || room.getSnapshot().settings.silenceIncoming !== settings.silenceIncoming)) room.updateSettings(settings)
+        if (room && room.getSnapshot().settings.silenceIncoming !== settings.silenceIncoming) room.updateSettings(settings)
       },
     })
     const room: CallRoomEngine = new CallRoomEngine({
@@ -98,7 +98,7 @@ export function CallingProvider({ messaging, communities, children, onCompleted 
       getPeerLabel: peer => current.current.contacts.find(contact => contact.pub === peer)?.alias || shortAddress(peer),
       onSettingsChange(settings) {
         saveSettings(settings)
-        if (next.getSnapshot().settings.relayOnly !== settings.relayOnly || next.getSnapshot().settings.silenceIncoming !== settings.silenceIncoming) next.updateSettings(settings)
+        if (next.getSnapshot().settings.silenceIncoming !== settings.silenceIncoming) next.updateSettings(settings)
       },
     })
     const roomGovernance = new CallRoomGovernance({ identity,

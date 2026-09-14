@@ -2,7 +2,7 @@ import type { Identity } from "./identity"
 import type { CallMode, CallSettings } from "./call-types"
 import type { CallRoomTarget } from "./call-room-transport"
 
-export type CallRoomPhase = "idle" | "routing" | "preparing" | "preview" | "joining" | "joined" | "ended" | "failed"
+export type CallRoomPhase = "idle" | "preparing" | "preview" | "joining" | "joined" | "ended" | "failed"
 export interface CallRoomParticipantSnapshot {
   publicKey: string
   sessionId: string
@@ -31,7 +31,6 @@ export interface CallRoomSnapshot {
   error: string | null
   notice: string | null
   supported: boolean
-  relayAvailable: boolean
   settings: CallSettings
 }
 export interface CallRoomEngineOptions {
@@ -48,7 +47,6 @@ export interface CallRoomController {
   getSnapshot(): CallRoomSnapshot
   getServerSnapshot(): CallRoomSnapshot
   prepare(target: CallRoomTarget, mode: CallMode): Promise<void>
-  retryPreparation(allowDirect?: boolean): Promise<void>
   joinPreview(): Promise<void>
   leave(): Promise<void>
   dismiss(): void

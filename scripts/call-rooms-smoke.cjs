@@ -1,19 +1,18 @@
 /* eslint-disable no-console */
 /* global SerotineRooms */
-// Three real browser identities, authenticated HTTP/D1, and fake local devices.
+// Three real browser identities, authenticated WebSockets/D1, and fake local devices.
 // The default requires received RTP on every peer connection. Restricted runners
 // may explicitly choose signaling/capture/UI coverage; that never claims RTP.
 const fs = require('node:fs')
 const path = require('node:path')
 const assert = require('node:assert/strict')
-const { spawn } = require('node:child_process')
+const { callingFixture, callingRuntime, signalingObserver, verifyDirectConfiguration } = require('./calling-smoke-support.cjs')
 const { chromium } = require('playwright')
 const esbuild = require('esbuild')
 
 const root = path.resolve(__dirname, '..')
 const port = process.env.SEROTINE_BROWSER_PORT || '3184'
 assert.match(port, /^\d+$/)
-const origin = `http://localhost:${port}`
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 const signalingOnly = process.env.SEROTINE_CALL_SMOKE_SIGNALING_ONLY === '1'
 
@@ -28,20 +27,12 @@ async function main() {
   }, bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'SerotineRooms', tsconfig: path.join(root, 'tsconfig.json') })).outputFiles[0].text
   const artifacts = process.env.SEROTINE_BROWSER_ARTIFACTS || fs.mkdtempSync('/tmp/serotine-call-rooms-')
   fs.mkdirSync(artifacts, { recursive: true })
-  const logPath = path.join(artifacts, 'server.log'), log = fs.openSync(logPath, 'w')
-  const server = spawn(process.execPath, [path.join(root, 'node_modules/next/dist/bin/next'), 'dev', '--webpack', '--port', port, '--hostname', '127.0.0.1'], { cwd: root, stdio: ['ignore', log, log] })
-  const pages = [], errors = [], requests = []
-  let browser, serverError
-  server.on('error', error => { serverError = error })
+  const runtime = await callingRuntime(root, port, artifacts)
+  const { origin } = runtime
+  const wire = signalingObserver()
+  const pages = [], errors = []
+  let browser
   try {
-    let ready = false
-    const deadline = Date.now() + 120000
-    while (Date.now() < deadline) {
-      if (serverError || server.exitCode !== null) throw new Error(`Server failed: ${serverError?.message || fs.readFileSync(logPath, 'utf8').slice(-4000)}`)
-      try { if ((await fetch(origin, { signal: AbortSignal.timeout(3000) })).ok) { ready = true; break } } catch { /* Wait for compilation. */ }
-      await pause(500)
-    }
-    assert.ok(ready, `Server did not start: ${logPath}`)
     browser = await chromium.launch({ executablePath: process.env.SEROTINE_CHROMIUM_PATH, headless: true, args: [
       '--no-sandbox', '--disable-dev-shm-usage', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required',
     ] })
@@ -50,18 +41,17 @@ async function main() {
     const contexts = await Promise.all(identities.map(() => browser.newContext({ permissions: ['microphone', 'camera'], viewport: { width: 1280, height: 900 }, serviceWorkers: 'block' })))
     function observe(page) {
       page.setDefaultTimeout(30000)
-      page.on('pageerror', error => errors.push(error.message))
-      page.on('request', request => { if (new URL(request.url()).pathname === '/api/calls') requests.push(request.postData() || '') })
+      page.on('pageerror', error => errors.push(error.stack || error.message))
+      wire.observe(page)
     }
     for (let index = 0; index < contexts.length; index++) {
       const page = await contexts[index].newPage()
       pages.push(page); observe(page)
-      await page.route(`${origin}/__rooms-fixture`, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Call room smoke fixture</title>' }))
-      await page.goto(`${origin}/__rooms-fixture`)
+      await callingFixture(page, origin, 'Call room smoke fixture')
       await page.addScriptTag({ content: bundle })
       await page.evaluate(({ owner, contacts }) => {
         localStorage.setItem('serotine_identity_v2', JSON.stringify(owner))
-        localStorage.setItem(`serotine_call_settings:${owner.publicKey}`, JSON.stringify({ relayOnly: false }))
+        localStorage.setItem(`serotine_call_settings:${owner.publicKey}`, JSON.stringify({ relayOnly: true })) // Legacy preferences must not re-enable TURN.
         SerotineRooms.saveContacts(owner.publicKey, contacts)
         window.captureRequests = []; window.capturedTracks = []; window.peerConnections = []
         const nativeCapture = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
@@ -99,7 +89,7 @@ async function main() {
     for (let index = 0; index < pages.length; index++) await pages[index].evaluate(async ({ fixture, owner, labels, identities }) => {
       window.roomTarget = { kind: 'group', group: fixture.group }
       for (const event of fixture.events) await SerotineRooms.saveStoredEvent(owner.publicKey, { key: SerotineRooms.eventStorageKey(event), event, local: event.author === owner.publicKey, delivered: event.recipients, receivedAt: event.timestamp })
-      window.rooms = new SerotineRooms.CallRoomEngine({ identity: owner, getTarget: () => window.roomTarget, getPeerLabel: pub => labels[identities.findIndex(value => value.publicKey === pub)] || pub, settings: { relayOnly: false } })
+      window.rooms = new SerotineRooms.CallRoomEngine({ identity: owner, getTarget: () => window.roomTarget, getPeerLabel: pub => labels[identities.findIndex(value => value.publicKey === pub)] || pub })
     }, { fixture, owner: identities[index], labels, identities })
 
     async function state(page) {
@@ -137,11 +127,11 @@ async function main() {
       })))).every(Boolean), 'Every room peer received real RTP audio')
     }
 
-    const beforePreview = requests.length
+    const beforePreview = wire.frames.length
     await prepare(a, 'video')
     assert.equal((await state(a)).connections.length, 0, 'Preview creates no peer transports')
     assert.deepEqual((await state(a)).liveTracks.map(track => track.kind).sort(), ['audio', 'video'])
-    assert.ok(requests.slice(beforePreview).every(body => !body.includes('room:join')), 'Preview does not join the server room')
+    assert.ok(wire.frames.slice(beforePreview).every(({ body }) => !body.includes('room:join')), 'Preview does not join the server room')
     assert.equal((await state(b)).captureRequests, 0)
     assert.equal((await state(c)).captureRequests, 0)
     await join(a)
@@ -203,13 +193,9 @@ async function main() {
     await uiB.getByRole('button', { name: 'Accept', exact: true }).click()
     await uiB.getByRole('button', { name: 'Accept', exact: true }).waitFor({ state: 'detached' })
     const openGroup = async page => {
-      const captures = await page.evaluate(() => window.uiCaptureCount)
       await page.getByRole('button', { name: 'Group voice and video call options', exact: true }).click()
       await page.getByRole('menuitem', { name: 'Join group voice call', exact: true }).click()
-      const routing = page.getByRole('dialog', { name: 'Choose how to connect', exact: true })
-      await routing.getByRole('button', { name: 'Allow direct connections', exact: true }).waitFor()
-      assert.equal(await page.evaluate(() => window.uiCaptureCount), captures, 'Missing room relay asks before capture')
-      await routing.getByRole('button', { name: 'Allow direct connections', exact: true }).click()
+      assert.equal(await page.getByRole('button', { name: /Retry relay|Allow direct connections/ }).count(), 0, 'No TURN routing prompt')
       return page.getByRole('dialog', { name: 'Join Study group', exact: true })
     }
     const preview = await openGroup(uiA)
@@ -281,8 +267,8 @@ async function main() {
     }
     console.log('PASS owner creates voice channel, another member joins, and signed channel deletion releases both participants\' capture')
 
-    assert.ok(requests.some(body => body.includes('room:join')), 'Used real room HTTP relay')
-    assert.ok(requests.every(body => !body.includes('a=fingerprint:') && !body.includes('a=ice-pwd:') && !body.includes('candidate:')), 'SDP and ICE never appear as plaintext in HTTP requests')
+    wire.verify(['call:socket', 'room:join', 'room:send', 'room:leave'])
+    for (const page of pages) await verifyDirectConfiguration(page)
     assert.deepEqual(errors, [], 'No uncaught browser errors')
     console.log(`Call rooms browser smoke ${signalingOnly ? '(signaling/capture/UI only; RTP not verified) ' : ''}passed. Logs: ${artifacts}`)
   } catch (error) {
@@ -293,10 +279,7 @@ async function main() {
     throw error
   } finally {
     if (browser) await browser.close()
-    server.kill('SIGTERM')
-    await Promise.race([new Promise(resolve => server.once('exit', resolve)), pause(5000)])
-    if (server.exitCode === null) server.kill('SIGKILL')
-    fs.closeSync(log)
+    await runtime.stop()
   }
 }
 

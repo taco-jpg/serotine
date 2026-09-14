@@ -28,7 +28,7 @@ function fixture(t, state = 'running', options = {}) {
   t.after(() => ringer.dispose())
   return { context, statuses, ringer }
 }
-const incoming = (callId = 'incoming') => ({ callId, phase: 'incoming', direction: 'incoming', settings: { silenceIncoming: false, relayOnly: true } })
+const incoming = (callId = 'incoming') => ({ callId, phase: 'incoming', direction: 'incoming', settings: { silenceIncoming: false } })
 
 test('incoming call repeats an actual audio graph and repeated snapshots do not restart it', t => {
   const { ringer, context } = fixture(t)
@@ -69,9 +69,9 @@ test('accept preparation, decline, cancellation, timeout and other-device comple
 test('silence preference stops an active incoming ringtone and never starts a suppressed invitation', t => {
   const { ringer, context } = fixture(t)
   ringer.setCall(incoming())
-  ringer.setCall({ ...incoming(), settings: { silenceIncoming: true, relayOnly: true } })
+  ringer.setCall({ ...incoming(), settings: { silenceIncoming: true } })
   assert.ok(context.tones.every(tone => tone.disconnected))
-  ringer.setCall({ ...incoming('another'), settings: { silenceIncoming: true, relayOnly: true } })
+  ringer.setCall({ ...incoming('another'), settings: { silenceIncoming: true } })
   assert.equal(context.tones.length, 2)
 })
 

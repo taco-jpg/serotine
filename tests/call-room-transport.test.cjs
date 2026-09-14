@@ -1,4 +1,4 @@
-/* Real WebCrypto, signed HTTP, encrypted browser transport, and SQLite arbitration. */
+/* Real WebCrypto, encrypted client envelopes, signed handler requests and SQLite arbitration. Socket delivery is tested separately. */
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -48,6 +48,27 @@ function harness(t) {
   function load(filename) {
     if (!path.extname(filename)) filename += '.ts'
     if (cache.has(filename)) return cache.get(filename).exports
+    if (filename === path.join(root, 'lib/call-socket.ts')) {
+      class CallTransportError extends Error { constructor(message, code) { super(message); this.code = code } }
+      return { CallTransportError, createCallSocket(identity, sessionId) {
+        return {
+          async request(action, data) {
+            assert.equal(data.sessionId, sessionId)
+            const proof = await auth.createRequestProof(action, data, identity.privateKey, identity.publicKey)
+            const body = { version: 1, action, data, proof }
+            requests.push(body)
+            const response = await POST(new Request(`${origin}/api/calls`, {
+              method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+            }))
+            const result = await response.json()
+            if (!response.ok || result.success !== true) throw new CallTransportError(result.error, result.code)
+            return result
+          },
+          subscribe() { return () => {} },
+          dispose() {},
+        }
+      } }
+    }
     const module = { exports: {} }; cache.set(filename, module)
     const output = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
     const sourceRequire = specifier => {
@@ -224,12 +245,13 @@ test('room heartbeat is device-bound and expired sessions cannot be revived or r
   assert.equal((await bob.room.status(target)).participants.length, 1)
 })
 
-test('all room participants explicitly share one connection setting and no automatic fallback occurs', async t => {
+test('room admission rejects legacy relay policy and permits only direct P2P participants', async t => {
   const h = harness(t), [alice, bob] = await Promise.all([h.identity(), h.identity()])
   const target = await group(h, [alice, bob])
-  await alice.room.join(target, 'voice', 'relay')
-  await assert.rejects(bob.room.join(target, 'voice', 'all'), /connection setting differs/)
-  assert.equal((await bob.room.join(target, 'voice', 'relay')).participants.length, 2)
+  await assert.rejects(alice.room.join(target, 'voice', 'relay'), /direct peer-to-peer/)
+  assert.equal(h.sqlite.prepare('SELECT COUNT(*) AS n FROM CallRoomMember').get().n, 0)
+  await alice.room.join(target, 'voice', 'all')
+  assert.equal((await bob.room.join(target, 'voice', 'all')).participants.length, 2)
 })
 
 test('voice channels enforce membership, channel kind and role restrictions', async t => {
@@ -273,4 +295,19 @@ test('community transfer proofs fence departed owners and deleted communities pe
   assert.equal((await bob.room.status(deleted)).participants.length, 0)
   await assert.rejects(bob.room.join(handed, 'voice', 'all'), /out of date/)
   await assert.rejects(bob.room.join(deleted, 'voice', 'all'), /no longer available/)
+})
+
+test('only a removed room participant can notify the remaining authorized room members', async t => {
+  const h = harness(t), [alice, bob, stranger] = await Promise.all([h.identity(), h.identity(), h.identity()])
+  const target = await group(h, [alice, bob]), roomId = h.rooms.callRoomId(target)
+  await Promise.all([alice.room.join(target, 'voice', 'all'), bob.room.join(target, 'voice', 'all')])
+  async function leave(identity, sessionId) {
+    const action = 'room:leave', data = { sessionId, roomId }
+    const proof = await h.auth.createRequestProof(action, data, identity.privateKey, identity.publicKey)
+    return (await h.post({ version: 1, action, data, proof })).json()
+  }
+  assert.deepEqual((await leave(stranger, stranger.room.sessionId))._notify, [])
+  assert.deepEqual((await leave(alice, crypto.randomUUID()))._notify, [])
+  assert.deepEqual((await leave(alice, alice.room.sessionId))._notify.sort(), [alice.publicKey, bob.publicKey].sort())
+  assert.deepEqual((await leave(alice, alice.room.sessionId))._notify, [])
 })

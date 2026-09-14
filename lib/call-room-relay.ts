@@ -100,9 +100,10 @@ export async function handleCallRoomRequest(action: string, data: unknown, proof
   if (action === "room:leave") {
     shape(data, ["sessionId", "roomId"])
     if (!isCallRoomId(data.roomId)) throw invalid()
-    await db.prepare("DELETE FROM CallRoomMember WHERE publicKey = ? AND sessionId = ? AND roomId = ?").bind(self, device, data.roomId).run()
+    const removed = await db.prepare("DELETE FROM CallRoomMember WHERE publicKey = ? AND sessionId = ? AND roomId = ?").bind(self, device, data.roomId).run()
     await clean(db, now)
-    return { success: true }
+    const room = removed.meta.changes === 1 ? await snapshot(db, data.roomId, now) : null
+    return { success: true, _notify: room ? [self, ...room.participants.map(p => p.publicKey)] : [] }
   }
   if (action === "room:send") {
     shape(data, ["sessionId", "signal"])
@@ -116,10 +117,11 @@ export async function handleCallRoomRequest(action: string, data: unknown, proof
       ON CONFLICT(id) DO NOTHING`).bind(s.id, s.roomId, s.sender, s.recipient, s.senderSession, s.targetSession, s.expiresAt, s.encryptedData,
         self, device, s.roomId, now, s.recipient, s.targetSession, s.roomId, now, s.roomId, now).run()
     if (inserted.meta.changes !== 1) throw new CallRelayError("This room signal is stale, already used, or belongs to another device or membership.", 409)
-    return { success: true }
+    return { success: true, _notify: [self, s.recipient] }
   }
   shape(data, action === "room:join" ? ["sessionId", "target", "mode", "policy"] : action === "room:poll" ? ["sessionId", "target", "after"] : ["sessionId", "target"])
   if (action === "room:join" && (!["voice", "video"].includes(String(data.mode)) || !["all", "relay"].includes(String(data.policy)))) throw invalid()
+  if (action === "room:join" && data.policy !== "all") throw new CallRelayError("Calling now uses direct peer-to-peer connections only. Reload Serotine to use direct calling.", 409, "direct-only")
   if (action === "room:poll" && (!Number.isSafeInteger(data.after) || Number(data.after) < 0)) throw invalid()
   const { target, scopeId, state } = await checkpoint(db, data.target, self, action === "room:status")
   const roomId = callRoomId(target)
@@ -156,7 +158,8 @@ export async function handleCallRoomRequest(action: string, data: unknown, proof
       await clean(db, now)
       throw new CallRelayError("The room is full, your identity is already in a call, or its connection setting differs. Calls allow up to 8 people using the same connection setting.", 409)
     }
-    return { success: true, room: await snapshot(db, roomId, now) }
+    const room = await snapshot(db, roomId, now)
+    return { success: true, room, _notify: room.participants.map(p => p.publicKey) }
   }
   const touched = await db.prepare(`UPDATE CallRoomMember SET expiresAt = ? WHERE publicKey = ? AND sessionId = ? AND roomId = ? AND expiresAt > ?
     AND EXISTS(SELECT 1 FROM CallRoomAuthority WHERE scopeId = ? AND signature = ?)`)

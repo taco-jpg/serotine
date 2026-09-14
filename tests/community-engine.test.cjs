@@ -4,6 +4,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { test, before, beforeEach, afterEach } = require('node:test')
 const ts = require('typescript')
+const remoteAttachment = require('./fixtures/remote-attachment.cjs')
 const root = path.join(__dirname, '..')
 const modules = new Map(), stores = new Map(), prefs = new Map(), cursors = new Map()
 const packets = [], attempts = [], engines = [], notifications = []
@@ -382,6 +383,29 @@ test('community text, polls and complete files receive delivery and optional rea
   await sync(guest, owner)
   assert.equal(community(guest, id).channelUnread[channel], 0)
   assert.deepEqual(message(owner, silent).readBy, [])
+})
+
+test('a 1 GB remote community file delivers and acknowledges its encrypted descriptor without channel chunk events', async () => {
+  const owner = await engine(alice), guest = await engine(bob)
+  const { id, invite, channel } = await create(owner)
+  await join(owner, guest, invite)
+  const attachment = remoteAttachment()
+  const file = await owner.service.sendEvent(id, channel, 'attachment', { attachment, content: 'Large community file' })
+  await sync(owner)
+  assert.equal(message(owner, file).delivery, 'sent')
+  await sync(guest, owner)
+  assert.deepEqual(message(guest, file).attachment, attachment)
+  assert.equal(message(guest, file).content, 'Large community file')
+  assert.deepEqual(message(owner, file).deliveredTo, [bob.publicKey])
+  assert.deepEqual(guest.service.getAttachmentChunks(id, channel, file), [])
+  await guest.instance.markCommunityRead(id, channel)
+  await sync(guest, owner)
+  assert.deepEqual(message(owner, file).readBy, [bob.publicKey])
+  const readCount = () => guest.instance.records.filter(record => record.event.payload.community?.type === 'receipt'
+    && record.event.payload.community.targetId === file && record.event.payload.community.receipt === 'read').length
+  await guest.instance.markCommunityRead(id, channel)
+  assert.equal(readCount(), 1)
+  assert.equal(owner.instance.records.some(record => record.event.payload.community?.type === 'attachment-chunk'), false)
 })
 
 test('hidden tabs and moderated messages do not advance community read state', async t => {

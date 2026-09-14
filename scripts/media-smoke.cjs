@@ -136,13 +136,13 @@ async function main() {
     console.log('PASS useful inline image size, touch enlargement, original download and native WebM playback')
 
     const openBank = async () => {
-      await page.getByRole('button', { name: 'Open file bank', exact: true }).click()
-      const bank = page.getByRole('dialog', { name: 'File bank', exact: true })
+      await page.getByRole('button', { name: 'Open Backpack', exact: true }).click()
+      const bank = page.getByRole('dialog', { name: 'Backpack', exact: true })
       await bank.waitFor()
       return bank
     }
     let bank = await openBank()
-    await bank.getByLabel('Add files to your bank', { exact: true }).setInputFiles([
+    await bank.getByLabel('Add files to Backpack', { exact: true }).setInputFiles([
       { name: 'repeat.gif', mimeType: 'image/gif', buffer: gifBytes },
       { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('Synthetic reusable file') },
     ])
@@ -177,8 +177,8 @@ async function main() {
       return btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer())))
     }, owner.publicKey), gifBytes.toString('base64'), 'saved GIF retains exact bytes through attachment delivery')
     bank = await openBank()
-    await bank.getByRole('button', { name: 'Remove favorite.gif from bank', exact: true }).click()
-    await bank.getByText('Removed from your bank. Sent messages are unchanged.', { exact: true }).waitFor()
+    await bank.getByRole('button', { name: 'Remove favorite.gif from Backpack', exact: true }).click()
+    await bank.getByText('Removed from Backpack. Sent messages are unchanged.', { exact: true }).waitFor()
     assert.equal(await bank.getByRole('button', { name: 'Choose favorite.gif', exact: true }).count(), 0)
     await bank.getByRole('button', { name: 'Close', exact: true }).click()
     await bank.waitFor({ state: 'hidden' })
@@ -196,7 +196,7 @@ async function main() {
     await page.goto(`${origin}/chat/${otherOwner.publicKey}`)
     assert.equal(await page.getByRole('button', { name: 'Send file', exact: true }).count(), 0, 'identity switch clears queued bank files')
     bank = await openBank()
-    await bank.getByText('Your bank is empty. Add a GIF, image, video, or file to get started.', { exact: true }).waitFor()
+    await bank.getByText('Your Backpack is empty. Add a GIF, image, video, or file to get started.', { exact: true }).waitFor()
     assert.equal(await bank.getByRole('button', { name: 'Choose notes.txt', exact: true }).count(), 0, 'different identity cannot see first bank')
     await bank.getByRole('button', { name: 'Close', exact: true }).click()
     await page.evaluate(owner => localStorage.setItem('serotine_identity_v2', JSON.stringify(owner)), owner)

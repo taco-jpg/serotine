@@ -58,7 +58,7 @@ function harness(getUserMedia, options = {}) {
     return module.exports
   }
   const { AttachmentComposer } = load(path.join(root, 'components/chat/attachment-composer.tsx'))
-  function view() { cursor = 0; tree = AttachmentComposer({ composerRef, disabled: options.disabled, maxFileBytes: options.maxFileBytes, onSend: options.onSend || (async (...args) => sends.push(args)) }); while (pendingEffects.length) pendingEffects.shift()(); return tree }
+  function view() { cursor = 0; tree = AttachmentComposer({ composerRef, owner: options.owner, scopeKey: options.scopeKey, disabled: options.disabled, maxFileBytes: options.maxFileBytes, onStage: options.onStage, onPublish: options.onPublish, onDiscard: options.onDiscard, onSend: options.onSend || (async (...args) => sends.push(args)) }); while (pendingEffects.length) pendingEffects.shift()(); return tree }
   function walk(node, fn) { if (!node) return; if (Array.isArray(node)) return node.forEach(child => walk(child, fn)); if (typeof node === 'object') { fn(node); walk(node.props?.children, fn) } }
   function label(node) { if (Array.isArray(node)) return node.map(label).join(''); if (typeof node === 'string' || typeof node === 'number') return String(node); return node?.props ? label(node.props.children) : '' }
   function click(name) { view(); let found; walk(tree, node => { if (node.type === 'button' && (node.props['aria-label'] || label(node)) === name) found = node }); assert.ok(found, 'button: ' + name); assert.ok(!found.props.disabled); found.props.onClick() }
@@ -155,7 +155,7 @@ test('adding batches preserves earlier files and one submit sends every file wit
 test('invalid and excessive batches leave every previously selected file available', async () => {
   const h = harness()
   h.select([new File(['keep'], 'keep.txt')]); await tick()
-  h.select([new File(['valid'], 'valid.txt'), { size: 100 * 1024 * 1024, name: 'too-big.bin' }]); await tick()
+  h.select([new File(['valid'], 'valid.txt'), { size: 1024 * 1024 * 1024 + 1, name: 'too-big.bin' }]); await tick()
   assert.match(h.text(), /keep\.txt/)
   assert.doesNotMatch(h.text(), /valid\.txt/)
   h.select(Array.from({ length: 8 }, (_, i) => new File(['test'], `file${i}.txt`))); await tick()
@@ -343,4 +343,175 @@ test('auto compact can shrink a source above the group cap before queueing', asy
   await h.submit()
   assert.equal(h.sends[0][0], result)
   h.unmount()
+})
+
+function stagedFile(name, overrides = {}) {
+  return { metadata: { name }, storage: 'remote', publish: async () => {}, discard: async () => {}, ...overrides }
+}
+
+test('selecting a file starts staging while the composer stays available and publishes only the submitted caption', async () => {
+  let finish, report, signal, cleared = 0
+  const uploads = [], published = []
+  const h = harness(undefined, {
+    onStage: (file, kind, progress, abort) => { uploads.push([file.name, kind]); report = progress; signal = abort; return new Promise(resolve => { finish = resolve }) },
+    onPublish: async (file, caption) => { published.push([file.metadata.name, caption]) },
+  })
+  h.select([new File(['content'], 'notes.txt')]); await tick()
+  assert.deepEqual(uploads, [['notes.txt', 'file']])
+  assert.equal(h.getState().unavailable, false, 'uploading does not disable typing or adding files')
+  assert.equal(published.length, 0, 'selection cannot publish metadata')
+  report(42)
+  assert.match(h.text(), /Preparing \/ uploading · 42%/)
+  const caption = { content: 'Caption after typing', mentions: ['friend'] }
+  const sending = h.submit(caption, () => { cleared++ })
+  caption.content = 'Later draft'; caption.mentions.push('other')
+  await tick()
+  assert.equal(published.length, 0, 'Send waits for the in-flight upload')
+  assert.equal(cleared, 0)
+  assert.equal(signal.aborted, false)
+  finish(stagedFile('notes.txt'))
+  await sending
+  assert.deepEqual(published, [['notes.txt', { content: 'Caption after typing', mentions: ['friend'] }]])
+  assert.equal(cleared, 1)
+  assert.equal(h.getState().count, 0)
+  h.unmount()
+})
+
+test('removing an uploading attachment cancels queued Send and cleans late staged bytes without publishing', async () => {
+  let finish, signal, discarded = 0
+  const published = []
+  const h = harness(undefined, {
+    onStage: (_file, _kind, _progress, abort) => { signal = abort; return new Promise(resolve => { finish = resolve }) },
+    onPublish: async item => { published.push(item) },
+  })
+  h.select([new File(['content'], 'cancel.txt')]); await tick()
+  const sending = h.submit({ content: 'Keep my draft' }, () => assert.fail('nothing was shared'))
+  h.click('Remove cancel.txt')
+  assert.equal(signal.aborted, true)
+  await sending
+  finish(stagedFile('cancel.txt', { discard: async () => { discarded++ } }))
+  await tick()
+  assert.equal(discarded, 1)
+  assert.equal(published.length, 0)
+  assert.equal(h.getState().count, 0)
+  h.unmount()
+})
+
+test('staging is bounded to two files and retry preserves the ready files and caption', async () => {
+  const started = [], completed = new Map(), published = []
+  let fail = true
+  const h = harness(undefined, {
+    onStage: file => {
+      started.push(file.name)
+      if (file.name === 'two.txt' && fail) return Promise.reject(new Error('Connection interrupted'))
+      return new Promise(resolve => { completed.set(file.name, () => resolve(stagedFile(file.name))) })
+    },
+    onPublish: async (item, caption) => { published.push([item.metadata.name, caption?.content]) },
+  })
+  h.select(['one', 'two', 'three', 'four'].map(name => new File([name], `${name}.txt`)))
+  await tick()
+  assert.deepEqual(started, ['one.txt', 'two.txt', 'three.txt'])
+  assert.match(h.text(), /Connection interrupted/)
+  assert.match(h.text(), /Waiting to upload/)
+  completed.get('one.txt')(); await tick()
+  assert.deepEqual(started, ['one.txt', 'two.txt', 'three.txt', 'four.txt'])
+  completed.get('three.txt')(); completed.get('four.txt')(); await tick()
+  fail = false
+  h.click('Retry two.txt'); await tick()
+  completed.get('two.txt')(); await tick()
+  assert.match(h.text(), /Uploaded · ready to send/)
+  await h.submit({ content: 'All four' })
+  assert.deepEqual(published, [['one.txt', 'All four'], ['two.txt', undefined], ['three.txt', undefined], ['four.txt', undefined]])
+  assert.equal(started.filter(name => name === 'one.txt').length, 1)
+  h.unmount()
+})
+
+test('changing conversation or identity discards old uploads and cannot publish into the new scope', async () => {
+  let finish, signal, discarded = 0
+  const published = []
+  const options = {
+    owner: 'identity-one', scopeKey: 'chat-one',
+    onStage: (_file, _kind, _progress, abort) => { signal = abort; return new Promise(resolve => { finish = resolve }) },
+    onPublish: async item => { published.push(item) },
+  }
+  const h = harness(undefined, options)
+  h.select([new File(['old'], 'old.txt')]); await tick()
+  const pending = h.submit({ content: 'Old thread' }, () => assert.fail('old draft has not sent'))
+  options.owner = 'identity-two'; options.scopeKey = 'chat-two'; h.view()
+  assert.equal(signal.aborted, true)
+  await pending
+  assert.deepEqual(h.getState(), { count: 0, unavailable: false })
+  finish(stagedFile('old.txt', { discard: async () => { discarded++ } })); await tick()
+  assert.equal(discarded, 1)
+  assert.equal(published.length, 0)
+  assert.doesNotMatch(h.text(), /old\.txt/)
+  h.unmount()
+})
+
+test('unmount during staging aborts transfer, releases late result and produces no state updates', async () => {
+  let finish, signal, discarded = 0
+  const h = harness(undefined, {
+    onStage: (_file, _kind, _progress, abort) => { signal = abort; return new Promise(resolve => { finish = resolve }) },
+    onPublish: async () => assert.fail('cannot publish after unmount'),
+  })
+  h.select([new File(['pending'], 'pending.txt')]); await tick()
+  h.unmount()
+  assert.equal(signal.aborted, true)
+  finish(stagedFile('pending.txt', { discard: async () => { discarded++ } })); await tick()
+  assert.equal(discarded, 1)
+  assert.equal(h.lateUpdates, 0)
+})
+
+test('legacy staging labels preparation accurately and cleanup discards a ready unsent upload', async () => {
+  let discarded = 0
+  const h = harness(undefined, {
+    onStage: async file => stagedFile(file.name, { storage: 'local', discard: async () => { discarded++ } }),
+    onPublish: async () => assert.fail('file was never sent'),
+  })
+  h.select([new File(['local'], 'local.txt')]); await tick()
+  assert.match(h.text(), /Prepared · uploads when sent/)
+  assert.doesNotMatch(h.text(), /Uploaded · ready/)
+  h.click('Remove local.txt'); await tick()
+  assert.equal(discarded, 1)
+  h.unmount()
+})
+
+test('Send uses the latest publish context after typing and does not share after the conversation becomes unavailable', async () => {
+  let finish, latestUsed = 0
+  const options = {
+    disabled: false,
+    onStage: () => new Promise(resolve => { finish = resolve }),
+    onPublish: async () => assert.fail('selection-time reply context is stale'),
+  }
+  const h = harness(undefined, options)
+  h.select([new File(['pending'], 'pending.txt')]); await tick()
+  options.onPublish = async () => { latestUsed++ }
+  const sending = h.submit({ content: 'Current caption' })
+  options.disabled = true; h.view()
+  finish(stagedFile('pending.txt'))
+  await assert.rejects(sending, /currently unavailable/)
+  assert.equal(latestUsed, 0)
+  assert.equal(h.getState().count, 1)
+  options.disabled = false
+  await h.submit({ content: 'Current caption' })
+  assert.equal(latestUsed, 1)
+  h.unmount()
+})
+
+test('failed publication after navigation cleans the staged upload without updating another conversation', async () => {
+  let rejectPublish, discarded = 0
+  const h = harness(undefined, {
+    onStage: async () => stagedFile('pending.txt', { discard: async () => { discarded++ } }),
+    onPublish: () => new Promise((_resolve, reject) => { rejectPublish = reject }),
+  })
+  h.select([new File(['pending'], 'pending.txt')]); await tick()
+  const sending = h.submit({ content: 'Before navigation' })
+  await tick()
+  h.unmount()
+  assert.equal(discarded, 0, 'do not delete an upload while its publish outcome is unknown')
+  rejectPublish(new Error('Conversation changed before message publication'))
+  await assert.rejects(sending, /Conversation changed/)
+  await tick()
+  assert.equal(discarded, 1)
+  assert.equal(h.lateUpdates, 0)
 })

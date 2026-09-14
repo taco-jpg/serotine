@@ -261,7 +261,7 @@ export async function validateCommunityEvent(e: MessagingEvent): Promise<boolean
       case "message": return exact(d, ["type", "epoch", "channelId", "content", "replyTo", "mentions", "stateRef"]) && positive(d.epoch) && ID_PATTERN.test(d.channelId) && text(d.content, MAX_MESSAGE_LENGTH)
         && (d.replyTo === undefined || ID_PATTERN.test(d.replyTo)) && (d.mentions === undefined || uniqueKeys(d.mentions, MAX_COMMUNITY_MEMBERS))
       case "attachment": return exact(d, ["type", "epoch", "channelId", "attachment", "content", "replyTo", "mentions", "stateRef"])
-        && positive(d.epoch) && validId(d.channelId) && isAttachmentMeta(d.attachment) && exact(d.attachment, ["id", "name", "mime", "size", "chunks", "sha256", "kind", "duration"])
+        && positive(d.epoch) && validId(d.channelId) && isAttachmentMeta(d.attachment) && exact(d.attachment, ["id", "name", "mime", "size", "chunks", "sha256", "kind", "duration", "remote"])
         && (d.content === undefined || text(d.content, MAX_MESSAGE_LENGTH, true)) && (d.replyTo === undefined || validId(d.replyTo))
         && (d.mentions === undefined || uniqueKeys(d.mentions, MAX_COMMUNITY_MEMBERS))
       case "attachment-chunk": return exact(d, ["type", "epoch", "channelId", "attachmentId", "index", "data", "stateRef"])

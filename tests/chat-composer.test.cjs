@@ -9,7 +9,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve))
 // Exercise ChatWindow's real form and keyboard handlers without browser storage,
 // networking, or unrelated dialogs. Attachment queue behavior has its own suite.
 function harness(options = {}) {
-  const state = [], effects = [], textSends = [], attachmentSends = [], batches = []
+  const state = [], effects = [], textSends = [], attachmentSends = [], batches = [], staged = [], published = [], events = []
   let cursor = 0, dirty = false, tree, attachmentProps, cleared = 0
   let content = options.content || '', spans = options.spans || []
   let pending = { count: 0, unavailable: false }
@@ -38,7 +38,7 @@ function harness(options = {}) {
     preferences: { blocked: [], notifications: {}, readAt: {} },
     getPrivateMode: () => 0, markRead: async () => {},
     sendText: async (...args) => { textSends.push(args); await options.sendText?.(...args) },
-    sendEvent: async () => {},
+    sendEvent: async (...args) => { events.push(args); return 'event-id' },
   }
   const dom = { addEventListener() {}, removeEventListener() {}, getElementById() { return null }, hasFocus: () => true, visibilityState: 'visible' }
   const browser = { ...dom, location: { hash: '' } }
@@ -68,7 +68,12 @@ function harness(options = {}) {
       if (specifier === '@/lib/protocol') return { MAX_MESSAGE_LENGTH: 8000 }
       if (specifier === '@/lib/mention-display') return { formatMentionText: text => text }
       if (specifier === '@/components/message-text') return { literalSearch: () => null }
-      if (specifier === '@/lib/attachments') return { attachmentFileLimit: () => 50 * 1024 * 1024, sendAttachment: async (...args) => { attachmentSends.push(args); return 'attachment-id' } }
+      if (specifier === '@/lib/attachments') return {
+        attachmentFileLimit: () => 1024 * 1024 * 1024,
+        sendAttachment: async (...args) => { attachmentSends.push(args); return 'attachment-id' },
+        stageAttachment: async (...args) => { staged.push(args); return options.stageAttachment?.(...args) },
+        publishAttachment: async (...args) => { published.push(args); return options.publishAttachment ? options.publishAttachment(...args) : 'published-id' },
+      }
       if (specifier.startsWith('@/components/')) return ui
       if (specifier === '@/lib/contact-code') return { parseContactCode: async value => value }
       return require(specifier)
@@ -101,7 +106,8 @@ function harness(options = {}) {
   }
   view()
   return {
-    view, queue, textSends, attachmentSends, batches,
+    view, queue, textSends, attachmentSends, batches, staged, published, events,
+    get attachmentProps() { view(); return attachmentProps },
     get content() { return content }, get cleared() { return cleared },
     input() { view(); return find(node => node.type === 'Textarea') },
     sendButton() { view(); return find(node => node.type === 'Button' && node.props['aria-label'] === 'Send message') },
@@ -211,4 +217,51 @@ test('nested form submits are ignored and simultaneous Enter/form submits share 
   assert.equal(h.textSends.length, 1)
   assert.equal(h.content, '')
   h.unmount()
+})
+
+test('background staging keeps the real message input editable until Send and uses the final typed caption', async () => {
+  let finish
+  const h = harness({
+    stageAttachment: () => new Promise(resolve => { finish = resolve }),
+    sendAll: async (caption, onFirstSent, { queue }) => {
+      const result = await prepared
+      await h.attachmentProps.onPublish(result, caption)
+      queue(0); onFirstSent()
+    },
+  })
+  const file = new File(['content'], 'notes.txt')
+  const prepared = h.attachmentProps.onStage(file, 'file', () => {}, new AbortController().signal)
+  h.queue(1)
+  assert.equal(h.staged.length, 1)
+  assert.equal(h.published.length, 0)
+  assert.equal(h.input().props.disabled, false)
+  h.type('Text typed while the file uploads')
+  assert.equal(h.content, 'Text typed while the file uploads')
+  assert.equal(h.sendButton().props.disabled, false)
+  h.form(); await tick()
+  assert.equal(h.published.length, 0)
+  assert.equal(h.attachmentProps.disabled, false, 'parent Send state must not invalidate the composer awaiting upload')
+  finish({ metadata: { id: 'uploaded-notes' }, storage: 'remote', discard: async () => {} })
+  await tick()
+  assert.equal(h.published.length, 1)
+  assert.equal(h.published[0][1], 'friend-key')
+  assert.deepEqual(h.published[0][4], { content: 'Text typed while the file uploads', mentions: [] })
+  assert.equal(h.attachmentSends.length, 0)
+  assert.equal(h.textSends.length, 0)
+  assert.equal(h.content, '')
+  h.unmount()
+})
+
+test('navigating away while upload publication is pending prevents the final message event', async () => {
+  let finish
+  const h = harness({ publishAttachment: async (sendEvent, conversation, prepared, _reply, caption) => {
+    await new Promise(resolve => { finish = resolve })
+    return sendEvent(conversation, 'attachment', { attachment: prepared.metadata, content: caption.content })
+  } })
+  const pending = h.attachmentProps.onPublish({ metadata: { id: 'pending-file' } }, { content: 'Old conversation' })
+  await tick()
+  h.unmount()
+  finish()
+  await assert.rejects(pending, /no longer available/)
+  assert.deepEqual(h.events, [])
 })

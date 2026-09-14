@@ -67,9 +67,10 @@ function harness() {
   const { AttachmentView } = load(path.join(__dirname, '../components/chat/attachment-view.tsx'))
   return {
     files, created, revoked, work,
-    render({ metadata, chunks }) {
+    render({ metadata, chunks, identity }) {
       cursor = 0
-      const tree = AttachmentView({ metadata, chunks })
+      let tree = AttachmentView({ metadata, chunks, identity })
+      if (typeof tree.type === 'function' && tree.type.name === 'RemoteAttachmentView') tree = tree.type(tree.props)
       while (effects.length) effects.shift()()
       return tree
     },
@@ -242,4 +243,19 @@ test('active documents and unlisted media formats remain download-only octet str
     assert.equal(tags(tree, 'a')[0].props.href, h.created[0].url)
     h.unmount()
   }
+})
+
+
+test('1 GiB remote media requires an explicit download and does not allocate a preview on render', () => {
+  const h = harness(), originalFetch = globalThis.fetch
+  globalThis.fetch = () => assert.fail('large files must not download on render')
+  const metadata = { id: crypto.randomUUID(), name: 'large-video.mp4', mime: 'video/mp4', size: h.files.MAX_FILE_BYTES, kind: 'file', chunks: 256, sha256: 'a'.repeat(64),
+    remote: { version: 1, chunkBytes: h.files.REMOTE_ATTACHMENT_CHUNK_BYTES, capability: 'b'.repeat(64), key: 'c'.repeat(64), ivPrefix: 'd'.repeat(16), hashes: Array(256).fill('e'.repeat(64)) } }
+  try {
+    const tree = h.render({ metadata, chunks: [], identity: { publicKey: '04' + '1'.repeat(128) } })
+    assert.equal(tags(tree, 'video').length, 0)
+    assert.equal(h.created.length, 0)
+    assert.ok(tags(tree, 'button').some(button => button.props['aria-label'] === 'Download large-video.mp4'))
+    h.unmount()
+  } finally { globalThis.fetch = originalFetch }
 })

@@ -20,7 +20,7 @@ export async function compactAttachment(file: File, enabled: boolean): Promise<C
   }
   if (!enabled) return original()
   if (!Number.isSafeInteger(file.size) || file.size < 0 || typeof file.name !== "string") return original()
-  if (file.size > MAX_COMPACT_INPUT_BYTES) throw new Error("Auto compact accepts source files up to 50 MB. Choose a smaller file.")
+  if (file.size > MAX_COMPACT_INPUT_BYTES) return original()
   if (COMPRESSED_EXTENSION.test(file.name) || COMPRESSED_MIME.test(file.type) || typeof CompressionStream === "undefined") return original()
 
   // Changing the download format is only worthwhile for savings of at least

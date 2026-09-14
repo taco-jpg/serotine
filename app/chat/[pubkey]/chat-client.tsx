@@ -27,7 +27,7 @@ import { AttachmentView } from "@/components/chat/attachment-view"
 import { RichMessage } from "@/components/chat/rich-message"
 import { MessageFormattingPreview, MessageFormattingTools } from "@/components/chat/message-formatting"
 import type { FormattedInsertion } from "@/lib/composer-formatting"
-import { attachmentFileLimit, sendAttachment } from "@/lib/attachments"
+import { attachmentFileLimit, sendAttachment, stageAttachment, publishAttachment } from "@/lib/attachments"
 import { findMentionQuery, insertMention, serializeMentionDraft, updateMentionSpans, validMentionSpans, type MentionQuery } from "@/lib/composer-mentions"
 import { EditMessageDialog, GroupSettings, PollCard, PollCreator } from "@/components/chat/conversation-controls"
 import { PrivateChatControls, ShareSecretDialog, privateDurationLabel } from "@/components/chat/private-chat-controls"
@@ -132,6 +132,8 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const [attachmentState, setAttachmentState] = useState<AttachmentComposerState>({ count: 0, unavailable: false })
   const attachmentsUnavailable = !privateMode && attachmentState.unavailable
   const hasAttachments = !privateMode && attachmentState.count > 0
+  const attachmentAccess = useRef(false)
+  attachmentAccess.current = !!identity && usable && !privateMode
   const actionScope = useRef<object | null>(null)
   const searchTerm = query.trim()
   const matches = useMemo(() => {
@@ -345,7 +347,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
       if (scope === actionScope.current) setDeleteError(errorText(cause))
     } finally { setDeleting(false) }
   }
-  const attachmentView = (message: MessageRecord) => !message.private && message.attachment && <AttachmentView metadata={message.attachment} chunks={messaging.getAttachmentChunks(conversationId, message.id)} />
+  const attachmentView = (message: MessageRecord) => !message.private && message.attachment && <AttachmentView identity={identity} metadata={message.attachment} chunks={messaging.getAttachmentChunks(conversationId, message.id)} />
   const openMessageFromInfo = (id: string) => { setInfoOpen(false); requestAnimationFrame(() => jumpToMessage(id)) }
   const statusLabel = { connecting: "Connecting inbox…", online: "Inbox connected", offline: "Inbox sync unavailable" }[status]
   const messageInput = <div className="flex min-w-0 items-end gap-1"><Button type="button" variant="ghost" size="icon" className="size-9 shrink-0 rounded-[4px]" aria-label="More message tools" title="Files, GIFs and message tools" aria-expanded={toolsOpen} aria-controls="message-tools" onClick={() => setToolsOpen(value => !value)}>{toolsOpen ? <X className="size-4" /> : <Plus className="size-4" />}</Button><Textarea ref={input} aria-label="Message" aria-busy={busy} autoComplete={privateMode ? "off" : undefined} autoCorrect={privateMode ? "off" : undefined} spellCheck={!privateMode} placeholder={blocked ? "Unblock this person to send messages" : request ? "Accept this conversation to reply" : unavailableGroup ? "This group is unavailable on this device" : closedGroup ? "This group is closed" : leftGroup ? "You left this group" : membershipUpdating ? "Updating group membership…" : ready ? privateMode ? "Write a private message…" : isSelf ? "Message yourself…" : "Write a message…" : "Opening conversation…"} value={content} onChange={event => changeMessage(event.target.value, event.target.selectionStart, event.target.selectionEnd)} onSelect={event => { const node = event.currentTarget; if (document.activeElement === node) updateMentionQuery(node.value, node.selectionStart, node.selectionEnd) }} onBlur={() => setMentionOpen(false)} aria-autocomplete="list" aria-controls={mentionOpen ? "message-mention-options" : undefined} aria-activedescendant={mentionOpen && mentionCandidates.length ? `message-mention-${selectedMentionIndex}` : undefined} maxLength={MAX_MESSAGE_LENGTH} disabled={!usable || !draftReady} readOnly={busy} rows={1} className="max-h-36 min-h-9 min-w-0 flex-1 resize-none border-0 bg-transparent px-1.5 py-2 text-base md:text-sm shadow-none focus-visible:ring-0" onKeyDown={event => {
@@ -439,18 +441,30 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
         {!privateMode && replyTo && <div className="mb-2 flex items-center gap-2 rounded-[4px] border-l-2 border-primary bg-card p-2 text-xs"><Reply className="size-4 shrink-0 text-primary" /><span className="min-w-0 flex-1"><span className="block text-primary">Replying to {byId.get(replyTo) ? displayName(byId.get(replyTo)!.senderPubKey) : "message"}</span><span className="block truncate text-muted-foreground">{byId.get(replyTo) ? displaySummary(byId.get(replyTo)!) : "Original message"}</span></span><Button variant="ghost" size="icon" aria-label="Cancel reply" onClick={() => setReplyTo(undefined)}><X className="size-4" /></Button></div>}
         <form aria-label="Message composer" onSubmit={event => { event.preventDefault(); if (event.target === event.currentTarget) void submit() }}>
           <div className="rounded-[4px] border border-border bg-card p-1 transition-colors focus-within:border-primary/60 focus-within:ring-1 focus-within:ring-primary/20">
-            {privateMode ? <>{messageInput}<div id="message-tools" className={`${toolsOpen ? "flex" : "hidden"} flex-wrap items-center justify-between gap-2 py-1`}><Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" />Share access key</Button><span className="text-[11px] text-muted-foreground">Plain text only · No files or polls</span></div></> : <AttachmentComposer key={`${myPub}:${conversationId}`} composerRef={attachmentComposer} onStateChange={setAttachmentState} owner={myPub} maxFileBytes={attachmentFileLimit(group)} toolbarVisible={toolsOpen} toolbarId="message-tools" extraActions={<>
+            {privateMode ? <>{messageInput}<div id="message-tools" className={`${toolsOpen ? "flex" : "hidden"} flex-wrap items-center justify-between gap-2 py-1`}><Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" />Share access key</Button><span className="text-[11px] text-muted-foreground">Plain text only · No files or polls</span></div></> : <AttachmentComposer key={`${myPub}:${conversationId}`} scopeKey={`${myPub}:${conversationId}`} composerRef={attachmentComposer} onStateChange={setAttachmentState} owner={myPub} maxFileBytes={attachmentFileLimit(group)} toolbarVisible={toolsOpen} toolbarId="message-tools" extraActions={<>
           <MessageFormattingTools key={`format:${myPub}:${conversationId}`} content={content} inputRef={input} disabled={!usable || sending || !draftReady} onInsert={insertFormatting} />
           {canUsePrivate && <Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" /><span className="hidden sm:inline">Access key</span><span className="sr-only sm:hidden">Share access key</span></Button>}
           <Button type="button" variant="ghost" size="sm" disabled={!usable} onClick={() => setPollOpen(true)}><BarChart3 className="size-4" />Poll</Button>
           {!isSelf && <Button type="button" variant="ghost" size="sm" disabled={!usable} aria-expanded={mentionOpen} onClick={() => { setMentionQuery(findMentionQuery(content, input.current?.selectionStart ?? content.length, input.current?.selectionEnd ?? content.length)); setMentionIndex(0); setMentionOpen(!mentionOpen); if (!mentionOpen) requestAnimationFrame(() => document.getElementById("message-mention-0")?.focus()); else input.current?.focus() }}><AtSign className="size-4" />Mention</Button>}
-        </>} captureRef={chatRoot} pasteRef={input} disabled={!usable || sending || !draftReady} onSelectGif={url => {
+        </>} captureRef={chatRoot} pasteRef={input} disabled={!usable || !draftReady} onSelectGif={url => {
           if (!usable || sending || !draftReady) return
           const next = content.trim() ? `${content}\n${url}` : url
           if (next.length > MAX_MESSAGE_LENGTH) { setSendError("There is not enough room for this GIF. Send or shorten your draft first."); return }
           changeMessage(next, next.length)
           requestAnimationFrame(() => input.current?.focus())
-        }} onSend={async (file, kind, onProgress, caption) => { const scope = actionScope.current; const id = await sendAttachment(messaging.sendEvent, conversationId, file, kind, onProgress, caption ? replyTo : undefined, group, caption); if (actionScope.current === scope) jumpToLatest(); return id }}>{messageInput}</AttachmentComposer>}
+        }} onStage={async (file, kind, onProgress, signal) => {
+          if (!identity || !usable || privateMode) throw new Error("This conversation is not available for attachments.")
+          return stageAttachment(messaging.sendEvent, conversationId, file, identity, kind, onProgress, signal, group)
+        }} onPublish={async (prepared, caption) => {
+          if (!identity || !usable || privateMode) throw new Error("This conversation is not available for attachments.")
+          const scope = actionScope.current
+          const id = await publishAttachment((id, kind, payload) => {
+            if (actionScope.current !== scope || !attachmentAccess.current) throw new Error("This conversation is no longer available for attachments.")
+            return messaging.sendEvent(id, kind, payload)
+          }, conversationId, prepared, caption ? replyTo : undefined, caption)
+          if (actionScope.current === scope) jumpToLatest()
+          return id
+        }} onDiscard={prepared => prepared.discard()} onSend={async (file, kind, onProgress, caption) => { const scope = actionScope.current; const id = await sendAttachment(messaging.sendEvent, conversationId, file, kind, onProgress, caption ? replyTo : undefined, group, caption); if (actionScope.current === scope) jumpToLatest(); return id }}>{messageInput}</AttachmentComposer>}
           </div>
         </form>
         {!privateMode && <MessageFormattingPreview content={content} />}

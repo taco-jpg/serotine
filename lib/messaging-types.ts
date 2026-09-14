@@ -6,7 +6,11 @@ export type NotificationMode = "all" | "mentions" | "muted"
 export type DeliveryStatus = "pending" | "sent" | "delivered" | "read" | "failed" | "received"
 export type PrivateTtlSeconds = 0 | 300 | 3600 | 86400
 export interface GroupState { id: string; name: string; admin: string; members: string[]; epoch: number; updatedAt: number; signature: string }
-export interface AttachmentMeta { id: string; name: string; mime: string; size: number; chunks: number; sha256: string; kind: "file" | "voice"; duration?: number }
+/** This descriptor is only carried inside an encrypted, signed messaging event. */
+export interface RemoteAttachment {
+  version: 1; chunkBytes: number; capability: string; key: string; ivPrefix: string; hashes: string[]; expiresAt?: number
+}
+export interface AttachmentMeta { id: string; name: string; mime: string; size: number; chunks: number; sha256: string; kind: "file" | "voice"; duration?: number; remote?: RemoteAttachment }
 export interface PollState { question: string; options: string[]; votes: Record<string, number> }
 export interface MessageRecord {
   id: string; conversationId: string; senderPubKey: string; content: string; timestamp: number

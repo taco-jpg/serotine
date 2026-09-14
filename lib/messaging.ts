@@ -183,8 +183,8 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
   // Never turn a temporary message into a lasting reply preview.
   const privateTargets = new Set(records.filter(r => r.event.kind === "private-message").map(r => `${conversationForEvent(r.event, owner)}:${r.event.id}`))
   for (const message of messages.values()) if (message.replyTo && privateTargets.has(`${message.conversationId}:${message.replyTo}`)) message.replyTo = undefined
-  // A file is only sent when its complete chunk set has left the durable outbox.
-  for (const message of messages.values()) if (message.attachment && message.senderPubKey === owner) {
+  // Legacy files wait for their chunk events. Remote files publish ciphertext before metadata.
+  for (const message of messages.values()) if (message.attachment && !message.attachment.remote && message.senderPubKey === owner) {
     const chunks = ordered.filter(r => authorized.has(r.key) && r.event.kind === "attachment-chunk" && r.event.author === owner && conversationForEvent(r.event, owner) === message.conversationId && r.event.payload.attachmentId === message.attachment!.id)
     if (new Set(chunks.map(r => r.event.payload.index)).size < message.attachment.chunks) message.delivery = "pending"
     else if (chunks.some(r => outboxStatus(r) === "failed")) { message.delivery = "failed"; message.error = chunks.find(r => r.error)?.error }
@@ -290,7 +290,7 @@ export class MessagingEngine {
     // Once complete and visible, acknowledge that file even if its timestamp
     // was already covered; recorded read receipts prevent duplicate sends.
     const unread = this.preferences.readReceipts ? messages.filter(message => !message.readBy.includes(this.identity.publicKey)
-      && (message.timestamp > readAt || (message.attachment && this.communities.getAttachmentChunks(cid, channelId, message.id).length === message.attachment.chunks))) : []
+      && (message.timestamp > readAt || (message.attachment && (message.attachment.remote || this.communities.getAttachmentChunks(cid, channelId, message.id).length === message.attachment.chunks)))) : []
     if (latest <= readAt && !unread.length) return
     this.communityReads.add(key)
     try {
@@ -298,7 +298,7 @@ export class MessagingEngine {
       if (this.preferences.readReceipts) for (const message of unread) {
         if (!this.preferences.readReceipts || (typeof document !== "undefined" && (document.visibilityState !== "visible" || !document.hasFocus()))) break
         const current = this.communities.model.messages.find(item => item.id === message.id && item.conversationId === cid && item.channelId === channelId && !item.hidden)
-        if (!current || current.readBy.includes(this.identity.publicKey) || (current.attachment && this.communities.getAttachmentChunks(cid, channelId, current.id).length !== current.attachment.chunks)) continue
+        if (!current || current.readBy.includes(this.identity.publicKey) || (current.attachment && !current.attachment.remote && this.communities.getAttachmentChunks(cid, channelId, current.id).length !== current.attachment.chunks)) continue
         await this.communities.receipt(cid, channelId, message.id, "read")
       }
     } finally { this.communityReads.delete(key) }
@@ -623,7 +623,7 @@ export class MessagingEngine {
     // The previous conversation can remain visible while an identity switch
     // finishes. Reading its cached file pieces must remain safe during render.
     const message = this.model.messages.find(m => m.conversationId === cid && m.id === messageId)
-    if (!message?.attachment) return []
+    if (!message?.attachment || message.attachment.remote) return []
     const chunks = new Map<number, string>()
     for (const record of this.records) if (this.authorizedKeys.has(record.key) && record.event.kind === "attachment-chunk" && record.event.author === message.senderPubKey && conversationForEvent(record.event, this.identity.publicKey) === cid && record.event.payload.attachmentId === message.attachment.id && record.event.payload.index! < message.attachment.chunks) chunks.set(record.event.payload.index!, record.event.payload.data!)
     return [...chunks].map(([index, data]) => ({ index, data })).sort((a, b) => a.index - b.index)
@@ -856,7 +856,7 @@ export class MessagingEngine {
       if (message.senderPubKey === owner || receipted.has(`${message.conversationId}:${message.id}`)) continue
       const conversation = this.model.conversations.find(c => c.id === message.conversationId)
       if (!conversation || conversation.request || conversation.blocked || !conversation.members.includes(owner)) continue
-      if (message.attachment && this.getAttachmentChunks(message.conversationId, message.id).length !== message.attachment.chunks) continue
+      if (message.attachment && !message.attachment.remote && this.getAttachmentChunks(message.conversationId, message.id).length !== message.attachment.chunks) continue
       await this.sendEvent(message.conversationId, "receipt", { targetId: message.id, receipt: "delivered" })
     }
     const communityAccepted = new Set(this.communities.model.acceptedKeys)
@@ -869,7 +869,7 @@ export class MessagingEngine {
       if (message.hidden || message.senderPubKey === owner || communityReceipted.has(`${communityChannelKey(message.conversationId, message.channelId)}:${message.id}`)) continue
       const community = this.communities.model.communities.find(item => item.id === message.conversationId && item.joined && !item.deleted)
       if (!community || !community.effectiveMembers.includes(message.senderPubKey) || community.members.length !== community.effectiveMembers.length) continue
-      if (message.attachment && this.communities.getAttachmentChunks(message.conversationId, message.channelId, message.id).length !== message.attachment.chunks) continue
+      if (message.attachment && !message.attachment.remote && this.communities.getAttachmentChunks(message.conversationId, message.channelId, message.id).length !== message.attachment.chunks) continue
       await this.communities.receipt(message.conversationId, message.channelId, message.id, "delivered")
     }
   }

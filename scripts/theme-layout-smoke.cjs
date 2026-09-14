@@ -178,7 +178,7 @@ async function main() {
       await toolsToggle.press('Enter')
       await page.locator('#message-tools').waitFor({ state: 'visible' })
       assert.equal(await toolsToggle.getAttribute('aria-expanded'), 'true')
-      for (const name of ['Attach files', 'Search GIFs', 'Open file bank', 'Record voice message', 'Poll']) {
+      for (const name of ['Attach files', 'Search GIFs', 'Open Backpack', 'Record voice message', 'Poll']) {
         const control = page.locator('#message-tools').getByRole('button', { name, exact: true })
         assert.equal(await control.isVisible(), true, `${name} is accessible in the expanded toolbar`)
         assert.equal(await control.isEnabled(), true, `${name} remains available`)

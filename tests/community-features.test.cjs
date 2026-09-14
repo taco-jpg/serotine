@@ -3,6 +3,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { test, before } = require('node:test')
 const ts = require('typescript')
+const remoteAttachment = require('./fixtures/remote-attachment.cjs')
 
 const root = path.join(__dirname, '..'), modules = new Map()
 function load(filename) {
@@ -83,6 +84,16 @@ test('community feature envelopes validate bounded data and reject extra/executa
     ['receipt', { targetId, receipt: 'anything' }], ['edit', { targetId, content: ' ' }],
   ]
   for (const [kind, payload] of invalid) assert.equal(await protocol.validateCommunityEvent(f.event(alice, f.data(kind, f.channel, payload))), false, kind)
+})
+
+test('community envelopes accept remote file metadata and reject malformed authenticated descriptors', async () => {
+  const f = await fixture(), metadata = remoteAttachment()
+  assert.equal(await protocol.validateCommunityEvent(f.event(alice, f.data('attachment', f.channel, { attachment: metadata }))), true)
+  for (const damage of [meta => { meta.remote.version = 2 }, meta => { meta.remote.capability = '' }, meta => { meta.remote.ivPrefix = '00' }, meta => { meta.remote.hashes.pop() }, meta => { meta.chunks++ }]) {
+    const attachment = structuredClone(metadata)
+    damage(attachment)
+    assert.equal(await protocol.validateCommunityEvent(f.event(alice, f.data('attachment', f.channel, { attachment }))), false)
+  }
 })
 
 test('channels support replies, mentions, own edits, pins, polls, changed votes and receipts', async () => {

@@ -2,14 +2,15 @@
 
 import Link from "next/link"
 import { useEffect, useRef, useState } from "react"
-import { Camera, Expand, Loader2, Mic, MicOff, Phone, PhoneOff, RotateCw, Settings2, Shield, Video, VideoOff, X } from "lucide-react"
+import { Camera, Expand, Loader2, Mic, MicOff, Phone, PhoneOff, RotateCw, Settings2, Shield, Video, VideoOff, Volume2, X } from "lucide-react"
 import { useCalling } from "@/components/calling-provider"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import type { CallPhase } from "@/lib/call-types"
+import { CallRinger, type CallSoundStatus } from "@/lib/call-ringer"
 
-const labels: Record<CallPhase, string> = { idle: "Ready", routing: "Choose a connection", preparing: "Preparing devices", preview: "Ready to connect", incoming: "Incoming call", ringing: "Ringing", connecting: "Connecting", connected: "Connected", reconnecting: "Reconnecting", ended: "Call ended", declined: "Call declined", unanswered: "No answer", busy: "Busy", failed: "Call failed" }
+const labels: Record<CallPhase, string> = { idle: "Ready", routing: "Choose a connection", preparing: "Preparing devices", preview: "Ready to connect", incoming: "Incoming call", ringing: "Calling · Waiting for answer", connecting: "Connecting", connected: "Connected", reconnecting: "Reconnecting", ended: "Call ended", declined: "Call declined", unanswered: "No answer", busy: "Busy", failed: "Call failed" }
 const terminal = (phase: CallPhase) => ["idle", "ended", "declined", "unanswered", "busy", "failed"].includes(phase)
 
 function durationLabel(started: number | null, now: number) {
@@ -75,7 +76,32 @@ export function CallingSurface() {
   const [expanded, setExpanded] = useState(false)
   const [now, setNow] = useState(0)
   const [audioBlocked, setAudioBlocked] = useState(false)
+  const [soundStatus, setSoundStatus] = useState<CallSoundStatus>("blocked")
   const audio = useRef<HTMLAudioElement>(null)
+  const ringer = useRef<CallRinger | null>(null)
+  useEffect(() => {
+    if (!engine) return
+    const next = new CallRinger({ onStatusChange: setSoundStatus })
+    ringer.current = next
+    setSoundStatus(next.getStatus())
+    const sync = () => next.setCall(engine.getSnapshot())
+    const unsubscribe = engine.subscribe(sync)
+    const dispose = () => next.dispose()
+    sync()
+    // Unlock on ordinary page interactions, without prompting for media access.
+    window.addEventListener("click", next.unlock, true)
+    window.addEventListener("keydown", next.unlock, true)
+    window.addEventListener("pagehide", dispose)
+    window.addEventListener("serotine:identity-changing", dispose)
+    return () => {
+      unsubscribe(); next.dispose()
+      if (ringer.current === next) ringer.current = null
+      window.removeEventListener("click", next.unlock, true)
+      window.removeEventListener("keydown", next.unlock, true)
+      window.removeEventListener("pagehide", dispose)
+      window.removeEventListener("serotine:identity-changing", dispose)
+    }
+  }, [engine])
   useEffect(() => {
     if (!snapshot?.connectedAt || terminal(snapshot.phase)) return
     setNow(Date.now())
@@ -126,6 +152,8 @@ export function CallingSurface() {
           {finished && <Button type="button" variant="ghost" size="icon" className="size-11" aria-label="Dismiss call status" onClick={() => { engine.dismiss(); clearError() }}><X /></Button>}
         </div>
         {snapshot.phase === "incoming" && <p className="w-full text-xs text-muted-foreground">Answer to review your devices. Your microphone and camera are off until you choose to answer.</p>}
+        {snapshot.phase === "ringing" && <p className="w-full text-xs text-muted-foreground">Waiting for {snapshot.peerLabel} to answer in Serotine. Calls need both pages open.</p>}
+        {["incoming", "ringing"].includes(snapshot.phase) && soundStatus !== "ready" && <div className="flex w-full flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{soundStatus === "blocked" ? "Your browser has paused call sounds." : "Call sounds are unavailable in this browser. The call controls still work."}</span>{soundStatus === "blocked" && <Button type="button" variant="outline" className="min-h-11" onClick={() => ringer.current?.unlock()}><Volume2 />Enable call sounds</Button>}</div>}
         {(snapshot.error || error) && <p role="alert" className="w-full break-words text-xs text-destructive">{error || snapshot.error}</p>}
         {snapshot.notice && <p role="status" className="w-full break-words text-xs text-muted-foreground">{snapshot.notice}</p>}
         {audioBlocked && <Button type="button" variant="outline" className="min-h-11" onClick={() => { void audio.current?.play().then(() => setAudioBlocked(false)).catch(() => setAudioBlocked(true)) }}>Play call audio</Button>}

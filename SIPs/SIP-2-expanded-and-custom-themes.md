@@ -2,37 +2,38 @@
 sip: 2
 title: Expanded and custom themes
 author: sodium-qed
-status: Draft
+status: Final
 created: 2026-09-12
+updated: 2026-09-14
 ---
 
 # SIP-2: Expanded and custom themes
 
 ## Summary
 
-Add more visual themes to Serotine, including a way to create and save custom color themes. Keep appearance mode (light, dark, or system) separate from the chosen palette and from layout density. This SIP records a proposal for discussion; it does not authorize or contain an implementation.
+Serotine provides paired preset palettes and a custom color editor with local saving and data-only import/export. Appearance mode (light, dark, or system) stays separate from the chosen palette and from layout density. This SIP documents the implemented behavior.
 
 ## Motivation
 
-Serotine already supports light, dark, and system appearance modes. These address brightness preferences, but offer limited visual personalization. Additional palettes would let users choose an appearance they enjoy, while a custom editor would support preferences that presets cannot cover. Changing colors should preserve the compactness and usability of the conversation view.
+Light, dark, and system appearance modes address brightness preferences but originally offered limited visual personalization. Additional palettes let users choose an appearance they enjoy, while a custom editor supports preferences that presets cannot cover. Changing colors preserves the compactness and usability of the conversation view.
 
 ## Proposal
 
 ### Appearance and presets
 
-Treat appearance mode and palette as separate choices. A user could select a palette and use its light version, dark version, or let the system determine which version appears. Offer a small set of coordinated preset pairs. Names such as Forest, Ocean, Lavender, Rose, and Monochrome are examples for discussion, not a fixed list.
+Appearance mode and palette are separate choices. A user can select a palette and use its light version, dark version, or let the system determine which version appears. The built-in pairs are Default, Forest, Ocean, Lavender, Rose, and Monochrome.
 
 ### Custom colors
 
-Let users start from a preset and edit a defined set of colors, potentially including the main background, sidebar, accent, message surfaces, and text. The exact controls should follow a review of Serotine's existing styling so that one choice has predictable effects throughout the interface.
+Users start from a preset and edit ten allowlisted colors independently for light and dark variants: background, text, surface, sidebar, accent, muted text, incoming message background/text, and outgoing message background/text.
 
 Provide a live conversation preview with representative messages, links, controls, and selected states. Users should be able to cancel an edit, reset to the starting preset, and restore a readable built-in theme without navigating an unreadable custom preview. Show feedback when selected text and background colors are difficult to distinguish.
 
-Allow users to name and save multiple custom themes locally. Theme selection is a personal preference: it changes the selecting user's interface and does not automatically change how a conversation appears to other participants.
+Users can name and save up to 20 custom themes locally. Theme selection is a personal preference: it changes the selecting user's interface and does not automatically change how a conversation appears to other participants.
 
-### Optional sharing
+### Import and export
 
-Consider data-only import and export so friends can share palettes. This is an optional extension, not a prerequisite for preset themes or the custom editor. A theme file would contain only an allowlisted set of theme properties, with validation before preview or use.
+Data-only import and export let friends share palettes. Theme files contain only allowlisted theme properties and are validated before preview or use. Import opens the editor for review without silently applying the theme; files are limited to 16 KiB.
 
 ## Security & Privacy
 
@@ -40,20 +41,20 @@ Theme data must exclude messages, identities, credentials, access keys, and back
 
 ## Compatibility
 
-Preserve a familiar built-in appearance for existing users until they choose another theme. Palette changes must not alter message spacing, density, font size, or layout. Missing theme values should fall back to readable defaults. Theme preferences should not change messaging or encryption behavior.
+Default remains the fallback palette. Later design refinements aligned the built-in palettes with the app's visual design while preserving saved custom colors. Switching palettes does not alter message spacing, density, font size, or layout. Missing theme values fall back to readable defaults. Theme preferences do not change messaging or encryption behavior.
 
 ## Alternatives
 
 Adding presets alone would be simpler but would leave custom themes unaddressed. An accent-color selector would provide a smaller first step, with less control over the overall appearance. Arbitrary stylesheet uploads are excluded from this proposal because a bounded color format is easier to validate and keep usable.
 
-## Open Questions
+## Implemented decisions and follow-ups
 
-- Which presets and editable colors belong in the first version?
-- Should custom themes require both light and dark variants, or derive one from the other?
-- Should readability feedback warn or block specific combinations?
-- Should background images, fonts, or message shapes receive a separate proposal?
-- Is cross-device theme synchronization desirable after local saving works?
+- Custom themes contain both light and dark variants, initialized from a built-in base and edited separately.
+- Readability feedback warns when checked text/background pairs fall below a 4.5:1 contrast ratio; it does not block saving. The editor's built-in controls and default-palette recovery remain readable.
+- Background images, fonts, message shapes, and cross-device theme synchronization remain outside this implemented scope.
 
 ## Implementation Notes
 
-First inspect the existing theme and preference structure. Proposed acceptance checks: presets work in each appearance mode; preview cancellation preserves the previous theme; saved themes survive reopening; invalid imports remain harmless; and switching palettes preserves density settings.
+Implemented in [PR #50](https://github.com/taco-jpg/serotine/pull/50), with app-wide design refinements in [#52](https://github.com/taco-jpg/serotine/pull/52) and stronger palette distinctions in [#54](https://github.com/taco-jpg/serotine/pull/54). Their automated and browser checks cover preset variants, custom editing, preview cancellation, import/export validation, persistence, recovery, and narrow-screen layouts.
+
+See the [implementation notes](https://github.com/taco-jpg/serotine/blob/main/docs/SIP-2-themes.md). Status reviewed against application `main` on 2026-09-14.

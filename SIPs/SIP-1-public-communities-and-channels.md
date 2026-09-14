@@ -2,15 +2,16 @@
 sip: 1
 title: Public communities and channels
 author: sodium-qed
-status: Draft
+status: Final
 created: 2026-09-12
+updated: 2026-09-14
 ---
 
 # SIP-1: Public communities and channels
 
 ## Summary
 
-Add opt-in communities that people can join through a shared invitation link or QR code, with multiple text channels under one membership. Consider a public discovery directory as a later stage. This draft records the idea and a suggested starting scope; it does not approve implementation or settle the protocol.
+Serotine supports opt-in communities joined through a shared invitation link or QR code, with multiple channels under one membership. The invitation-based stage is implemented, including moderation, co-owners, ownership transfer, deletion, and rich channel messaging. Final applies to this implemented scope; a public discovery directory remains a later stage.
 
 ## Motivation
 
@@ -40,40 +41,42 @@ Members join the community once and can open its shared text channels. Start wit
 
 Provide owner and moderator responsibilities, member removal, bans, invitation management, and a way to report a message to moderators. Any moderator action affecting other members must be authenticated and checked against the current permissions. Moderated-message hiding applies to cooperating clients and cannot erase retained copies.
 
+The primary owner can assign co-owners, transfer ownership, and delete the community. Co-owners can manage settings, channels, moderators, and ordinary members; their commands are processed by the primary owner's client. Ownership transfer and deletion remain primary-owner actions. Communities appear in the Inbox and support files, voice notes, GIFs, replies, mentions, editing, local deletion, pins, polls, search, and saved drafts.
+
 ### History and delivery stages
 
-The proposed default is that newcomers receive messages sent after admission. Sharing earlier history needs a separate explicit policy and design. Leaving or removal stops future delivery under the updated membership; it does not recall previously received content.
+Newcomers receive messages sent after admission. Sharing earlier history needs a separate explicit policy and design. Leaving or removal stops future delivery under the updated membership; it does not recall previously received content.
 
-Build invitation-based membership and basic controls first, then channels. Keep public discovery as a later decision once active communities and moderation needs justify it. Voice rooms, bots, elaborate role hierarchies, and unlimited membership are outside the initial scope.
+Invitation-based membership, administration, and channels are implemented. Public discovery remains a later decision once active communities and moderation needs justify it. Community voice channels were subsequently added under [SIP-3](SIP-3-voice-and-video-calling.md), whose calling rollout checks remain open. Bots, elaborate role hierarchies, and unlimited membership remain outside this scope.
 
 ## Security & Privacy
 
 Public joining widens who may become a recipient. Encryption does not stop admitted members from copying messages. Clearly show the admission policy and history visibility before joining and inside community settings.
 
-Community support should preserve authenticated membership changes and encrypted member messaging. Public previews and any directory intentionally expose some metadata; specify exactly which fields. Private groups must remain private unless their owner explicitly chooses a supported conversion.
+Community support preserves authenticated membership changes and encrypted member messaging. Shared invitation previews expose the metadata described in the [implementation protocol](https://github.com/taco-jpg/serotine/blob/main/docs/SIP-1-communities.md), without including the member roster, message history, or private keys. A future discovery directory needs its own explicit disclosure policy. Existing private groups remain separate and are not converted automatically.
 
-Invitation validation, replay protection, permission changes, removal, and obsolete membership versions need protocol review before implementation. Rate limits and admission controls should address spam; with device-local identities, banning one address does not guarantee that the person cannot create another.
+Community events use signed v3 envelopes, owner-signed state and membership epochs, invitation generation/expiry checks, and current-permission validation. Stale queued traffic is checked against membership before transmission. Revocation takes effect as clients synchronize and cannot recall content already sent. Admission controls and bounded requests limit abuse; with device-local identities, banning one address does not guarantee that the person cannot create another.
 
 ## Compatibility
 
 Keep existing direct chats and private groups working without automatic migration. Older clients should show an unsupported-feature state or reject unsupported community events safely. Do not weaken admission or permissions to accommodate them.
 
-Current group delivery uses a separately encrypted copy for each recipient, which the relay stores and forwards. Measure delivery, attachment, storage, and mobile costs before choosing a community size limit; this proposal does not promise large-scale server capacity.
+Community delivery uses a separately encrypted copy for each recipient, which the relay stores and forwards. The implemented limits are 20 members and eight channels per community. These bounds do not promise large-scale server capacity.
 
 ## Alternatives
 
 - Add join links to existing groups only: smaller scope, but leaves topic organization unresolved.
 - Launch channels and discovery together: broader functionality, with greater delivery and moderation complexity before demand is established.
 
-## Open Questions
+## Implemented decisions and follow-ups
 
-- Should the first version offer direct admission, approval, or both? Who processes admission when the owner is offline?
-- How are moderator authority, ownership transfer, and removal represented and synchronized?
-- What happens to delayed messages addressed to an obsolete membership?
-- Should owners ever share pre-join history, and how would members understand that choice?
-- What member and channel limits fit measured relay capacity?
-- When is discovery worthwhile, and who handles listing reports and removal?
+- Both direct invitation admission and owner approval are supported. The primary owner's client processes admission and administrative commands; requests wait while it is offline. Retry admission recovers a stalled confirmation.
+- Signed state, membership epochs, an ownership-transfer chain, and terminal deletion records govern changes. Transferring ownership revokes prior invitations and requires pending applicants to use a new invitation.
+- New members receive post-admission messages. Sharing pre-join history remains future work.
+- Public discovery and its listing moderation remain open design questions.
 
 ## Implementation Notes
 
-Before implementation, revise this draft with the membership, invitation, and event formats. Validate joining, revoked invitations, unauthorized actions, removal, outdated clients, notification behavior, and narrow-screen navigation using multiple identities.
+Implemented in [PR #48](https://github.com/taco-jpg/serotine/pull/48), with ownership controls in [#49](https://github.com/taco-jpg/serotine/pull/49), admission recovery in [#53](https://github.com/taco-jpg/serotine/pull/53), and rich messaging/Inbox integration in [#54](https://github.com/taco-jpg/serotine/pull/54). These merged changes document automated and browser checks for membership, permissions, ownership, messaging, and mobile layouts.
+
+The [implementation protocol](https://github.com/taco-jpg/serotine/blob/main/docs/SIP-1-communities.md) records invitation and event formats, serialized owner authority, and synchronization limitations. Status reviewed against application `main` on 2026-09-14.

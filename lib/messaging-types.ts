@@ -1,5 +1,6 @@
 import type { CommunityEventData } from "./community-types"
 import type { Identity, Contact } from "./identity"
+import type { CallHistorySnapshot } from "./call-history"
 
 export type NotificationMode = "all" | "mentions" | "muted"
 export type DeliveryStatus = "pending" | "sent" | "delivered" | "read" | "failed" | "received"
@@ -47,7 +48,7 @@ export interface StoredEvent {
   key: string; event: MessagingEvent; local: boolean; delivered: string[]; error?: string; failedRecipients?: string[]
   receivedAt: number; legacy?: boolean; sequence?: number
 }
-export interface MessagingSnapshot { version: 3; owner: string; events: StoredEvent[]; preferences: MessagingPreferences }
+export interface MessagingSnapshot { version: 3; owner: string; events: StoredEvent[]; preferences: MessagingPreferences; callHistory?: CallHistorySnapshot }
 export interface MessagingModel { conversations: ConversationRecord[]; messages: MessageRecord[]; groups: GroupState[]; requests: ConversationRecord[] }
 export interface MessagingContextValue extends MessagingModel {
   identity: Identity | null; contacts: Contact[]; ready: boolean; error: string | null; status: "connecting" | "online" | "offline"; preferences: MessagingPreferences

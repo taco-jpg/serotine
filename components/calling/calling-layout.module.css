@@ -1,0 +1,5 @@
+/* Match the existing unlayered chat layout without modifying shared styles. */
+.layout :global(.chat-shell) {
+  height: calc(var(--app-height, 100dvh) - var(--call-bar-height, 0px));
+  top: calc(var(--app-top, 0px) + var(--call-bar-height, 0px));
+}

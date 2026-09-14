@@ -4,6 +4,8 @@ import { ID_PATTERN, PUBLIC_KEY_PATTERN } from "./protocol"
 import type { MessagingPreferences, MessagingSnapshot, StoredEvent } from "./messaging-types"
 import { communityAttachmentKey, isDeletedStoredEvent, legacyMessageKey, mergeConversationDeletions, mergeMessageDeletions, storedConversationId } from "./messaging-history"
 import { isPrivateEventExpired, privateDestroyCutoffs, privateMessageTarget } from "./private-messaging"
+import { completedCallRecord, emptyCallHistory, mergeCallHistory, validateCallHistory, type CallHistorySnapshot } from "./call-history"
+import type { CompletedCall } from "./call-types"
 export { isDeletedConversationEvent } from "./messaging-history"
 
 interface MessagingDB extends DBSchema {
@@ -214,6 +216,54 @@ export async function getMessagingPreferences(owner: string): Promise<MessagingP
   try { return withDefaults(await db.get("metadata", "preferences") as Partial<MessagingPreferences> | undefined) } finally { db.close() }
 }
 
+export async function getCallHistory(owner: string): Promise<CallHistorySnapshot> {
+  const db = await database(owner)
+  try {
+    const tx = db.transaction("metadata", "readonly")
+    try {
+      const history = validateCallHistory(await tx.store.get("call-history"), owner)
+      const preferences = withDefaults(await tx.store.get("preferences") as Partial<MessagingPreferences> | undefined)
+      await tx.done
+      return mergeCallHistory(emptyCallHistory(), history, preferences.deleted)
+    } catch (error) { try { tx.abort() } catch { /* The transaction may already have finished. */ } await tx.done.catch(() => {}); throw error }
+  } finally { db.close() }
+}
+export async function saveCallHistory(owner: string, call: CompletedCall): Promise<void> {
+  const row = completedCallRecord(call, owner)
+  const db = await database(owner)
+  try {
+    const tx = db.transaction("metadata", "readwrite")
+    try {
+      const previous = validateCallHistory(await tx.store.get("call-history"), owner)
+      if (!row) {
+        // A late peer privacy correction can follow simultaneous call endings.
+        // Only tombstone an existing entry; ordinary private calls leave no data.
+        if (!previous.records.some(record => record.id === call.id)) { await tx.done; return }
+        await tx.store.put(mergeCallHistory(previous, { version: 1, records: [], deleted: [call.id] }), "call-history")
+      } else {
+        const preferences = withDefaults(await tx.store.get("preferences") as Partial<MessagingPreferences> | undefined)
+        const next = mergeCallHistory({ version: 1, records: [row], deleted: [] }, previous, preferences.deleted)
+        await tx.store.put(next, "call-history")
+      }
+      await tx.done
+    } catch (error) { try { tx.abort() } catch { /* The transaction may already have aborted. */ } await tx.done.catch(() => {}); throw error }
+  } finally { db.close() }
+  changed(owner)
+}
+export async function deleteCallHistory(owner: string, id: string): Promise<void> {
+  if (!ID_PATTERN.test(id)) throw new Error("Choose a valid call entry.")
+  const db = await database(owner)
+  try {
+    const tx = db.transaction("metadata", "readwrite")
+    try {
+      const previous = validateCallHistory(await tx.store.get("call-history"), owner)
+      await tx.store.put(mergeCallHistory(previous, { version: 1, records: [], deleted: [id] }), "call-history")
+      await tx.done
+    } catch (error) { try { tx.abort() } catch { /* The transaction may already have aborted. */ } await tx.done.catch(() => {}); throw error }
+  } finally { db.close() }
+  changed(owner)
+}
+
 /** Upgrade both client generations in one durable transaction. Never retire the
  * old membership unless the replacement membership has also been saved. */
 export async function saveCommunityUpgrade(owner: string, records: StoredEvent[]): Promise<void> {
@@ -278,12 +328,13 @@ export async function saveSyncCursor(owner: string, cursor: number) {
   try { await db.put("metadata", cursor, "cursor") } finally { db.close() }
 }
 export async function exportMessagingSnapshot(owner: string): Promise<MessagingSnapshot> {
-  const [events, preferences] = await Promise.all([getStoredEvents(owner), getMessagingPreferences(owner)])
+  const [events, preferences, callHistory] = await Promise.all([getStoredEvents(owner), getMessagingPreferences(owner), getCallHistory(owner)])
   // Excluding orphan edits also prevents a late private edit from being copied
   // into a backup after its original private message has already disappeared.
   const publicTargets = new Set(events.filter(record => record.event.kind === "message").map(record => privateMessageTarget(record, owner)))
   return { version: 3, owner, events: events.filter(record => record.event.kind !== "private-message" && !isDeletedStoredEvent(record, owner, preferences)
-    && (record.event.kind !== "edit" || !!record.event.payload.targetId && publicTargets.has(privateMessageTarget(record, owner, record.event.payload.targetId)))), preferences }
+    && (record.event.kind !== "edit" || !!record.event.payload.targetId && publicTargets.has(privateMessageTarget(record, owner, record.event.payload.targetId)))), preferences,
+    ...(callHistory.records.length || callHistory.deleted.length ? { callHistory: mergeCallHistory(emptyCallHistory(), callHistory, preferences.deleted) } : {}) }
 }
 export async function deleteStoredConversation(owner: string, cid: string) {
   if (!validConversation(cid)) throw new Error("Choose a valid conversation.")
@@ -304,6 +355,8 @@ export async function deleteStoredConversation(owner: string, cid: string) {
       for (const record of removed) await tx.objectStore("events").delete(record.key)
       await recordEventChanges(tx, removed.map(record => record.key))
       await tx.objectStore("metadata").put({ ...preferences, archived: preferences.archived.filter(id => id !== cid), deleted: { ...preferences.deleted, [cid]: deletion } }, "preferences")
+      const calls = validateCallHistory(await tx.objectStore("metadata").get("call-history"), owner)
+      if (calls.records.some(row => row.peer === cid)) await tx.objectStore("metadata").put(mergeCallHistory(emptyCallHistory(), calls, { ...preferences.deleted, [cid]: deletion }), "call-history")
       await tx.done
     } catch (error) { try { tx.abort() } catch { /* The transaction may already have aborted. */ } await tx.done.catch(() => {}); throw error }
   } finally { db.close() }
@@ -413,6 +466,7 @@ export async function validateMessagingSnapshot(value: unknown, owner: string): 
     }
   }
   snapshot.preferences = withDefaults(p)
+  if (snapshot.callHistory !== undefined) snapshot.callHistory = validateCallHistory(snapshot.callHistory, owner)
   const seen = new Set<string>()
   for (const record of snapshot.events) {
     if (!record || typeof record !== "object" || !record.event || record.key !== eventStorageKey(record.event) || seen.has(record.key) || typeof record.local !== "boolean" || !stringArray(record.delivered) || !record.delivered.every(x => record.event.recipients?.includes(x)) || !Number.isSafeInteger(record.receivedAt) || record.receivedAt < 0 || (record.sequence !== undefined && (!Number.isSafeInteger(record.sequence) || record.sequence < 1)) || (record.legacy !== undefined && typeof record.legacy !== "boolean")) throw new Error("The backup contains an invalid message record.")
@@ -439,6 +493,9 @@ export async function importMessagingSnapshot(owner: string, value: MessagingSna
     const savedPreferences = await tx.objectStore("metadata").get("preferences") as Partial<MessagingPreferences> | undefined
     const old = withDefaults(savedPreferences)
     const preferences = savedPreferences ? { ...snapshot.preferences, ...old, accepted: [...new Set([...snapshot.preferences.accepted, ...old.accepted])], blocked: [...new Set([...snapshot.preferences.blocked, ...old.blocked])], notifications: { ...snapshot.preferences.notifications, ...old.notifications }, readAt: { ...snapshot.preferences.readAt, ...old.readAt }, archived: [...new Set([...snapshot.preferences.archived, ...old.archived])], deleted: mergeConversationDeletions(snapshot.preferences.deleted, old.deleted), deletedMessages: mergeMessageDeletions(snapshot.preferences.deletedMessages, old.deletedMessages) } : snapshot.preferences
+    const savedCalls = validateCallHistory(await tx.objectStore("metadata").get("call-history"), owner)
+    const calls = mergeCallHistory(snapshot.callHistory ?? emptyCallHistory(), savedCalls, preferences.deleted)
+    if (snapshot.callHistory || savedCalls.records.length || savedCalls.deleted.length) await tx.objectStore("metadata").put(calls, "call-history")
     const state = await privateState(tx)
     state.cutoffs = mergeCutoffs(state.cutoffs, privateDestroyCutoffs(snapshot.events, owner))
     for (const record of snapshot.events) if (record.event.kind === "private-message") state.targets.add(privateMessageTarget(record, owner))

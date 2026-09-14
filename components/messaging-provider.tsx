@@ -7,6 +7,7 @@ import { defaultMessagingPreferences } from "@/lib/messaging-store"
 import type { CommunityService } from "@/lib/community-service"
 import type { CommunityModel } from "@/lib/community-types"
 import type { MessagingContextValue } from "@/lib/messaging-types"
+import { CallingProvider } from "@/components/calling-provider"
 
 type CommunityMethods = Pick<CommunityService, "createCommunity" | "createInvite" | "joinCommunity" | "retryJoinRequest" | "updateCommunity" | "moderate" | "approveRequest" | "rejectRequest" | "leave" | "sendMessage" | "sendEvent" | "editMessage" | "pinMessage" | "createPoll" | "vote" | "getAttachmentChunks" | "reportMessage" | "hideMessage" | "revokeInvites" | "setCoOwner" | "transferOwnership" | "deleteCommunity">
 export type CommunityContextValue = CommunityMethods & Pick<MessagingContextValue, "identity" | "contacts" | "ready" | "error" | "status" | "preferences" | "setNotificationMode" | "sync" | "retry"> & {
@@ -130,7 +131,7 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     markRead: engine?.markCommunityRead ?? unavailable,
     setNotificationMode: value.setNotificationMode, sync: value.sync, retry: value.retry,
   }), [engine, ready, value])
-  return <MessagingContext.Provider value={value}><CommunityContext.Provider value={communityValue}>{children}</CommunityContext.Provider></MessagingContext.Provider>
+  return <MessagingContext.Provider value={value}><CommunityContext.Provider value={communityValue}><CallingProvider messaging={value}>{children}</CallingProvider></CommunityContext.Provider></MessagingContext.Provider>
 }
 export function useMessaging(): MessagingContextValue {
   const value = useContext(MessagingContext)

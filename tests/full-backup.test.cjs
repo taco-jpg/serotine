@@ -688,3 +688,110 @@ test('community backup tombstones reject malformed and cross-community event and
   }
   assert.equal(writes, 0)
 })
+
+function completedCall(changes = {}) {
+  return { id: crypto.randomUUID(), peer: bob.publicKey, mode: 'video', direction: 'outgoing', outcome: 'ended',
+    startedAt: Date.now() - 65_000, endedAt: Date.now(), durationSeconds: 60, private: false, ...changes }
+}
+test('call summaries round-trip through encrypted backups without negotiation data or private calls', async () => {
+  const ordinary = completedCall({ sdp: 'never store this', credential: 'never store this either' })
+  await events.saveCallHistory(alice.publicKey, ordinary)
+  const before = writes
+  await events.saveCallHistory(alice.publicKey, completedCall({ private: true }))
+  assert.equal(writes, before, 'a private call must not write even an empty history')
+  const output = await backup.exportFullBackup(alice, password)
+  const payload = await decryptPayload(output)
+  assert.equal(payload.messaging.callHistory.records.length, 1)
+  const row = payload.messaging.callHistory.records[0]
+  assert.equal(row.id, ordinary.id)
+  assert.equal(row.durationSeconds, 60)
+  assert.equal(JSON.stringify(payload).includes('never store this'), false)
+  assert.equal(Object.hasOwn(row, 'private'), false)
+  databases.clear()
+  await backup.restoreBackup(output, password)
+  assert.deepEqual((await events.getCallHistory(alice.publicKey)).records, [row])
+})
+test('deleting call entries and conversations prevents stale backups and late completions from reviving them', async () => {
+  const first = completedCall(), second = completedCall(), other = completedCall({ peer: charlie.publicKey })
+  for (const call of [first, second, other]) await events.saveCallHistory(alice.publicKey, call)
+  const original = await events.exportMessagingSnapshot(alice.publicKey)
+  await events.deleteCallHistory(alice.publicKey, first.id)
+  await events.importMessagingSnapshot(alice.publicKey, original)
+  assert.equal((await events.getCallHistory(alice.publicKey)).records.some(row => row.id === first.id), false)
+  await events.deleteStoredConversation(alice.publicKey, bob.publicKey)
+  await events.saveCallHistory(alice.publicKey, second)
+  await events.importMessagingSnapshot(alice.publicKey, original)
+  assert.deepEqual((await events.getCallHistory(alice.publicKey)).records.map(row => row.id), [other.id])
+})
+test('invalid private or active call backup data is rejected before import writes', async () => {
+  const original = snapshot()
+  const row = { ...completedCall() }
+  delete row.private
+  for (const changes of [{ private: true }, { outcome: 'ringing' }, { peer: alice.publicKey }, { durationSeconds: -1 }, { endedAt: 1 },
+    { startedAt: Number.MAX_SAFE_INTEGER - 1000, endedAt: Number.MAX_SAFE_INTEGER, durationSeconds: 1 }]) {
+    const invalid = structuredClone(original)
+    invalid.messaging.callHistory = { version: 1, records: [{ ...row, ...changes }], deleted: [] }
+    const before = writes
+    await assert.rejects(backup.validateFullBackupSnapshot(invalid), /call history/)
+    assert.equal(writes, before)
+  }
+})
+test('restored call summaries retain only display fields, including when backup metadata contains active credentials', async () => {
+  const source = snapshot()
+  const row = completedCall()
+  delete row.private
+  source.messaging.callHistory = { version: 1, records: [{ ...row, sdp: 'private-offer', ice: 'private-candidate', deviceId: 'private-device' }],
+    deleted: [], activeCall: { credential: 'private-secret' } }
+  await events.importMessagingSnapshot(alice.publicKey, source.messaging)
+  const exported = await events.exportMessagingSnapshot(alice.publicKey)
+  assert.deepEqual(exported.callHistory, { version: 1, records: [row], deleted: [] })
+})
+test('failed call history commits preserve entries and deletion markers without change notifications', async () => {
+  const first = completedCall(), second = completedCall()
+  await events.saveCallHistory(alice.publicKey, first)
+  const before = await events.getCallHistory(alice.publicKey)
+  let changes = 0
+  const changed = () => { changes++ }
+  window.addEventListener('serotine:events', changed)
+  try {
+    failCommit = true
+    await assert.rejects(events.saveCallHistory(alice.publicKey, second), /aborted/)
+    await assert.rejects(events.saveCallHistory(alice.publicKey, { ...first, private: true }), /aborted/)
+    await assert.rejects(events.deleteCallHistory(alice.publicKey, first.id), /aborted/)
+    await assert.rejects(events.deleteStoredConversation(alice.publicKey, bob.publicKey), /aborted/)
+    failCommit = false
+    assert.deepEqual(await events.getCallHistory(alice.publicKey), before)
+    assert.deepEqual((await events.getMessagingPreferences(alice.publicKey)).deleted, {})
+    assert.equal(changes, 0)
+  } finally { failCommit = false; window.removeEventListener('serotine:events', changed) }
+})
+test('malformed local call metadata cannot partially delete a conversation or overwrite call history', async () => {
+  const message = await saveEvent(bob, bob.publicKey, 'message', { content: 'Retained if deletion cannot commit' })
+  const db = database(`serotine-events:${alice.publicKey}`)
+  const malformed = { version: 1, records: [completedCall({ outcome: 'connecting' })], deleted: [] }
+  await db.put('metadata', malformed, 'call-history')
+  await assert.rejects(events.getCallHistory(alice.publicKey), /call history/)
+  await assert.rejects(events.saveCallHistory(alice.publicKey, completedCall()), /call history/)
+  await assert.rejects(events.deleteCallHistory(alice.publicKey, crypto.randomUUID()), /call history/)
+  await assert.rejects(events.deleteStoredConversation(alice.publicKey, bob.publicKey), /call history/)
+  assert.deepEqual(await events.getStoredEvents(alice.publicKey), [message])
+  assert.deepEqual((await events.getMessagingPreferences(alice.publicKey)).deleted, {})
+  assert.deepEqual(await db.get('metadata', 'call-history'), malformed)
+})
+test('late call privacy corrections purge existing history and stale backups while fresh private calls leave nothing', async () => {
+  await events.saveCallHistory(alice.publicKey, completedCall({ private: true }))
+  assert.equal(writes, 0)
+  assert.deepEqual(await events.getCallHistory(alice.publicKey), { version: 1, records: [], deleted: [] })
+  const call = completedCall()
+  await events.saveCallHistory(alice.publicKey, call)
+  const oldBackup = await events.exportMessagingSnapshot(alice.publicKey)
+  await events.saveCallHistory(alice.publicKey, { ...call, private: true })
+  assert.deepEqual(await events.getCallHistory(alice.publicKey), { version: 1, records: [], deleted: [call.id] })
+  const afterCorrection = writes
+  await events.saveCallHistory(alice.publicKey, { ...call, private: true })
+  await events.saveCallHistory(alice.publicKey, completedCall({ private: true }))
+  assert.equal(writes, afterCorrection, 'unknown and repeated private completions do not add durable metadata')
+  await events.importMessagingSnapshot(alice.publicKey, oldBackup)
+  await events.saveCallHistory(alice.publicKey, call)
+  assert.deepEqual(await events.getCallHistory(alice.publicKey), { version: 1, records: [], deleted: [call.id] })
+})

@@ -2,6 +2,8 @@
 
 Browser-based, end-to-end encrypted messaging with device-local identities and an authenticated Cloudflare D1 relay. No email address or phone number is required.
 
+Direct voice/video calls are described in [SIP 3 calling](docs/SIP-3-calling.md), including call privacy, TURN configuration, and browser support checks.
+
 ## Conversations
 
 - **Appearance:** choose Light, Dark, or System from the theme button. Open **Palettes & custom themes** for Default, Forest, Ocean, Lavender, Rose, and Monochrome palettes or to create your own. Custom themes have separately editable light and dark colors, a conversation preview, readability feedback, and local saving. Import/export shares only palette colors and a name; imported themes open in the preview before applying. **Restore default palette** stays available, and the editor uses readable built-in controls. Appearance mode, palette, and compactness are independent. The desktop sidebar collapses into a conversation rail and remembers its width preference. Compact message spacing and a single composer toolbar leave more room for messages and media.

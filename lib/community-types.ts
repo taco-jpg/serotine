@@ -1,7 +1,11 @@
 import type { AttachmentMeta, MessageRecord, NotificationMode } from "./messaging-types"
 
 export type CommunityAdmission = "direct" | "approval"
-export interface CommunityChannel { id: string; name: string; posting: "members" | "moderators" }
+export interface CommunityChannel {
+  id: string; name: string; posting: "members" | "moderators"
+  /** Missing on previously signed communities; omission continues to mean text. */
+  kind?: "text" | "voice"
+}
 export interface CommunityTransfer {
   from: string; to: string; epoch: number; previous: string; stateHash: string; signature: string
 }

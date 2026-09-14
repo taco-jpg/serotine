@@ -131,7 +131,7 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     markRead: engine?.markCommunityRead ?? unavailable,
     setNotificationMode: value.setNotificationMode, sync: value.sync, retry: value.retry,
   }), [engine, ready, value])
-  return <MessagingContext.Provider value={value}><CommunityContext.Provider value={communityValue}><CallingProvider messaging={value}>{children}</CallingProvider></CommunityContext.Provider></MessagingContext.Provider>
+  return <MessagingContext.Provider value={value}><CommunityContext.Provider value={communityValue}><CallingProvider messaging={value} communities={communityValue.model.communities}>{children}</CallingProvider></CommunityContext.Provider></MessagingContext.Provider>
 }
 export function useMessaging(): MessagingContextValue {
   const value = useContext(MessagingContext)

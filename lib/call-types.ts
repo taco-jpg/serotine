@@ -1,7 +1,7 @@
 import type { Identity } from "./identity"
 
 export type CallMode = "audio" | "video"
-export type CallPhase = "idle" | "preparing" | "preview" | "incoming" | "ringing" | "connecting" | "connected" | "reconnecting" | "ended" | "declined" | "unanswered" | "busy" | "failed"
+export type CallPhase = "idle" | "routing" | "preparing" | "preview" | "incoming" | "ringing" | "connecting" | "connected" | "reconnecting" | "ended" | "declined" | "unanswered" | "busy" | "failed"
 export type CallDirection = "incoming" | "outgoing"
 export type CallAvailability = "checking" | "available" | "unavailable"
 export interface CallPeerPolicy { accepted: boolean; blocked?: boolean; archived?: boolean; muted?: boolean; private?: boolean; label?: string }
@@ -27,6 +27,7 @@ export interface CallSnapshot {
   cameraId: string
   settings: CallSettings
   relayAvailable: boolean
+  relayRequiredByPeer: boolean
   supported: boolean
 }
 export interface CompletedCall {
@@ -44,6 +45,7 @@ export interface CallEngineOptions {
   identity: Identity
   getPeerPolicy: (peer: string) => CallPeerPolicy
   getPeers?: () => string[]
+  isBusy?: () => boolean
   onCompleted?: (call: CompletedCall) => void | Promise<void>
   settings?: Partial<CallSettings>
   onSettingsChange?: (settings: CallSettings) => void
@@ -56,6 +58,7 @@ export interface CallController {
   availability(peer: string): Promise<CallAvailability>
   prepareOutgoing(peer: string, mode: CallMode): Promise<void>
   prepareIncoming(mode: CallMode): Promise<void>
+  retryPreparation(allowDirect?: boolean): Promise<void>
   connectPreview(): Promise<void>
   decline(): Promise<void>
   end(): Promise<void>

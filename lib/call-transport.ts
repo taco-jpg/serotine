@@ -6,7 +6,9 @@ import { CALL_INVITE_TTL_MS, CALL_PAGE_SIZE, CALL_SIGNAL_TTL_MS, isCallId, isCal
   type CallSession, type CallSignal, type CallSignalPayload, type EncryptedCallSignal } from "./call-protocol"
 import type { RequestProof } from "./protocol"
 
-export class CallTransportError extends Error {}
+export class CallTransportError extends Error {
+  constructor(message: string, public code?: "relay-unavailable") { super(message) }
+}
 const UNEXPECTED = "The calling service returned an unexpected response. Reload Serotine and retry."
 
 /** One memory-only device session per engine. No signaling or credentials enter storage/backups. */
@@ -37,7 +39,7 @@ export function createCallTransport(identity: Identity, sessionId = crypto.rando
         if (result.success === false) {
           if (typeof result.error !== "string" || result.error.length > 500 || /[<>]/.test(result.error)
             || [...result.error].some(character => character.charCodeAt(0) < 32)) throw new CallTransportError(UNEXPECTED)
-          throw new CallTransportError(result.error)
+          throw new CallTransportError(result.error, result.code === "relay-unavailable" ? "relay-unavailable" : undefined)
         }
         if (!response.ok || result.success !== true) throw new CallTransportError(UNEXPECTED)
         return result
@@ -149,7 +151,7 @@ export function createCallTransport(identity: Identity, sessionId = crypto.rando
           || (server.username !== undefined && typeof server.username !== "string") || (server.credential !== undefined && typeof server.credential !== "string")) throw new CallTransportError(UNEXPECTED)
       }
       if (policy === "relay" && (!result.relayAvailable || !result.iceServers.some(server => (server.urls as string[]).some(url => /^turns?:/.test(url))))) {
-        throw new CallTransportError("Relay-only calling is unavailable. No direct connection was attempted.")
+        throw new CallTransportError("Relay calling needs a configured TURN relay. You can explicitly allow a direct connection, but some networks require a relay.", "relay-unavailable")
       }
       return { relayAvailable: result.relayAvailable, iceServers: result.iceServers as RTCIceServer[], expiresAt: Number(result.expiresAt) }
     },

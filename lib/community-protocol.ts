@@ -3,7 +3,7 @@ import { ATTACHMENT_CHUNK_BYTES, MAX_ATTACHMENT_CHUNKS, isAttachmentMeta } from 
 import { ID_PATTERN, MAX_MESSAGE_LENGTH, PUBLIC_KEY_PATTERN } from "./protocol"
 import type { Identity } from "./identity"
 import type { MessagingEvent, MessagingPreferences, StoredEvent } from "./messaging-types"
-import type { CommunityEventData, CommunityInvite, CommunityMessage, CommunityModel, CommunityState, CommunityTransfer, CommunitySettingsChanges } from "./community-types"
+import type { CommunityChannel, CommunityEventData, CommunityInvite, CommunityMessage, CommunityModel, CommunityState, CommunityTransfer, CommunitySettingsChanges } from "./community-types"
 
 export const MAX_COMMUNITY_MEMBERS = 20
 export const MAX_COMMUNITY_CHANNELS = 8
@@ -33,18 +33,46 @@ export function isCommunityCoOwner(state: CommunityState, address: string): bool
 export function isCommunityAdmin(state: CommunityState, address: string): boolean { return !state.deleted && state.members.includes(address) && (state.owner === address || isCommunityCoOwner(state, address)) }
 export function isCommunityModerator(state: CommunityState, address: string): boolean { return !state.deleted && state.members.includes(address) && (isCommunityAdmin(state, address) || state.moderators.includes(address)) }
 export function communityStateReference(state: CommunityState): { stateRef?: string } { return state.version === 2 ? { stateRef: state.signature } : {} }
+function canUseCommunityChannel(state: CommunityState, address: string, channel: CommunityChannel | undefined): boolean {
+  return !state.deleted && !!channel && state.members.includes(address) && !state.bans.includes(address) && (channel.posting === "members" || isCommunityModerator(state, address))
+}
 export function canPostToCommunityChannel(state: CommunityState, address: string, channelId: string): boolean {
   const channel = state.channels.find(x => x.id === channelId)
-  return !state.deleted && !!channel && state.members.includes(address) && !state.bans.includes(address) && (channel.posting === "members" || isCommunityModerator(state, address))
+  return channel?.kind !== "voice" && canUseCommunityChannel(state, address, channel)
+}
+/** Moderators-only voice channels admit owners and moderators; there is no listener role. */
+export function canJoinCommunityVoiceChannel(state: CommunityState, address: string, channelId: string): boolean {
+  const channel = state.channels.find(x => x.id === channelId)
+  return channel?.kind === "voice" && canUseCommunityChannel(state, address, channel)
+}
+/** Copy only authenticated fields, without adding defaults to legacy signed data. */
+export function communityStateSnapshot(state: CommunityState): CommunityState {
+  return { id: state.id, owner: state.owner, name: state.name, description: state.description,
+    epoch: state.epoch, updatedAt: state.updatedAt, members: [...state.members], moderators: [...state.moderators],
+    bans: [...state.bans], channels: state.channels.map(channel => ({ ...channel })), admission: state.admission,
+    joiningPaused: state.joiningPaused, inviteGeneration: state.inviteGeneration, signature: state.signature,
+    ...(state.version === 2 ? { version: 2, coOwners: [...(state.coOwners ?? [])], transfers: (state.transfers ?? []).map(transfer => ({ ...transfer })), signer: state.signer, deleted: state.deleted } : {}) }
+}
+function validChannel(value: unknown): value is CommunityChannel {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !exact(value, ["id", "name", "posting", "kind"])) return false
+  const channel = value as CommunityChannel
+  return validId(channel.id) && text(channel.name, 40) && ["members", "moderators"].includes(channel.posting)
+    && (!Object.hasOwn(channel, "kind") || channel.kind === "text" || channel.kind === "voice")
+}
+function channelFields(channel: CommunityChannel) {
+  // A fourth item authenticates the new kind. Never append a default to an old
+  // channel: both v1 and v2 communities already have signatures over three items.
+  const fields = [channel.id, channel.name, channel.posting]
+  return channel.kind === undefined ? fields : [...fields, channel.kind]
 }
 function stateFields(s: Omit<CommunityState, "signature"> | CommunityState) {
   return [s.id, s.owner, s.name, s.description, s.epoch, s.updatedAt, s.members, s.moderators, s.bans,
-    s.channels.map(c => [c.id, c.name, c.posting]), s.admission, s.joiningPaused, s.inviteGeneration]
+    s.channels.map(channelFields), s.admission, s.joiningPaused, s.inviteGeneration]
 }
 function stateText(s: Omit<CommunityState, "signature"> | CommunityState) {
   if (s.version === 2) return JSON.stringify(["serotine:community-state:v2", ...stateFields(s), s.coOwners, s.transfers, s.signer, s.deleted])
   return JSON.stringify(["serotine:community-state:v1", s.id, s.owner, s.name, s.description, s.epoch, s.updatedAt, s.members, s.moderators, s.bans,
-    s.channels.map(c => [c.id, c.name, c.posting]), s.admission, s.joiningPaused, s.inviteGeneration])
+    s.channels.map(channelFields), s.admission, s.joiningPaused, s.inviteGeneration])
 }
 function inviteText(i: Omit<CommunityInvite, "signature"> | CommunityInvite) {
   if (i.version === 2) return JSON.stringify(["serotine:community-invite:v2", i.version, i.communityId, i.owner, i.name, i.description, i.admission, i.history, i.inviteGeneration, i.token, i.expiresAt, i.transfers])
@@ -114,7 +142,7 @@ export async function validateCommunityState(value: unknown): Promise<boolean> {
       || !uniqueKeys(s.members, MAX_COMMUNITY_MEMBERS) || !s.members.includes(s.owner) || !uniqueKeys(s.moderators, MAX_COMMUNITY_MEMBERS)
       || !s.moderators.every(x => x !== s.owner && s.members.includes(x)) || !uniqueKeys(s.bans, MAX_BANS) || s.bans.some(x => s.members.includes(x))
       || !Array.isArray(s.channels) || !s.channels.length || s.channels.length > MAX_COMMUNITY_CHANNELS
-      || !s.channels.every(c => c && exact(c, ["id", "name", "posting"]) && ID_PATTERN.test(c.id) && text(c.name, 40) && ["members", "moderators"].includes(c.posting))
+      || !s.channels.every(validChannel)
       || new Set(s.channels.map(c => c.id)).size !== s.channels.length || new Set(s.channels.map(c => c.name.trim().toLowerCase())).size !== s.channels.length
       || !["direct", "approval"].includes(s.admission) || typeof s.joiningPaused !== "boolean" || !SIGNATURE.test(s.signature)) return false
     if (s.version !== 2) return communityOwner(s.id) === s.owner && await verifySignature(stateText(s), s.signature, s.owner)
@@ -199,7 +227,7 @@ function validChanges(value: unknown): value is CommunitySettingsChanges {
   return (c.name === undefined || text(c.name, 80)) && (c.description === undefined || text(c.description, 500, true))
     && (c.admission === undefined || ["direct", "approval"].includes(c.admission)) && (c.joiningPaused === undefined || typeof c.joiningPaused === "boolean")
     && (c.channels === undefined || (Array.isArray(c.channels) && c.channels.length > 0 && c.channels.length <= MAX_COMMUNITY_CHANNELS
-      && c.channels.every(channel => channel && exact(channel, ["id", "name", "posting"]) && ID_PATTERN.test(channel.id) && text(channel.name, 40) && ["members", "moderators"].includes(channel.posting))
+      && c.channels.every(validChannel)
       && new Set(c.channels.map(channel => channel.id)).size === c.channels.length && new Set(c.channels.map(channel => channel.name.trim().toLowerCase())).size === c.channels.length))
 }
 function canCommand(state: CommunityState, author: string, d: Extract<CommunityEventData, { type: "command" }>) {
@@ -297,7 +325,7 @@ export function communityOutboxError(e: MessagingEvent, model: CommunityModel, o
   if (!sameSet(e.recipients, fanout(state.members, owner))) return "The community recipients changed."
   if (d.type === "hide") return isCommunityModerator(state, owner) ? undefined : "You are no longer a community moderator."
   if ("channelId" in d && contentTypes.has(d.type)) {
-    if (!state.channels.some(channel => channel.id === d.channelId)) return "This channel is no longer available."
+    if (!state.channels.some(channel => channel.id === d.channelId && channel.kind !== "voice")) return "This text channel is no longer available."
     if (postingTypes.has(d.type) && !canPostToCommunityChannel(state, owner, d.channelId)) return "You cannot post in this channel."
     if ("targetId" in d) {
       const target = model.messages.find(message => message.conversationId === e.conversationId && message.channelId === d.channelId && message.id === d.targetId && !message.hidden)
@@ -421,7 +449,7 @@ export function buildCommunityModel(records: StoredEvent[], owner: string, prefe
       if (isCommunityModerator(prior, e.author) && prior.channels.some(c => c.id === d.channelId)) hidden.add(`${cid}:${d.channelId}:${d.targetId}`)
       continue
     }
-    if (!("channelId" in d) || !prior.channels.some(channel => channel.id === d.channelId)) continue
+    if (!("channelId" in d) || !prior.channels.some(channel => channel.id === d.channelId && channel.kind !== "voice")) continue
     if (postingTypes.has(d.type) && !canPostToCommunityChannel(prior, e.author, d.channelId)) continue
     if (d.type === "attachment-chunk") { accepted.add(record.key); continue }
     if (d.type === "edit" || d.type === "pin" || d.type === "vote" || d.type === "receipt") { controls.push(record); continue }

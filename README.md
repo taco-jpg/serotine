@@ -2,7 +2,7 @@
 
 Browser-based, end-to-end encrypted messaging with device-local identities and an authenticated Cloudflare D1 relay. No email address or phone number is required.
 
-Direct voice/video calls are described in [SIP 3 calling](docs/SIP-3-calling.md), including call privacy, TURN configuration, and browser support checks.
+Direct voice/video calls, group calls, and community voice channels are described in [SIP 3 calling](docs/SIP-3-calling.md), including call privacy, TURN configuration, and browser support checks.
 
 ## Conversations
 

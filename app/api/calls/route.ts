@@ -41,7 +41,7 @@ export async function POST(request: Request): Promise<Response> {
       || Object.keys(body).length !== 4 || !Object.hasOwn(body, "data")) throw new CallRelayError("Invalid calling request.")
     return json(await handleCallRequest(body.action, body.data, body.proof as unknown as RequestProof))
   } catch (error) {
-    if (error instanceof CallRelayError) return json({ success: false, error: error.message }, error.status)
+    if (error instanceof CallRelayError) return json({ success: false, error: error.message, ...(error.code ? { code: error.code } : {}) }, error.status)
     // No raw negotiation, credentials, request bodies, or infrastructure errors in logs.
     return json({ success: false, error: "Calling is temporarily unavailable. Your conversation is still available." }, 503)
   }

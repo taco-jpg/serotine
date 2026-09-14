@@ -57,6 +57,84 @@ test('signed state anchors owner, bounds metadata, and rejects tampering and own
   assert.equal(await protocol.validateCommunityEvent(stateEvent(bob, s)), false)
 })
 
+test('legacy v1 and v2 channel signatures remain byte compatible and cannot gain an unsigned kind', async () => {
+  const alice = await identity()
+  for (const version of [1, 2]) {
+    const s = await state(alice, [alice], version === 2 ? { version: 2, coOwners: [], transfers: [], signer: alice.publicKey, deleted: false } : {})
+    // This independent representation is the deployed pre-voice wire format.
+    const fields = [s.id, s.owner, s.name, s.description, s.epoch, s.updatedAt, s.members, s.moderators, s.bans,
+      s.channels.map(c => [c.id, c.name, c.posting]), s.admission, s.joiningPaused, s.inviteGeneration]
+    const canonical = JSON.stringify(version === 2
+      ? ['serotine:community-state:v2', ...fields, s.coOwners, s.transfers, s.signer, s.deleted]
+      : ['serotine:community-state:v1', ...fields])
+    assert.equal(await cryptoHelpers.verifySignature(canonical, s.signature, alice.publicKey), true)
+    const key = await crypto.subtle.importKey('jwk', { ...alice.privateKey, key_ops: ['sign'] }, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign'])
+    const legacy = { ...s, signature: cryptoHelpers.arrayBufferToHex(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(canonical))) }
+    assert.equal(await protocol.validateCommunityState(legacy), true)
+    assert.equal(protocol.canPostToCommunityChannel(legacy, alice.publicKey, s.channels[0].id), true)
+    assert.equal(protocol.canJoinCommunityVoiceChannel(legacy, alice.publicKey, s.channels[0].id), false)
+    for (const kind of ['text', 'voice', null, undefined]) {
+      assert.equal(await protocol.validateCommunityState({ ...legacy, channels: legacy.channels.map(c => ({ ...c, kind })) }), false)
+    }
+    const record = { ...legacy, joined: true, effectiveMembers: legacy.members, unreadCount: 0, channelUnread: {}, notificationMode: 'all' }
+    const snapshot = protocol.communityStateSnapshot(record)
+    assert.deepEqual(snapshot, legacy)
+    assert.equal(Object.hasOwn(snapshot.channels[0], 'kind'), false)
+    assert.equal(await protocol.validateCommunityState(snapshot), true)
+  }
+})
+
+test('explicit channel kind is authenticated in both state versions and rejects tampering or malformed kinds', async () => {
+  const alice = await identity()
+  for (const version of [1, 2]) {
+    const channels = [{ id: crypto.randomUUID(), name: 'lounge', posting: 'members', kind: 'voice' }]
+    const s = await state(alice, [alice], { channels, ...(version === 2 ? { version: 2, coOwners: [], transfers: [], signer: alice.publicKey, deleted: false } : {}) })
+    assert.equal(await protocol.validateCommunityState(s), true)
+    for (const kind of ['text', 'video', '', null, undefined]) {
+      assert.equal(await protocol.validateCommunityState({ ...s, channels: [{ ...channels[0], kind }] }), false)
+    }
+    const stripped = { ...channels[0] }; delete stripped.kind
+    assert.equal(await protocol.validateCommunityState({ ...s, channels: [stripped] }), false)
+    for (const kind of ['video', null, undefined]) {
+      await assert.rejects(state(alice, [alice], { channels: [{ ...channels[0], kind }] }), /settings are invalid/)
+    }
+    const text = await next(alice, s, { channels: [{ ...channels[0], kind: 'text' }] })
+    assert.equal(await protocol.validateCommunityState(text), true)
+    assert.equal(protocol.canPostToCommunityChannel(text, alice.publicKey, channels[0].id), true)
+  }
+})
+
+test('voice eligibility enforces current membership, bans, roles and channel type without accepting chat content', async () => {
+  const [alice, bob, carol, outsider] = await Promise.all([identity(), identity(), identity(), identity()])
+  const voice = { id: crypto.randomUUID(), name: 'lounge', posting: 'members', kind: 'voice' }
+  const staff = { id: crypto.randomUUID(), name: 'staff-room', posting: 'moderators', kind: 'voice' }
+  const s = await state(alice, [alice, bob, carol], { moderators: [carol.publicKey], channels: [voice, staff] })
+  for (const member of [alice, bob, carol]) assert.equal(protocol.canJoinCommunityVoiceChannel(s, member.publicKey, voice.id), true)
+  assert.equal(protocol.canJoinCommunityVoiceChannel(s, outsider.publicKey, voice.id), false)
+  assert.equal(protocol.canJoinCommunityVoiceChannel(s, bob.publicKey, staff.id), false)
+  assert.equal(protocol.canJoinCommunityVoiceChannel(s, alice.publicKey, staff.id), true)
+  assert.equal(protocol.canJoinCommunityVoiceChannel(s, carol.publicKey, staff.id), true)
+  assert.equal(protocol.canJoinCommunityVoiceChannel({ ...s, bans: [bob.publicKey] }, bob.publicKey, voice.id), false)
+  assert.equal(protocol.canJoinCommunityVoiceChannel({ ...s, deleted: true }, alice.publicKey, voice.id), false)
+  assert.equal(protocol.canPostToCommunityChannel(s, alice.publicKey, voice.id), false)
+  assert.equal(protocol.canJoinCommunityVoiceChannel(s, alice.publicKey, crypto.randomUUID()), false)
+  const result = model([stateEvent(alice, s), message(bob, s, 'Must not become voice history', voice.id)], bob)
+  assert.deepEqual(result.messages, [])
+})
+
+test('voice channels survive ownership transfer while their kind stays bound to the exact handoff', async () => {
+  const [alice, bob] = await Promise.all([identity(), identity()])
+  const s = await state(alice, [alice, bob], { version: 2, coOwners: [], transfers: [], signer: alice.publicKey, deleted: false,
+    channels: [{ id: crypto.randomUUID(), name: 'lounge', posting: 'members', kind: 'voice' }] })
+  const handoff = await protocol.signCommunityTransfer({ ...s, epoch: s.epoch + 1, updatedAt: s.updatedAt + 1 }, bob.publicKey, alice)
+  assert.equal(await protocol.validateCommunityState(handoff), true)
+  assert.equal(handoff.channels[0].kind, 'voice')
+  assert.equal(await protocol.validateCommunityState({ ...handoff, channels: [{ ...handoff.channels[0], kind: 'text' }] }), false)
+  const successor = await next(bob, handoff, { name: 'New owner, same voice room' })
+  assert.equal(await protocol.validateCommunityState(successor), true)
+  assert.equal(protocol.canJoinCommunityVoiceChannel(successor, bob.publicKey, successor.channels[0].id), true)
+})
+
 test('invitation URL and QR payload preserve signed Unicode preview; tampering and expiry fail', async () => {
   const alice = await identity(), s = await state(alice, [alice], { name: '数学 club 🦇' })
   const i = await invite(alice, s), url = protocol.buildCommunityInviteUrl(i, 'https://example.test')

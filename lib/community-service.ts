@@ -267,7 +267,8 @@ export class CommunityService {
       ...(changes.description !== undefined ? { description: changes.description.trim() } : {}),
       ...(changes.admission !== undefined ? { admission: changes.admission } : {}),
       ...(changes.joiningPaused !== undefined ? { joiningPaused: changes.joiningPaused } : {}),
-      ...(changes.channels !== undefined ? { channels: changes.channels.map(channel => ({ id: channel.id, name: channel.name.trim(), posting: channel.posting })) } : {}) }
+      ...(changes.channels !== undefined ? { channels: changes.channels.map(channel => ({ id: channel.id, name: channel.name.trim(), posting: channel.posting,
+        ...(channel.kind !== undefined ? { kind: channel.kind } : {}) })) } : {}) }
   }
   private applyChanges(next: CommunityState, changes: CommunityChanges) {
     if (changes.name !== undefined) next.name = changes.name.trim()
@@ -421,7 +422,7 @@ export class CommunityService {
     const community = this.community(id)
     if (!["message", "attachment", "attachment-chunk", "edit", "pin", "poll", "vote", "receipt"].includes(kind)) throw new Error("This feature is not available in community channels.")
     if (!payload || typeof payload !== "object" || Array.isArray(payload) || ["type", "epoch", "channelId", "stateRef"].some(key => key in payload)) throw new Error("This community message is invalid.")
-    if (!community.channels.some(channel => channel.id === channelId)) throw new Error("This channel is no longer available.")
+    if (!community.channels.some(channel => channel.id === channelId && channel.kind !== "voice")) throw new Error("This text channel is no longer available.")
     if (!["vote", "receipt"].includes(kind) && !canPostToCommunityChannel(community, this.address, channelId)) throw new Error("Only moderators can post in this channel, or it is no longer available.")
     if (["edit", "pin", "vote", "receipt"].includes(kind)) this.actionTarget(id, channelId, kind, payload)
     if (payload.replyTo && !this.model.messages.some(message => message.id === payload.replyTo && message.conversationId === id && message.channelId === channelId && !message.hidden))

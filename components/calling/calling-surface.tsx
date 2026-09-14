@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Label } from "@/components/ui/label"
 import type { CallPhase } from "@/lib/call-types"
 
-const labels: Record<CallPhase, string> = { idle: "Ready", preparing: "Preparing devices", preview: "Ready to connect", incoming: "Incoming call", ringing: "Ringing", connecting: "Connecting", connected: "Connected", reconnecting: "Reconnecting", ended: "Call ended", declined: "Call declined", unanswered: "No answer", busy: "Busy", failed: "Call failed" }
+const labels: Record<CallPhase, string> = { idle: "Ready", routing: "Choose a connection", preparing: "Preparing devices", preview: "Ready to connect", incoming: "Incoming call", ringing: "Ringing", connecting: "Connecting", connected: "Connected", reconnecting: "Reconnecting", ended: "Call ended", declined: "Call declined", unanswered: "No answer", busy: "Busy", failed: "Call failed" }
 const terminal = (phase: CallPhase) => ["idle", "ended", "declined", "unanswered", "busy", "failed"].includes(phase)
 
 function durationLabel(started: number | null, now: number) {
@@ -52,14 +52,15 @@ function DeviceControls() {
 }
 
 function CallSettingsDialog() {
-  const { engine, snapshot, settingsOpen, setSettingsOpen, error } = useCalling()
+  const { engine, snapshot, roomSnapshot, settingsOpen, setSettingsOpen, error } = useCalling()
   if (!engine || !snapshot) return null
+  const roomBusy = Boolean(roomSnapshot && !["idle", "ended", "failed"].includes(roomSnapshot.phase))
   return <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
     <DialogContent className="max-h-[90dvh] overflow-y-auto">
       <DialogHeader><DialogTitle>Call privacy and notifications</DialogTitle><DialogDescription>These preferences apply to this identity on this browser.</DialogDescription></DialogHeader>
       <label className="flex min-h-11 cursor-pointer items-start gap-3"><input type="checkbox" className="mt-1 size-5 shrink-0 accent-primary" checked={snapshot.settings.silenceIncoming} onChange={event => engine.updateSettings({ silenceIncoming: event.target.checked })} /><span><span className="block text-sm font-medium">Silence all incoming calls</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">Messaging stays on. Muted and archived conversations also stay silent.</span></span></label>
-      <label className="flex min-h-11 cursor-pointer items-start gap-3 border-t border-border pt-4"><input type="checkbox" className="mt-1 size-5 shrink-0 accent-primary" checked={snapshot.settings.relayOnly} disabled={!terminal(snapshot.phase) && snapshot.phase !== "incoming"} onChange={event => engine.updateSettings({ relayOnly: event.target.checked })} /><span><span className="block text-sm font-medium">Use relay-only connections</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">Keeps your network address from the other participant. If the relay fails, the call stops without switching to a direct connection. Change routing before answering or after ending a call.</span></span></label>
-      {!snapshot.relayAvailable && <p role="status" className="rounded-md border border-border bg-muted p-3 text-sm">A TURN relay is not configured on this server. Relay-only calls cannot connect. You can allow direct connections by turning off relay-only above.</p>}
+      <label className="flex min-h-11 cursor-pointer items-start gap-3 border-t border-border pt-4"><input type="checkbox" className="mt-1 size-5 shrink-0 accent-primary" checked={snapshot.settings.relayOnly} disabled={roomBusy || (!terminal(snapshot.phase) && !["incoming", "routing"].includes(snapshot.phase))} onChange={event => engine.updateSettings({ relayOnly: event.target.checked })} /><span><span className="block text-sm font-medium">Use relay-only connections</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">Keeps your network address from other participants. If the relay fails, the call stops without switching to a direct connection. Change routing before answering or after leaving a call.</span></span></label>
+      {!snapshot.relayAvailable && <p role="status" className="rounded-md border border-border bg-muted p-3 text-sm">A calling relay has not been confirmed available. The site owner may need to enable TURN. Direct connections require your permission and may still fail between some networks.</p>}
       {!snapshot.settings.relayOnly && <p className="text-sm text-muted-foreground">Direct connections can reveal your network address to the other participant. Calls remain encrypted in transit between participants.</p>}
       <div className="space-y-2 border-t border-border pt-4 text-xs leading-5 text-muted-foreground"><p>Both people need Serotine open and running. A closed or suspended browser may miss calls, and switching apps on a phone can interrupt them.</p><p>Serotine does not record calls. The other participant can still record externally. Routing services can see connection timing and metadata.</p></div>
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
@@ -69,7 +70,8 @@ function CallSettingsDialog() {
 }
 
 export function CallingSurface() {
-  const { engine, snapshot, error, clearError, run, setSettingsOpen } = useCalling()
+  const { engine, snapshot, roomSnapshot, error: sharedError, clearError, run, setSettingsOpen } = useCalling()
+  const error = roomSnapshot && roomSnapshot.phase !== "idle" ? null : sharedError
   const [expanded, setExpanded] = useState(false)
   const [now, setNow] = useState(0)
   const [audioBlocked, setAudioBlocked] = useState(false)
@@ -92,7 +94,8 @@ export function CallingSurface() {
   if (!engine || !snapshot) return null
   const hasCall = snapshot.phase !== "idle"
   const finished = terminal(snapshot.phase)
-  const preflight = ["preparing", "preview"].includes(snapshot.phase)
+  const preflight = ["routing", "preparing", "preview"].includes(snapshot.phase)
+  const routing = snapshot.phase === "routing"
   const active = ["connecting", "connected", "reconnecting"].includes(snapshot.phase)
   const duration = durationLabel(snapshot.connectedAt, now)
   const busy = snapshot.phase === "preparing"
@@ -131,16 +134,24 @@ export function CallingSurface() {
 
     <Dialog open={preflight} onOpenChange={open => { if (!open) void run(() => engine.end()) }}>
       <DialogContent className="max-h-[90dvh] overflow-y-auto">
-        <DialogHeader><DialogTitle>{snapshot.direction === "incoming" ? "Answer" : "Call"} {snapshot.peerLabel}</DialogTitle><DialogDescription>Review your devices before connecting. No media is sent until the call is accepted.</DialogDescription></DialogHeader>
-        {busy ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Allow access in your browser to prepare your {snapshot.mode === "video" ? "microphone and camera" : "microphone"}.</p> : <>
+        <DialogHeader><DialogTitle>{snapshot.direction === "incoming" ? "Answer" : "Call"} {snapshot.peerLabel}</DialogTitle><DialogDescription>{routing ? "Choose how to connect before allowing microphone or camera access." : "Review your devices before connecting. No media is sent until the call is accepted."}</DialogDescription></DialogHeader>
+        {routing ? <div className="space-y-3 rounded-md border border-border bg-muted p-4 text-sm">
+          <p>A calling relay helps calls connect between different networks and keeps your network address private from the other participant.</p>
+          {snapshot.relayRequiredByPeer ? <p>Your contact requested relay-only calling. Ask them to start a new call with direct connections allowed, or ask the site owner to enable the relay.</p> : <p>You can allow direct connections for this browser. This may share your network address with the other participant. Some networks will still need a relay.</p>}
+          <p className="text-muted-foreground">Your microphone and camera are off.</p>
+        </div> : busy ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Checking the calling connection and preparing your {snapshot.mode === "video" ? "microphone and camera" : "microphone"}. Allow device access if your browser asks.</p> : <>
           {snapshot.cameraEnabled ? <StreamVideo stream={snapshot.localStream} label="Your camera preview · Only you can see this" mirror /> : <p className="flex min-h-24 items-center justify-center gap-2 rounded-md border border-border bg-muted text-sm text-muted-foreground"><VideoOff className="size-5" />Camera off</p>}
           <DeviceControls />
         </>}
         <p className="flex items-center gap-2 text-xs text-muted-foreground"><Shield className="size-4 shrink-0" />{snapshot.settings.relayOnly ? "Relay-only connection" : "Direct connections allowed · Your network address may be shared"}</p>
+        {!routing && !snapshot.settings.relayOnly && !snapshot.relayAvailable && <p className="text-sm text-muted-foreground">A relay is not available. Direct calling may fail between different networks; the site owner can enable TURN to support these connections.</p>}
         {snapshot.notice && <p role="status" className="text-sm text-muted-foreground">{snapshot.notice}</p>}
         {(error || snapshot.error) && <p role="alert" className="text-sm text-destructive">{error || snapshot.error}</p>}
         <p className="text-xs leading-5 text-muted-foreground">Both people need Serotine open. Keep this page active on a phone to avoid interruptions.</p>
-        <DialogFooter><Button type="button" variant="outline" className="min-h-11" onClick={() => void run(() => engine.end())}>Cancel</Button><Button type="button" className="min-h-11" disabled={busy || snapshot.phase !== "preview"} onClick={() => void run(() => engine.connectPreview())}>{snapshot.mode === "video" ? <Video /> : <Phone />}{snapshot.direction === "incoming" ? "Accept and connect" : "Start call"}</Button></DialogFooter>
+        <DialogFooter><Button type="button" variant="outline" className="min-h-11" onClick={() => void run(() => engine.end())}>Cancel</Button>{routing ? <>
+          <Button type="button" variant="outline" className="min-h-11" onClick={() => void run(() => engine.retryPreparation())}><RotateCw />Retry relay</Button>
+          {!snapshot.relayRequiredByPeer && <Button type="button" className="min-h-11" onClick={() => void run(() => engine.retryPreparation(true))}>Allow direct and continue</Button>}
+        </> : <Button type="button" className="min-h-11" disabled={busy || snapshot.phase !== "preview"} onClick={() => void run(() => engine.connectPreview())}>{snapshot.mode === "video" ? <Video /> : <Phone />}{snapshot.direction === "incoming" ? "Accept and connect" : "Start call"}</Button>}</DialogFooter>
       </DialogContent>
     </Dialog>
 

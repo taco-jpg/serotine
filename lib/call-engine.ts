@@ -1,4 +1,4 @@
-import { createCallTransport } from "./call-transport"
+import { CallTransportError, createCallTransport } from "./call-transport"
 import type { CallSession, CallSignal, CallSignalPayload } from "./call-protocol"
 import { loadContacts, shortAddress } from "./identity"
 import type { CallController, CallEngineOptions, CallMode, CallPhase, CallSettings, CallSnapshot, CompletedCall } from "./call-types"
@@ -15,6 +15,7 @@ export interface CallEngineDependencies {
   prepareTimeoutMs?: number
   connectTimeoutMs?: number
   reconnectTimeoutMs?: number
+  signalRetryDelayMs?: number
 }
 
 const FINAL_PHASES = new Set<CallPhase>(["idle", "ended", "declined", "unanswered", "busy", "failed"])
@@ -65,6 +66,9 @@ export class CallEngine implements CallController {
   private remoteFingerprint: string | null = null
   private reconnectAttempted = false
   private connectingPreview = false
+  private localCandidateCount = 0
+  private remoteCandidateCount = 0
+  private iceServerFailed = false
 
   constructor(private readonly options: CallEngineOptions, private readonly dependencies: CallEngineDependencies = {}) {
     this.transport = dependencies.transport ?? createCallTransport(options.identity)
@@ -75,7 +79,7 @@ export class CallEngine implements CallController {
       microphoneMuted: false, cameraEnabled: false, remoteMicrophoneMuted: false, remoteCameraEnabled: false,
       localStream: null, remoteStream: null, connectedAt: null, error: null, notice: null,
       devices: [], microphoneId: "", cameraId: "", settings: { silenceIncoming: false, relayOnly: true, ...options.settings },
-      relayAvailable: false, supported: Boolean(this.mediaDevices?.getUserMedia && (dependencies.createPeerConnection || typeof RTCPeerConnection !== "undefined")),
+      relayAvailable: false, relayRequiredByPeer: false, supported: Boolean(this.mediaDevices?.getUserMedia && (dependencies.createPeerConnection || typeof RTCPeerConnection !== "undefined")),
     }
     this.snapshot = this.initial
   }
@@ -98,11 +102,11 @@ export class CallEngine implements CallController {
     const peers = this.options.getPeers?.() ?? this.dependencies.contacts?.() ?? loadContacts(this.options.identity.publicKey).map(contact => contact.pub)
     return peers.filter(peer => this.eligible(peer))
   }
-  private timer(milliseconds: number, phase: "unanswered" | "failed", message?: string) {
+  private timer(milliseconds: number, phase: "unanswered" | "failed", message?: string | (() => string)) {
     if (this.deadline) clearTimeout(this.deadline)
     const generation = this.generation
     this.deadline = setTimeout(() => {
-      if (this.live(generation)) void this.finish(phase, message)
+      if (this.live(generation)) void this.finish(phase, typeof message === "function" ? message() : message)
     }, Math.max(0, milliseconds))
   }
 
@@ -129,7 +133,7 @@ export class CallEngine implements CallController {
       const peer = this.snapshot.peer
       if (peer && !FINAL_PHASES.has(this.snapshot.phase)) {
         if (!this.privateCall && this.options.getPeerPolicy(peer).private) { this.privateCall = true; await this.sendMediaState() }
-        const awaitingIncomingConsent = this.snapshot.direction === "incoming" && ["incoming", "preparing", "preview"].includes(this.snapshot.phase)
+        const awaitingIncomingConsent = this.snapshot.direction === "incoming" && ["incoming", "routing", "preparing", "preview"].includes(this.snapshot.phase)
         if (!this.eligible(peer, awaitingIncomingConsent)) await this.finish("ended", "Calling stopped because this contact is no longer available.")
       }
       if (this.now() - this.heartbeatAt >= 8_000 || !this.heartbeatAt) {
@@ -187,14 +191,18 @@ export class CallEngine implements CallController {
     this.remoteFingerprint = null
     this.reconnectAttempted = false
     this.connectingPreview = false
+    this.localCandidateCount = 0
+    this.remoteCandidateCount = 0
+    this.iceServerFailed = false
     this.update({ phase: direction === "incoming" ? "incoming" : "preparing", callId, peer, direction, mode,
       peerLabel: this.options.getPeerPolicy(peer).label || shortAddress(peer), microphoneMuted: false, cameraEnabled: false,
       remoteMicrophoneMuted: false, remoteCameraEnabled: mode === "video", localStream: null, remoteStream: null,
-      connectedAt: null, error: null, notice: null })
+      connectedAt: null, error: null, notice: null, relayRequiredByPeer: false })
   }
 
   async prepareOutgoing(peer: string, mode: CallMode) {
     if (this.disposed || !FINAL_PHASES.has(this.snapshot.phase)) return
+    if (this.options.isBusy?.()) { this.update({ phase: "failed", error: "Leave your current group call or voice channel before starting another call." }); return }
     if (!this.snapshot.supported || !this.eligible(peer)) {
       this.update({ phase: "failed", error: "Calling is available only for accepted contacts in a supported browser over HTTPS." }); return
     }
@@ -207,17 +215,38 @@ export class CallEngine implements CallController {
       if (!capability.available) throw new Error("Calling is unavailable or unconfirmed. Your contact needs Serotine open in a current browser.")
       if (capability.busy) { await this.finish("busy"); return }
       await this.prepareMedia(mode, generation)
-    } catch (error) { if (this.live(generation)) await this.finish("failed", mediaError(error)) }
+    } catch (error) { await this.preparationFailed(error, generation) }
   }
 
   async prepareIncoming(mode: CallMode) {
     if (this.disposed || !["incoming", "preview"].includes(this.snapshot.phase) || this.snapshot.direction !== "incoming" || !this.snapshot.peer) return
     if (!this.eligible(this.snapshot.peer, true)) { await this.decline(); return }
+    if (this.options.isBusy?.()) { await this.finish("busy", "Leave your current group call or voice channel before answering another call."); return }
     if (mode === "video" && this.snapshot.mode !== "video") return
     const generation = this.generation
-    this.update({ phase: "preparing", error: null })
+    this.update({ phase: "preparing", mode, error: null })
     try { await this.prepareMedia(mode, generation) }
-    catch (error) { if (this.live(generation)) await this.finish("failed", mediaError(error)) }
+    catch (error) { await this.preparationFailed(error, generation) }
+  }
+
+  private async preparationFailed(error: unknown, generation: number) {
+    if (!this.live(generation)) return
+    if (error instanceof CallTransportError && error.code === "relay-unavailable") {
+      this.update({ phase: "routing", relayAvailable: false, error: descriptionError(error) })
+    } else await this.finish("failed", mediaError(error))
+  }
+
+  async retryPreparation(allowDirect = false) {
+    if (this.disposed || this.snapshot.phase !== "routing" || !this.snapshot.peer || this.options.isBusy?.()) return
+    if (!this.eligible(this.snapshot.peer, this.snapshot.direction === "incoming")) { await this.finish("ended"); return }
+    if (allowDirect) {
+      if (this.snapshot.relayRequiredByPeer) return
+      this.updateSettings({ relayOnly: false })
+    }
+    const generation = this.generation
+    this.update({ phase: "preparing", error: null })
+    try { await this.prepareMedia(this.snapshot.mode, generation) }
+    catch (error) { await this.preparationFailed(error, generation) }
   }
 
   private async prepareMedia(mode: CallMode, generation: number) {
@@ -225,7 +254,7 @@ export class CallEngine implements CallController {
     const configuration = await this.transport.configuration(requestedPolicy)
     if (!this.live(generation)) return
     this.update({ relayAvailable: configuration.relayAvailable })
-    if (requestedPolicy === "relay" && !configuration.relayAvailable) throw new Error("Relay-only calling needs a configured TURN relay. You can choose direct connections in Call settings; those may expose your network address to your contact.")
+    if (requestedPolicy === "relay" && !configuration.relayAvailable) throw new CallTransportError("Relay-only calling needs a configured TURN relay. You can explicitly allow a direct connection, but some networks require a relay.", "relay-unavailable")
     this.connectionPolicy = requestedPolicy
     this.configuration = { iceServers: configuration.iceServers, iceTransportPolicy: requestedPolicy, bundlePolicy: "max-bundle" }
     const audio = await this.mediaDevices!.getUserMedia({ audio: this.snapshot.microphoneId ? { deviceId: { exact: this.snapshot.microphoneId } } : true, video: false })
@@ -277,7 +306,7 @@ export class CallEngine implements CallController {
         this.update({ phase: "connecting" })
         this.createConnection()
         await this.send({ kind: "accept", mode: wireMode(this.snapshot.mode), private: this.privateCall })
-        if (this.live(generation)) this.timer(this.dependencies.connectTimeoutMs ?? 30_000, "failed", "The call could not connect. Check the connection and try again.")
+        if (this.live(generation)) this.timer(this.dependencies.connectTimeoutMs ?? 30_000, "failed", () => this.connectionFailure())
       }
     } catch (error) { if (this.live(generation)) await this.finish(/busy|claimed|another/i.test(descriptionError(error)) ? "busy" : "failed", descriptionError(error)) }
     finally { this.connectingPreview = false }
@@ -294,7 +323,7 @@ export class CallEngine implements CallController {
     if (this.seen.size > 2_000) this.seen.delete(this.seen.values().next().value!)
     const payload = signal.payload
     if (payload.kind === "invite") {
-      if (!this.eligible(signal.sender, true)) return
+      if (!this.eligible(signal.sender, true) || this.options.isBusy?.()) return
       const session = this.sessions.get(signal.callId)
       if (!session || session.status !== "ringing" || session.caller !== signal.sender || session.recipient !== this.options.identity.publicKey
         || session.callerSession !== signal.senderSession || session.inviteExpiresAt <= this.now()) return
@@ -305,6 +334,7 @@ export class CallEngine implements CallController {
       this.reset(signal.sender, uiMode(payload.mode), "incoming", signal.callId)
       this.privateCall ||= Boolean(payload.private) || session.noHistory
       this.connectionPolicy = payload.policy
+      this.update({ relayRequiredByPeer: payload.policy === "relay" })
       this.peerSession = signal.senderSession
       this.published = true
       this.session = session
@@ -322,7 +352,7 @@ export class CallEngine implements CallController {
       this.accepted = true
       this.update({ phase: "connecting", remoteCameraEnabled: payload.mode === "video" })
       this.createConnection()
-      this.timer(this.dependencies.connectTimeoutMs ?? 30_000, "failed", "The call could not connect. Check the connection and try again.")
+      this.timer(this.dependencies.connectTimeoutMs ?? 30_000, "failed", () => this.connectionFailure())
       await this.offer()
       return
     }
@@ -341,8 +371,11 @@ export class CallEngine implements CallController {
           if (this.live(generation)) await this.send({ kind: "answer", description: { type: "answer", sdp: pc.localDescription!.sdp } })
         }
       } else if (payload.kind === "ice") {
+        this.remoteCandidateCount++
         if (this.pc.remoteDescription) await this.pc.addIceCandidate(payload.candidate)
         else if (this.pendingIce.length < 128) this.pendingIce.push(payload.candidate)
+      } else if (payload.kind === "restart") {
+        if (this.snapshot.direction === "outgoing") this.beginReconnect()
       } else if (payload.kind === "media-state") {
         this.privateCall ||= Boolean(payload.private)
         this.update({ remoteMicrophoneMuted: payload.muted, remoteCameraEnabled: payload.camera })
@@ -369,8 +402,12 @@ export class CallEngine implements CallController {
     // Reserve video up front; explicit camera toggles can replace the track without renegotiating.
     this.videoSender = pc.addTransceiver(stream.getVideoTracks()[0] ?? "video", { direction: "sendrecv", streams: [stream] }).sender
     pc.onicecandidate = event => {
-      if (event.candidate && this.live(generation)) void this.send({ kind: "ice", candidate: event.candidate.toJSON() }).catch(() => {})
+      if (event.candidate && this.live(generation)) {
+        this.localCandidateCount++
+        void this.sendCandidate(event.candidate.toJSON(), generation)
+      }
     }
+    pc.onicecandidateerror = () => { if (this.live(generation)) this.iceServerFailed = true }
     pc.ontrack = event => {
       if (!this.live(generation)) { event.track.stop(); return }
       const remote = this.snapshot.remoteStream ?? this.newStream()
@@ -389,6 +426,30 @@ export class CallEngine implements CallController {
     }
   }
 
+  private connectionFailure() {
+    if (this.connectionPolicy === "relay") return this.iceServerFailed || !this.localCandidateCount
+      ? "The calling relay could not be reached. Try another network, or ask the site owner to check the TURN relay. Your network address was not shared directly."
+      : "The relay connection could not reach your contact. Keep both pages open and try again; the site owner may need to check the TURN relay."
+    if (!this.snapshot.relayAvailable) return "A direct connection could not be established between these networks. Try another network, or ask the site owner to enable a TURN relay for reliable calling."
+    if (!this.localCandidateCount || !this.remoteCandidateCount) return "The browser could not exchange a usable calling connection. Keep both pages open, check network access, and retry."
+    return "The call could not connect through this network. Try another network or retry with relay-only enabled in Call settings."
+  }
+
+  private async sendCandidate(candidate: RTCIceCandidateInit, generation: number) {
+    // A temporary signaling failure must not permanently lose the only route.
+    // Bound retries to this call; never send a stale candidate to a later peer.
+    for (let attempt = 0; attempt < 3 && this.live(generation); attempt++) {
+      try { await this.send({ kind: "ice", candidate }); return }
+      catch {
+        if (attempt === 2) {
+          if (this.live(generation)) this.update({ notice: "Connection details could not be sent. Check your connection while Serotine retries the call." })
+          return
+        }
+        await new Promise(resolve => setTimeout(resolve, (this.dependencies.signalRetryDelayMs ?? 400) * (attempt + 1)))
+      }
+    }
+  }
+
   private async offer(restart = false) {
     const pc = this.pc
     const generation = this.generation
@@ -403,7 +464,7 @@ export class CallEngine implements CallController {
     if (this.reconnectAttempted) { void this.finish("failed", "The connection was interrupted again. Ended the call; you can try a new call."); return }
     this.reconnectAttempted = true
     this.update({ phase: "reconnecting" })
-    this.timer(this.dependencies.reconnectTimeoutMs ?? 15_000, "failed", "The connection was lost. Try a new call when your connection is stable.")
+    this.timer(this.dependencies.reconnectTimeoutMs ?? 15_000, "failed", () => this.connectionFailure())
     void this.refreshConnection()
   }
   private async refreshConnection() {
@@ -419,6 +480,7 @@ export class CallEngine implements CallController {
       this.configuration = { ...this.configuration, iceServers: configuration.iceServers }
       pc.setConfiguration(this.configuration)
       if (this.snapshot.direction === "outgoing") await this.offer(true)
+      else await this.send({ kind: "restart" })
     } catch (error) { if (this.live(generation)) await this.finish("failed", descriptionError(error)) }
   }
 
@@ -533,7 +595,7 @@ export class CallEngine implements CallController {
     this.update({ settings: next })
     this.options.onSettingsChange?.(next)
     this.heartbeatAt = 0
-    if (next.silenceIncoming && this.snapshot.direction === "incoming" && ["incoming", "preparing", "preview"].includes(this.snapshot.phase)) void this.decline()
+    if (next.silenceIncoming && this.snapshot.direction === "incoming" && ["incoming", "routing", "preparing", "preview"].includes(this.snapshot.phase)) void this.decline()
     if (next.relayOnly && this.connectionPolicy === "all" && !FINAL_PHASES.has(this.snapshot.phase)) void this.finish("ended", "Start a new call to use relay-only connections.")
   }
   async decline() { await this.finish("declined") }
@@ -588,7 +650,7 @@ export class CallEngine implements CallController {
     this.deadline = null
     const pc = this.pc
     this.pc = null
-    if (pc) { pc.onicecandidate = null; pc.ontrack = null; pc.onconnectionstatechange = null; pc.close() }
+    if (pc) { pc.onicecandidate = null; pc.onicecandidateerror = null; pc.ontrack = null; pc.onconnectionstatechange = null; pc.close() }
     stopStream(this.snapshot.localStream)
     stopStream(this.snapshot.remoteStream)
     this.audioSender = null

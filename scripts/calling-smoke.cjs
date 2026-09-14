@@ -141,6 +141,26 @@ async function main() {
     await released(a)
     console.log('PASS explicit audio preview, no recipient capture before acceptance, and cross-tab cancellation')
 
+    // Publish a signed relay-only invitation without making a media connection.
+    // The recipient must never override the sender's routing requirement.
+    await a.evaluate(async peer => {
+      window.calls.dismiss()
+      await window.calls.prepareOutgoing(peer, 'audio')
+      window.calls.connectionPolicy = 'relay'
+      await window.calls.connectPreview()
+    }, bob.publicKey)
+    await phase(b, 'incoming')
+    await b.evaluate(() => window.calls.prepareIncoming('audio'))
+    await phase(b, 'routing')
+    assert.equal(await b.evaluate(() => window.calls.getSnapshot().relayRequiredByPeer), true)
+    await b.evaluate(() => window.calls.retryPreparation(true))
+    assert.equal((await state(b)).phase, 'routing', 'Relay requirement cannot be bypassed by direct consent on recipient')
+    assert.equal((await state(b)).captureRequests, 0)
+    await a.evaluate(() => window.calls.end())
+    await phase(b, 'ended')
+    await released(a)
+    console.log('PASS authenticated relay-only invitation refuses recipient direct fallback before capture')
+
     // A video invitation can be accepted with audio only. Actual RTC stats
     // prove media packets cross the browser connection after acceptance.
     await start(a, bob.publicKey, 'video')
@@ -218,24 +238,27 @@ async function main() {
       await page.getByRole('menuitem', { name: 'Voice call', exact: true }).click()
     }
     await openVoice(uiA)
-    await uiA.getByRole('alert').filter({ hasText: /relay.only.*not configured/i }).first().waitFor()
+    const routing = uiA.getByRole('dialog', { name: /Call Bob/ })
+    await routing.getByRole('alert').filter({ hasText: /relay.*not configured/i }).waitFor()
     assert.equal(await uiA.evaluate(() => window.uiCaptureCount), 0, 'Missing relay fails before requesting devices')
     assert.equal(await uiB.evaluate(() => window.uiCaptureCount), 0)
-    for (const page of uiPages) {
-      await page.getByRole('button', { name: 'Voice and video call options', exact: true }).click()
-      await page.getByRole('menuitem', { name: 'Call privacy and notifications', exact: true }).click()
-      const settings = page.getByRole('dialog', { name: 'Call privacy and notifications', exact: true })
-      await settings.getByRole('checkbox', { name: /Use relay-only connections/ }).uncheck()
-      await settings.getByRole('button', { name: 'Done', exact: true }).click()
-    }
-    await openVoice(uiA)
+    assert.equal(await uiA.getByRole('dialog').count(), 1, 'Only one preflight dialog is visible')
+    await routing.getByRole('button', { name: 'Retry relay', exact: true }).click()
+    await routing.getByRole('alert').filter({ hasText: /relay.*not configured/i }).waitFor()
+    assert.equal(await uiA.evaluate(() => window.uiCaptureCount), 0, 'Retry does not implicitly choose direct or capture')
+    await routing.getByRole('button', { name: 'Allow direct and continue', exact: true }).click()
     const preview = uiA.getByRole('dialog', { name: /Call Bob/ })
     await preview.getByRole('button', { name: 'Turn camera on', exact: true }).waitFor()
     assert.equal(await uiB.evaluate(() => window.uiCaptureCount), 0)
     await preview.getByRole('button', { name: 'Start call', exact: true }).click()
     const remoteBar = uiB.getByRole('region', { name: 'Current call', exact: true })
     await remoteBar.getByRole('button', { name: 'Answer', exact: true }).click()
-    await uiB.getByRole('dialog', { name: /Answer Alice/ }).getByRole('button', { name: 'Accept and connect', exact: true }).click()
+    const answerPreview = uiB.getByRole('dialog', { name: /Answer Alice/ })
+    await answerPreview.getByRole('button', { name: 'Allow direct and continue', exact: true }).waitFor()
+    assert.equal(await uiB.evaluate(() => window.uiCaptureCount), 0, 'Recipient reviews routing before capture')
+    assert.equal(await uiB.getByRole('dialog').count(), 1, 'Incoming routing uses one dialog')
+    await answerPreview.getByRole('button', { name: 'Allow direct and continue', exact: true }).click()
+    await answerPreview.getByRole('button', { name: 'Accept and connect', exact: true }).click()
     for (const page of uiPages) await page.getByRole('region', { name: 'Current call', exact: true }).getByRole('status').filter({ hasText: signalingOnly ? /^(Connecting|Connected)/ : /^Connected/ }).waitFor()
     const screenshotOptions = { animations: 'disabled', style: 'nextjs-portal { display: none; }' }
     const verifyLayout = async (page, label) => {

@@ -57,6 +57,10 @@ function harness(t) {
       return require(specifier)
     }
     const localFetch = async (url, init) => {
+      if (url.startsWith('https://rtc.live.cloudflare.com/')) {
+        if (!state.turnFetch) throw new Error('Unexpected TURN request')
+        return state.turnFetch(url, init)
+      }
       requests.push(JSON.parse(init.body))
       assert.equal(url, '/api/calls')
       assert.equal(init.mode, 'same-origin')
@@ -268,4 +272,68 @@ test('failed invitation signal releases both reservations and repeated invites a
     await alice.transport.finish(session.callId, 'cancelled')
   }
   await assert.rejects(alice.transport.invite(bob.publicKey, crypto.randomUUID(), invite), /Too many/)
+})
+
+test('Cloudflare TURN returns only short-lived validated relay credentials with UDP and TLS routes', async t => {
+  const h = harness(t)
+  const alice = await h.identity()
+  h.env.CALL_TURN_KEY_ID = 'test-turn-key-id'
+  h.env.CALL_TURN_API_TOKEN = 'server-only-turn-api-token'
+  let requests = 0
+  h.state.turnFetch = async (url, init) => {
+    requests++
+    assert.equal(url, 'https://rtc.live.cloudflare.com/v1/turn/keys/test-turn-key-id/credentials/generate-ice-servers')
+    assert.equal(init.method, 'POST')
+    assert.equal(init.redirect, 'error')
+    assert.equal(init.headers.Authorization, 'Bearer server-only-turn-api-token')
+    assert.deepEqual(JSON.parse(init.body), { ttl: 600 })
+    assert.ok(init.signal instanceof AbortSignal)
+    return Response.json({ iceServers: [
+      { urls: ['stun:stun.cloudflare.com:3478'] },
+      { urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turns:turn.cloudflare.com:443?transport=tcp', 'turn:turn.cloudflare.com:53?transport=udp'], username: 'short-lived-user', credential: 'short-lived-password' },
+    ] }, { status: 201 })
+  }
+  const relay = await alice.transport.configuration('relay')
+  assert.equal(requests, 1)
+  assert.equal(relay.relayAvailable, true)
+  assert.equal(relay.expiresAt - h.state.now, 600000)
+  assert.deepEqual(relay.iceServers, [{ urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turns:turn.cloudflare.com:443?transport=tcp'], username: 'short-lived-user', credential: 'short-lived-password' }])
+  assert.equal(JSON.stringify(relay).includes(h.env.CALL_TURN_API_TOKEN), false)
+  assert.equal(JSON.stringify(relay).includes(h.env.CALL_TURN_KEY_ID), false)
+})
+
+test('Cloudflare failure preserves relay-only privacy and does not expose provider errors', async t => {
+  const h = harness(t)
+  const alice = await h.identity()
+  h.env.CALL_TURN_KEY_ID = 'test-turn-key-id'
+  h.env.CALL_TURN_API_TOKEN = 'server-only-turn-api-token'
+  h.state.turnFetch = async () => Response.json({ error: 'private provider error server-only-turn-api-token' }, { status: 401 })
+  await assert.rejects(alice.transport.configuration('relay'), error => {
+    assert.equal(error.code, 'relay-unavailable')
+    assert.match(error.message, /site owner.*TURN/)
+    assert.equal(error.message.includes('server-only-turn-api-token'), false)
+    return true
+  })
+  const direct = await alice.transport.configuration('all')
+  assert.equal(direct.relayAvailable, false)
+  assert.ok(direct.iceServers.every(server => server.urls.every(url => url.startsWith('stun:'))))
+})
+
+test('malformed Cloudflare TURN responses cannot become browser ICE configuration', async t => {
+  const h = harness(t)
+  const alice = await h.identity()
+  h.env.CALL_TURN_KEY_ID = 'test-turn-key-id'
+  h.env.CALL_TURN_API_TOKEN = 'server-only-turn-api-token'
+  for (const response of [
+    { iceServers: [{ urls: ['https://attacker.example'], username: 'user', credential: 'password' }] },
+    { iceServers: [{ urls: ['turn:turn.cloudflare.com:3478'], username: 'user' }] },
+    { iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }] },
+    { iceServers: [{ urls: ['turn:turn.cloudflare.com:3478'], username: 'user', credential: 'password' }, { urls: ['https://attacker.example'] }] },
+  ]) {
+    h.state.turnFetch = async () => Response.json(response)
+    await assert.rejects(alice.transport.configuration('relay'), error => error.code === 'relay-unavailable')
+    const direct = await alice.transport.configuration('all')
+    assert.equal(direct.relayAvailable, false)
+    assert.ok(direct.iceServers.every(server => server.urls.every(url => url.startsWith('stun:'))))
+  }
 })

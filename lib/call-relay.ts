@@ -1,6 +1,8 @@
 import { getCloudflareContext } from "@opennextjs/cloudflare"
 import { getDB, type D1DatabaseBinding } from "./db"
 import { ensureCallRelaySchema } from "./call-relay-schema"
+import { ensureCallRoomSchema } from "./call-room-schema"
+import { handleCallRoomRequest } from "./call-room-relay"
 import { ensureIdentityRetirementSchema } from "./identity-retirement-schema"
 import { requestProofFailureMessage, verifyRequestProofResult } from "./request-auth"
 import { AUTH_WINDOW_MS, type RequestProof } from "./protocol"
@@ -12,7 +14,7 @@ import { CALL_INVITE_TTL_MS, CALL_LEASE_TTL_MS, CALL_PAGE_SIZE, CALL_PRESENCE_TT
 const COLUMNS = "callId, caller, recipient, callerSession, recipientSession, status, createdAt, inviteExpiresAt, expiresAt, reason, noHistory"
 const TERMINAL_TTL_MS = 120_000
 export class CallRelayError extends Error {
-  constructor(message: string, public status = 400) { super(message) }
+  constructor(message: string, public status = 400, public code?: "relay-unavailable") { super(message) }
 }
 const invalid = () => new CallRelayError("Invalid calling request. Reload Serotine and retry.")
 function shape(data: Record<string, unknown>, required: string[]) {
@@ -20,7 +22,7 @@ function shape(data: Record<string, unknown>, required: string[]) {
 }
 function sessionId(data: Record<string, unknown>) { if (!isCallId(data.sessionId)) throw invalid(); return data.sessionId }
 
-async function authorize(action: string, data: unknown, proof: RequestProof) {
+export async function authorize(action: string, data: unknown, proof: RequestProof) {
   const verification = await verifyRequestProofResult(action, data, proof)
   if (!verification.valid) throw new CallRelayError(requestProofFailureMessage(verification), 401)
   const db = await getDB()
@@ -38,6 +40,7 @@ async function authorize(action: string, data: unknown, proof: RequestProof) {
   const limit = action === "call:invite" ? 6 : action === "call:configuration" ? 30 : 600
   if ((count?.count ?? 0) > limit) throw new CallRelayError("Too many calling requests. Wait a minute and retry.", 429)
   await ensureCallRelaySchema(db)
+  await ensureCallRoomSchema(db)
   await cleanup(db, now)
   return db
 }
@@ -69,19 +72,53 @@ async function touch(db: D1DatabaseBinding, publicKey: string, device: string, n
 
 async function configuration(policy: "all" | "relay", device: string): Promise<CallConfiguration> {
   const { env } = await getCloudflareContext({ async: true })
-  const config = env as unknown as { CALL_TURN_URLS?: string; CALL_TURN_SECRET?: string; CALL_STUN_URLS?: string }
+  const config = env as unknown as { CALL_TURN_URLS?: string; CALL_TURN_SECRET?: string; CALL_STUN_URLS?: string; CALL_TURN_KEY_ID?: string; CALL_TURN_API_TOKEN?: string }
   const urls = (config.CALL_TURN_URLS ?? "").split(",").map(url => url.trim()).filter(url => /^turns?:[^\s@]+$/.test(url)).slice(0, 8)
-  const relayAvailable = urls.length > 0 && typeof config.CALL_TURN_SECRET === "string" && config.CALL_TURN_SECRET.length >= 24
-  if (policy === "relay" && !relayAvailable) throw new CallRelayError("Relay-only calling is not configured on this server. Choose Direct connection explicitly or ask the site owner to enable TURN.", 409)
+  const coturnAvailable = urls.length > 0 && typeof config.CALL_TURN_SECRET === "string" && config.CALL_TURN_SECRET.length >= 24
+  const cloudflareAvailable = typeof config.CALL_TURN_KEY_ID === "string" && /^[a-zA-Z0-9_-]{8,128}$/.test(config.CALL_TURN_KEY_ID)
+    && typeof config.CALL_TURN_API_TOKEN === "string" && config.CALL_TURN_API_TOKEN.length >= 16
+  let relayAvailable = coturnAvailable || cloudflareAvailable
+  if (policy === "relay" && !relayAvailable) throw new CallRelayError("Relay calling is not configured on this server. The site owner needs to enable a TURN relay. You can explicitly allow a direct connection, but some networks require a relay.", 409, "relay-unavailable")
   const iceServers: RTCIceServer[] = []
   const expiresAt = Date.now() + 10 * 60_000
-  if (relayAvailable) {
+  if (coturnAvailable) {
     // coturn REST authentication: ten-minute HMAC credentials; no reusable secret
     // or participant public key is sent to the browser or placed in the username.
     const username = `${Math.floor(expiresAt / 1000)}:${device}`
     const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(config.CALL_TURN_SECRET!), { name: "HMAC", hash: "SHA-1" }, false, ["sign"])
     const credential = arrayBufferToBase64(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(username)))
     iceServers.push({ urls, username, credential })
+  } else if (cloudflareAvailable) {
+    // Cloudflare's long-lived TURN key only authorizes this server-side request.
+    // Return validated ten-minute client credentials, never the API token/body.
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 8_000)
+    try {
+      const response = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${config.CALL_TURN_KEY_ID}/credentials/generate-ice-servers`, {
+        method: "POST", redirect: "error", cache: "no-store", signal: controller.signal,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.CALL_TURN_API_TOKEN}` },
+        body: JSON.stringify({ ttl: 600 }),
+      })
+      if (!response.ok) throw new Error("TURN credential request failed")
+      const body: unknown = await response.json()
+      if (!isCallObject(body) || !Array.isArray(body.iceServers) || body.iceServers.length > 8) throw new Error("Invalid TURN response")
+      for (const server of body.iceServers) {
+        if (!isCallObject(server) || !Array.isArray(server.urls) || server.urls.length > 8
+          || !server.urls.every(url => typeof url === "string" && /^(stun|turn)s?:[^\s@]+$/.test(url))) throw new Error("Invalid TURN response")
+        const turnUrls = (server.urls as string[]).filter(url => /^turns?:/.test(url) && !/:53(?:\?|$)/.test(url))
+        if (!turnUrls.length) continue
+        if (typeof server.username !== "string" || !server.username || server.username.length > 512
+          || typeof server.credential !== "string" || !server.credential || server.credential.length > 512) throw new Error("Invalid TURN response")
+        iceServers.push({ urls: turnUrls, username: server.username, credential: server.credential })
+      }
+      if (!iceServers.length) throw new Error("No TURN servers returned")
+    } catch {
+      if (policy === "relay") throw new CallRelayError("The calling relay could not issue connection credentials. Retry, or ask the site owner to check the TURN service configuration.", 409, "relay-unavailable")
+      // The user already explicitly allowed direct routing. Never return a
+      // partially validated provider response alongside that direct route.
+      relayAvailable = false
+      iceServers.length = 0
+    } finally { clearTimeout(timeout) }
   }
   if (policy === "all") {
     const stun = (config.CALL_STUN_URLS ?? "stun:stun.l.google.com:19302").split(",").map(url => url.trim()).filter(url => /^stuns?:[^\s@]+$/.test(url)).slice(0, 4)
@@ -92,6 +129,7 @@ async function configuration(policy: "all" | "relay", device: string): Promise<C
 
 /** All writes are fresh identity proofs. Negotiation remains encrypted at rest. */
 export async function handleCallRequest(action: string, data: unknown, proof: RequestProof): Promise<Record<string, unknown>> {
+  if (action.startsWith("room:")) return handleCallRoomRequest(action, data, proof)
   if (!isCallObject(data) || !["call:heartbeat", "call:capability", "call:invite", "call:claim", "call:send", "call:poll", "call:finish", "call:configuration"].includes(action)) throw invalid()
   const device = sessionId(data)
   const db = await authorize(action, data, proof)
@@ -121,7 +159,7 @@ export async function handleCallRequest(action: string, data: unknown, proof: Re
     const available = !!await db.prepare(`SELECT 1 FROM CallPresence p WHERE publicKey = ? AND expiresAt > ?
       AND EXISTS(SELECT 1 FROM json_each(p.incomingPeers) WHERE value = ?)
       AND NOT EXISTS(SELECT 1 FROM RetiredIdentity WHERE publicKey = ?) LIMIT 1`).bind(data.peer, now, self, data.peer).first()
-    const busy = available && !!await db.prepare("SELECT 1 FROM CallSession WHERE (caller = ? OR recipient = ?) AND status != 'ended' AND expiresAt > ? LIMIT 1").bind(data.peer, data.peer, now).first()
+    const busy = available && !!await db.prepare("SELECT 1 FROM CallSession WHERE (caller = ? OR recipient = ?) AND status != 'ended' AND expiresAt > ? UNION ALL SELECT 1 FROM CallRoomMember WHERE publicKey = ? AND expiresAt > ? LIMIT 1").bind(data.peer, data.peer, now, data.peer, now).first()
     return { success: true, available, busy }
   }
   if (action === "call:invite") {
@@ -136,11 +174,12 @@ export async function handleCallRequest(action: string, data: unknown, proof: Re
       createdAt, inviteExpiresAt, expiresAt, callerAliveUntil, recipientAliveUntil, reason, noHistory)
       SELECT ?, ?, ?, ?, NULL, 'ringing', ?, ?, ?, ?, ?, NULL, ?
       WHERE NOT EXISTS(SELECT 1 FROM CallSession WHERE status != 'ended' AND expiresAt > ? AND (caller IN (?, ?) OR recipient IN (?, ?)))
+        AND NOT EXISTS(SELECT 1 FROM CallRoomMember WHERE expiresAt > ? AND publicKey IN (?, ?))
         AND NOT EXISTS(SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?))
         AND EXISTS(SELECT 1 FROM CallPresence p WHERE publicKey = ? AND expiresAt > ? AND EXISTS(SELECT 1 FROM json_each(p.incomingPeers) WHERE value = ?))
         AND EXISTS(SELECT 1 FROM CallPresence p WHERE publicKey = ? AND sessionId = ? AND expiresAt > ? AND EXISTS(SELECT 1 FROM json_each(p.peers) WHERE value = ?))
       ON CONFLICT(callId) DO NOTHING`).bind(signal.callId, self, signal.recipient, device, now, signal.expiresAt, signal.expiresAt,
-      signal.expiresAt, signal.expiresAt, Number(data.noHistory), now, self, signal.recipient, self, signal.recipient, self, signal.recipient,
+      signal.expiresAt, signal.expiresAt, Number(data.noHistory), now, self, signal.recipient, self, signal.recipient, now, self, signal.recipient, self, signal.recipient,
       signal.recipient, now, self, self, device, now, signal.recipient).run()
     if (inserted.meta.changes !== 1) throw new CallRelayError("Calling is unavailable, or one participant is already in a call. Both people need Serotine open with calling allowed.", 409)
     try { await insertSignal(db, signal, now, true) }

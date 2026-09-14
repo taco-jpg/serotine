@@ -76,6 +76,42 @@ test('two tabs serialize owner updates without losing either change', async () =
   assert.equal(locks.at(-1), `serotine:community:${alice.publicKey}:${id}`)
 })
 
+test('owners create signed voice channels without changing legacy channel kinds and prevent text sends', async () => {
+  const h = harness(), { owner, id, clients: [member] } = await established(h)
+  const legacyChannels = structuredClone(owner.service.model.communities[0].channels)
+  const voice = { id: crypto.randomUUID(), name: '  lounge  ', posting: 'members', kind: 'voice' }
+  await owner.service.updateCommunity(id, { channels: [...legacyChannels, voice] })
+  const current = owner.service.model.communities[0]
+  assert.deepEqual(current.channels.slice(0, legacyChannels.length), legacyChannels)
+  assert.deepEqual(current.channels.at(-1), { ...voice, name: 'lounge' })
+  assert.equal(await protocol.validateCommunityState(protocol.communityStateSnapshot(current)), true)
+  assert.equal(member.service.model.communities[0].channels.at(-1).kind, 'voice')
+  assert.equal(protocol.canJoinCommunityVoiceChannel(current, bob.publicKey, voice.id), true)
+  await assert.rejects(member.service.sendMessage(id, voice.id, 'This must stay unsent'), /text channel/)
+  assert.equal(h.sent.some(event => event.payload.community.type === 'message'), false)
+})
+
+test('co-owner voice channel settings retain kind through command validation and owner reconciliation', async () => {
+  const h = harness(), { owner, id, clients: [member] } = await established(h)
+  await owner.service.setCoOwner(id, bob.publicKey, true)
+  const prior = member.service.model.communities[0]
+  const voice = { id: crypto.randomUUID(), name: 'staff-room', posting: 'moderators', kind: 'voice' }
+  await member.service.updateCommunity(id, { channels: [...prior.channels, voice] })
+  const command = h.sent.findLast(event => event.payload.community.type === 'command')
+  assert.equal(command.payload.community.changes.channels.at(-1).kind, 'voice')
+  assert.equal(await protocol.validateCommunityEvent(command), true)
+  assert.equal(owner.service.model.communities[0].channels.some(channel => channel.id === voice.id), false)
+  await owner.service.reconcile()
+  const current = owner.service.model.communities[0]
+  assert.deepEqual(current.channels.at(-1), voice)
+  assert.equal(await protocol.validateCommunityState(protocol.communityStateSnapshot(current)), true)
+  assert.equal(protocol.canJoinCommunityVoiceChannel(current, bob.publicKey, voice.id), true)
+  assert.equal(protocol.canJoinCommunityVoiceChannel(current, charlie.publicKey, voice.id), false)
+  const malformed = structuredClone(command)
+  malformed.payload.community.changes.channels.at(-1).kind = 'video'
+  assert.equal(await protocol.validateCommunityEvent(malformed), false)
+})
+
 test('membership changes arriving during signing cancel the prepared message', async () => {
   const h = harness(), { owner, id, clients: [member] } = await established(h)
   const channel = member.service.model.communities[0].channels[0].id

@@ -5,6 +5,7 @@ import { ArrowDown, AtSign, BarChart3, Bell, Check, CheckCheck, ChevronDown, Che
 import { type CommunityContextValue } from "@/components/messaging-provider"
 import { AttachmentComposer, type AttachmentComposerHandle, type AttachmentComposerState } from "@/components/chat/attachment-composer"
 import { AttachmentView } from "@/components/chat/attachment-view"
+import { VoiceChannelPanel } from "@/components/calling/voice-channel-panel"
 import { EditMessageDialog, PollCard, PollCreator } from "@/components/chat/conversation-controls"
 import { RichMessage } from "@/components/chat/rich-message"
 import { MessageFormattingPreview, MessageFormattingTools } from "@/components/chat/message-formatting"
@@ -19,7 +20,7 @@ import { useChatDraft } from "@/hooks/use-chat-draft"
 import { useMentionDraft } from "@/hooks/use-mention-draft"
 import { useLocalNickname } from "@/hooks/use-local-nickname"
 import { attachmentFileLimit, sendAttachment } from "@/lib/attachments"
-import { canPostToCommunityChannel, communityChannelKey, isCommunityModerator } from "@/lib/community-protocol"
+import { canJoinCommunityVoiceChannel, canPostToCommunityChannel, communityChannelKey, isCommunityModerator } from "@/lib/community-protocol"
 import { findMentionQuery, insertMention, serializeMentionDraft, updateMentionSpans, validMentionSpans, type MentionQuery } from "@/lib/composer-mentions"
 import { formatMentionText } from "@/lib/mention-display"
 import { shortAddress } from "@/lib/identity"
@@ -31,11 +32,30 @@ const failure = (cause: unknown) => cause instanceof Error ? cause.message : "Th
 const summary = (message: CommunityMessage) => message.hidden ? "Message hidden by a moderator." : message.content || message.poll?.question || message.attachment?.name || "Message"
 const detailTabs = [["settings", "Settings"], ["files", "Files"], ["links", "Links"], ["pins", "Pinned"]] as const
 
-/** The hub keys this component by identity and channel so pending UI never leaks across channels. */
-export function CommunityConversation({ api, community, channel, onReport, onHide }: {
+type CommunityConversationProps = {
   api: CommunityContextValue; community: CommunityRecord; channel: CommunityChannel
   onReport: (message: CommunityMessage) => void; onHide: (message: CommunityMessage) => void
-}) {
+}
+
+/** Text drafts and read receipts never mount for live voice channels. */
+export function CommunityConversation(props: CommunityConversationProps) {
+  const { api, community, channel } = props
+  if (channel.kind === "voice") {
+    const address = api.identity?.publicKey || ""
+    const membershipPending = community.members.length !== community.effectiveMembers.length
+    const eligible = canJoinCommunityVoiceChannel(community, address, channel.id)
+    const restriction = !community.joined || community.deleted || !community.effectiveMembers.includes(address)
+      ? "You must be a current community member to join this voice channel."
+      : membershipPending ? "Membership is updating. You can join when the owner confirms the change."
+      : !eligible ? "Only community owners and moderators can join this voice channel."
+      : !api.ready ? "Loading community membership…" : undefined
+    return <VoiceChannelPanel community={community} channel={channel} disabled={!api.ready || membershipPending || !community.joined || !eligible} restriction={restriction} />
+  }
+  return <CommunityTextConversation {...props} />
+}
+
+/** The hub keys this component by identity and channel so pending UI never leaks across channels. */
+function CommunityTextConversation({ api, community, channel, onReport, onHide }: CommunityConversationProps) {
   const myPub = api.identity?.publicKey || ""
   const key = communityChannelKey(community.id, channel.id)
   const nickname = useLocalNickname(myPub)

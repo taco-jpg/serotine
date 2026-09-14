@@ -9,8 +9,9 @@ const engineSource = ts.transpileModule(fs.readFileSync(path.join(root, 'lib/cal
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 const moduleValue = { exports: {} }
+class CallTransportError extends Error { constructor(message, code) { super(message); this.code = code } }
 new Function('require', 'module', 'exports', engineSource)(name => {
-  if (name === './call-transport') return { createCallTransport() { throw new Error('Test requires explicit transport') } }
+  if (name === './call-transport') return { CallTransportError, createCallTransport() { throw new Error('Test requires explicit transport') } }
   if (name === './identity') return { loadContacts: () => [], shortAddress: value => value.slice(0, 8) }
   throw new Error(`Unexpected runtime import: ${name}`)
 }, moduleValue, moduleValue.exports)
@@ -69,7 +70,7 @@ function fixture(t, options = {}) {
     async enumerateDevices() { return [{ kind: 'audioinput', deviceId: 'mic', label: 'Microphone' }, { kind: 'videoinput', deviceId: 'camera', label: 'Camera' }] },
     ...options.mediaDevices,
   }
-  const engine = new CallEngine({ identity: { version: 2, publicKey: OWNER, privateKey: {} }, getPeerPolicy: () => policy, getPeers: () => [PEER],
+  const engine = new CallEngine({ identity: { version: 2, publicKey: OWNER, privateKey: {} }, getPeerPolicy: () => policy, getPeers: () => [PEER], isBusy: options.isBusy,
     settings: { relayOnly: false, ...options.settings }, onCompleted: record => history.push(record) }, {
     transport, mediaDevices, createMediaStream: tracks => new Stream(tracks), createPeerConnection: configuration => { const pc = new PeerConnection(configuration); pcs.push(pc); return pc },
     pollIntervalMs: 1_000_000, ...options.dependencies,
@@ -219,7 +220,7 @@ test('cancelling while invite request is in flight releases capture and cancels 
 test('relay-only preflight fails without a relay, without obtaining any microphone or camera', async t => {
   const f = fixture(t, { relayAvailable: false, settings: { relayOnly: true } })
   await f.engine.prepareOutgoing(PEER, 'video')
-  assert.equal(f.engine.getSnapshot().phase, 'failed'); assert.match(f.engine.getSnapshot().error, /TURN relay/)
+  assert.equal(f.engine.getSnapshot().phase, 'routing'); assert.match(f.engine.getSnapshot().error, /TURN relay/)
   assert.equal(f.captures.length, 0); assert.equal(f.pcs.length, 0)
 })
 
@@ -313,4 +314,114 @@ test('ending while replaceTrack is pending immediately stops the pending capture
   assert.ok(f.tracks.every(track => track.readyState === 'ended'))
   pending.resolve(); await switching
   assert.equal(f.engine.getSnapshot().localStream, null)
+})
+
+test('missing relay stays before capture until direct routing is explicitly allowed', async t => {
+  const f = fixture(t, { relayAvailable: false, settings: { relayOnly: true } })
+  await f.engine.prepareOutgoing(PEER, 'audio')
+  assert.equal(f.engine.getSnapshot().phase, 'routing')
+  assert.equal(f.engine.getSnapshot().settings.relayOnly, true)
+  assert.equal(f.captures.length, 0)
+  await f.engine.retryPreparation()
+  assert.equal(f.engine.getSnapshot().phase, 'routing')
+  assert.equal(f.captures.length, 0)
+  await f.engine.retryPreparation(true)
+  assert.equal(f.engine.getSnapshot().phase, 'preview')
+  assert.equal(f.engine.getSnapshot().settings.relayOnly, false)
+  assert.equal(f.captures.length, 1)
+  assert.equal(f.pcs.length, 0)
+})
+
+test('incoming relay setup errors keep the invitation alive and preserve audio-only answer consent', async t => {
+  const f = fixture(t, { relayAvailable: false, settings: { relayOnly: true } })
+  f.incoming(); await f.poll(); await f.engine.prepareIncoming('audio')
+  assert.equal(f.engine.getSnapshot().phase, 'routing')
+  assert.equal(f.finished.length, 0)
+  assert.equal(f.captures.length, 0)
+  await f.engine.retryPreparation(true)
+  assert.equal(f.engine.getSnapshot().phase, 'preview')
+  assert.equal(f.engine.getSnapshot().mode, 'audio')
+  assert.equal(f.captures.length, 1)
+  assert.equal(f.captures[0].video, false)
+  assert.equal(f.pcs.length, 0)
+})
+
+test('a relay-only invitation cannot be changed to direct routing by the recipient', async t => {
+  const f = fixture(t, { relayAvailable: false })
+  f.incoming({ policy: 'relay' }); await f.poll(); await f.engine.prepareIncoming('audio')
+  assert.equal(f.engine.getSnapshot().phase, 'routing')
+  assert.equal(f.engine.getSnapshot().relayRequiredByPeer, true)
+  await f.engine.retryPreparation(true)
+  assert.equal(f.engine.getSnapshot().phase, 'routing')
+  assert.equal(f.captures.length, 0)
+})
+
+test('a room reservation prevents outgoing capture and incoming ringing', async t => {
+  const f = fixture(t, { isBusy: () => true })
+  await f.engine.prepareOutgoing(PEER, 'audio')
+  assert.equal(f.engine.getSnapshot().phase, 'failed')
+  assert.match(f.engine.getSnapshot().error, /group call or voice channel/)
+  f.engine.dismiss(); f.incoming(); await f.poll()
+  assert.equal(f.engine.getSnapshot().phase, 'idle')
+  assert.equal(f.captures.length, 0)
+})
+
+test('transient ICE signaling failures are retried without changing routing', async t => {
+  let failures = 1
+  const delivered = []
+  const f = fixture(t, { dependencies: { signalRetryDelayMs: 1 }, transport: {
+    async send(_call, _peer, _session, payload) {
+      if (payload.kind === 'ice' && failures-- > 0) throw new Error('Temporary network failure')
+      delivered.push(payload)
+    },
+  } })
+  await f.engine.prepareOutgoing(PEER, 'audio'); await f.engine.connectPreview(); await f.acceptOutgoing()
+  const candidate = { candidate: 'candidate:1 1 UDP 123 192.0.2.1 1234 typ host', sdpMid: '0', sdpMLineIndex: 0 }
+  f.pcs[0].onicecandidate({ candidate: { toJSON: () => candidate } })
+  await new Promise(resolve => setTimeout(resolve, 15))
+  assert.equal(delivered.filter(payload => payload.kind === 'ice').length, 1)
+  assert.deepEqual(delivered.find(payload => payload.kind === 'ice').candidate, candidate)
+  assert.equal(f.pcs[0].configuration.iceTransportPolicy, 'all')
+})
+
+test('ending the call cancels retries of ICE candidates from that call', async t => {
+  let attempts = 0
+  const f = fixture(t, { dependencies: { signalRetryDelayMs: 5 }, transport: {
+    async send(_call, _peer, _session, payload) { if (payload.kind === 'ice') { attempts++; throw new Error('Temporary network failure') } },
+  } })
+  await f.engine.prepareOutgoing(PEER, 'audio'); await f.engine.connectPreview(); await f.acceptOutgoing()
+  f.pcs[0].onicecandidate({ candidate: { toJSON: () => ({ candidate: 'candidate:test', sdpMid: '0' }) } })
+  await f.engine.end()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(attempts, 1)
+})
+
+test('recipient reconnection requests a fresh offer from the caller', async t => {
+  const f = fixture(t)
+  f.incoming(); await f.poll(); await f.engine.prepareIncoming('audio'); await f.engine.connectPreview()
+  f.pcs[0].state('connected'); f.pcs[0].state('disconnected')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.engine.getSnapshot().phase, 'reconnecting')
+  assert.equal(f.sent.at(-1).payload.kind, 'restart')
+})
+
+test('an authenticated recipient restart causes a bounded caller ICE restart', async t => {
+  const f = fixture(t)
+  await f.engine.prepareOutgoing(PEER, 'audio'); await f.engine.connectPreview(); await f.acceptOutgoing()
+  f.pcs[0].state('connected')
+  const session = f.sessions.get(f.engine.getSnapshot().callId)
+  f.queued.push({ id: crypto.randomUUID(), callId: session.callId, sender: PEER, recipient: OWNER, senderSession: session.recipientSession,
+    targetSession: f.transport.sessionId, expiresAt: Date.now() + 30_000, payload: { kind: 'restart' } })
+  await f.poll(); await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.engine.getSnapshot().phase, 'reconnecting')
+  assert.equal(f.pcs[0].offers.at(-1).iceRestart, true)
+})
+
+test('direct connection timeout without a relay gives an actionable network diagnosis', async t => {
+  const f = fixture(t, { relayAvailable: false, dependencies: { connectTimeoutMs: 5 } })
+  await f.engine.prepareOutgoing(PEER, 'audio'); await f.engine.connectPreview(); await f.acceptOutgoing()
+  await new Promise(resolve => setTimeout(resolve, 15))
+  assert.equal(f.engine.getSnapshot().phase, 'failed')
+  assert.match(f.engine.getSnapshot().error, /direct connection.*networks.*TURN relay/)
+  assert.ok(f.tracks.every(track => track.readyState === 'ended'))
 })

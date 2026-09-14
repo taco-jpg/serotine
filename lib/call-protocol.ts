@@ -13,6 +13,7 @@ export type CallSignalPayload =
   | { kind: "accept"; mode: "voice" | "video"; private: boolean }
   | { kind: "offer" | "answer"; description: RTCSessionDescriptionInit }
   | { kind: "ice"; candidate: RTCIceCandidateInit }
+  | { kind: "restart" }
   | { kind: "media-state"; muted: boolean; camera: boolean; private: boolean }
 
 /** These objects live only in memory and the transient call relay, never the message event store. */
@@ -52,6 +53,7 @@ export function isCallPayload(value: unknown): value is CallSignalPayload {
   if (!isCallObject(value)) return false
   if (value.kind === "invite") return ["voice", "video"].includes(String(value.mode)) && ["all", "relay"].includes(String(value.policy)) && typeof value.private === "boolean"
   if (value.kind === "accept") return ["voice", "video"].includes(String(value.mode)) && typeof value.private === "boolean"
+  if (value.kind === "restart") return Object.keys(value).length === 1
   if (value.kind === "offer" || value.kind === "answer") return isCallObject(value.description) && value.description.type === value.kind
     && typeof value.description.sdp === "string" && value.description.sdp.length <= 48_000
   if (value.kind === "ice") return isCallObject(value.candidate) && typeof value.candidate.candidate === "string" && value.candidate.candidate.length <= 8_000

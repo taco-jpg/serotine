@@ -1,11 +1,11 @@
 import type { Identity } from "./identity"
 
 export type CallMode = "audio" | "video"
-export type CallPhase = "idle" | "routing" | "preparing" | "preview" | "incoming" | "ringing" | "connecting" | "connected" | "reconnecting" | "ended" | "declined" | "unanswered" | "busy" | "failed"
+export type CallPhase = "idle" | "preparing" | "preview" | "incoming" | "ringing" | "connecting" | "connected" | "reconnecting" | "ended" | "declined" | "unanswered" | "busy" | "failed"
 export type CallDirection = "incoming" | "outgoing"
 export type CallAvailability = "checking" | "available" | "unavailable"
 export interface CallPeerPolicy { accepted: boolean; blocked?: boolean; archived?: boolean; muted?: boolean; private?: boolean; label?: string }
-export interface CallSettings { silenceIncoming: boolean; relayOnly: boolean }
+export interface CallSettings { silenceIncoming: boolean }
 export interface CallSnapshot {
   phase: CallPhase
   callId: string | null
@@ -26,8 +26,6 @@ export interface CallSnapshot {
   microphoneId: string
   cameraId: string
   settings: CallSettings
-  relayAvailable: boolean
-  relayRequiredByPeer: boolean
   supported: boolean
 }
 export interface CompletedCall {
@@ -58,7 +56,6 @@ export interface CallController {
   availability(peer: string): Promise<CallAvailability>
   prepareOutgoing(peer: string, mode: CallMode): Promise<void>
   prepareIncoming(mode: CallMode): Promise<void>
-  retryPreparation(allowDirect?: boolean): Promise<void>
   connectPreview(): Promise<void>
   decline(): Promise<void>
   end(): Promise<void>

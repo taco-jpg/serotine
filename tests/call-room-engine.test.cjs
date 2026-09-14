@@ -9,10 +9,16 @@ const source = ts.transpileModule(fs.readFileSync(path.join(root, 'lib/call-room
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 class CallTransportError extends Error { constructor(message, code) { super(message); this.code = code } }
+const iceModule = { exports: {} }
+const iceSource = ts.transpileModule(fs.readFileSync(path.join(root, 'lib/call-ice.ts'), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText
+new Function('module', 'exports', iceSource)(iceModule, iceModule.exports)
 const roomId = target => target.kind === 'group' ? `${target.group.id}:admin:${target.group.admin}` : `${target.community.id}:channel:${target.channelId}`
 const moduleValue = { exports: {} }
 new Function('require', 'module', 'exports', source)(name => {
   if (name === './call-transport') return { CallTransportError, createCallTransport() { throw new Error('Inject configuration transport') } }
+  if (name === './call-ice') return iceModule.exports
   if (name === './call-room-transport') return { callRoomId: roomId, createCallRoomTransport() { throw new Error('Inject room transport') } }
   if (name === './community-protocol') return { canJoinCommunityVoiceChannel(state, pub, id) {
     const channel = state.channels.find(item => item.id === id)
@@ -59,9 +65,14 @@ function fixture(t, options = {}) {
   if (options.target) state.target = options.target
   const room = () => ({ roomId: roomId(state.target), participants: [...bus.members.values()].map(value => ({ ...value })), limit: 8 })
   const createTransport = () => {
+    const listeners = new Set()
     const transport = {
       sessionId: crypto.randomUUID(),
-      async join(target, mode, policy) { bus.joins.push({ key, target, mode, policy }); bus.members.set(key, { publicKey: key, sessionId: transport.sessionId, mode, policy, joinedAt: Date.now(), expiresAt: Date.now() + 30_000 }); return room() },
+      subscribe(listener) { assert.notEqual(this.disposed, true, 'cannot reuse a disposed room transport'); listeners.add(listener); return () => listeners.delete(listener) },
+      wake() { for (const listener of listeners) listener() },
+      listenerCount() { return listeners.size },
+      dispose() { this.disposed = true; listeners.clear() },
+      async join(target, mode, policy) { assert.notEqual(this.disposed, true, 'cannot reuse a disposed room transport'); bus.joins.push({ key, target, mode, policy }); bus.members.set(key, { publicKey: key, sessionId: transport.sessionId, mode, policy, joinedAt: Date.now(), expiresAt: Date.now() + 30_000 }); return room() },
       async poll(_target, after) {
         const self = bus.members.get(key)
         if (self?.sessionId === transport.sessionId) self.expiresAt = Date.now() + 30_000
@@ -84,16 +95,16 @@ function fixture(t, options = {}) {
     async enumerateDevices() { return [{ kind: 'audioinput', deviceId: 'mic', label: 'Microphone' }, { kind: 'videoinput', deviceId: 'cam', label: 'Camera' }] },
     ...options.mediaDevices,
   }
-  const configurationTransport = { async configuration(policy) { configurations.push(policy); return { relayAvailable: options.relayAvailable ?? true, iceServers: [], expiresAt: Date.now() + 600_000 } }, ...options.configurationTransport }
+  const configurationTransport = { async configuration(policy) { configurations.push(policy); return { iceServers: [{ urls: 'stun:stun.example.test:3478' }], expiresAt: Date.now() + 600_000 } }, dispose() { this.disposed = true }, ...options.configurationTransport }
   const engine = new CallRoomEngine({ identity: { version: 2, publicKey: key, privateKey: {} }, getTarget: () => state.target,
     getPeerLabel: pub => ({ [A]: 'Alice', [B]: 'Bob', [C]: 'Carol' })[pub], isBusy: () => state.busy,
-    settings: { relayOnly: false, ...options.settings } }, {
+    settings: options.settings }, {
     createTransport, configurationTransport, mediaDevices, createMediaStream: tracks => new Stream(tracks),
-    createPeerConnection: configuration => { const pc = new PeerConnection(configuration); pcs.push(pc); return pc }, pollIntervalMs: 1_000_000, ...options.dependencies,
+    createPeerConnection: configuration => { const pc = new PeerConnection(configuration); pcs.push(pc); return pc }, heartbeatIntervalMs: 1_000_000, ...options.dependencies,
   })
   t.after(() => engine.dispose())
   async function poll() { if (engine.pollTimer) clearTimeout(engine.pollTimer); await engine.tick() }
-  async function join(mode = 'audio') { await engine.prepare(state.target, mode); assert.equal(engine.getSnapshot().phase, 'preview'); await engine.joinPreview(); assert.equal(engine.getSnapshot().phase, 'joined') }
+  async function join(mode = 'audio') { await engine.prepare(state.target, mode); assert.equal(engine.getSnapshot().phase, 'preview'); await engine.joinPreview(); await pause(); assert.equal(engine.getSnapshot().phase, 'joined') }
   function addPeer(pub = B, overrides = {}) { const peer = { publicKey: pub, sessionId: crypto.randomUUID(), mode: 'voice', policy: 'all', joinedAt: Date.now(), expiresAt: Date.now() + 30_000, ...overrides }; bus.members.set(pub, peer); return peer }
   function signal(peer, payload, overrides = {}) { bus.signals.push({ id: crypto.randomUUID(), roomId: roomId(state.target), sender: peer.publicKey, senderSession: peer.sessionId, recipient: key,
     targetSession: transports.at(-1).sessionId, expiresAt: Date.now() + 30_000, payload, ...overrides }) }
@@ -109,14 +120,14 @@ test('preview requires local consent and never joins or creates senders before c
   assert.ok(f.tracks.every(track => track.readyState === 'ended')); assert.equal(f.bus.joins.length, 0)
 })
 
-test('unconfigured relay waits without capture; direct routing starts only after explicit consent', async t => {
+test('stored legacy routing settings cannot enable TURN or block direct calls', async t => {
   const f = fixture(t, { settings: { relayOnly: true }, relayAvailable: false })
-  await f.engine.prepare(f.state.target, 'audio')
-  assert.equal(f.engine.getSnapshot().phase, 'routing'); assert.equal(f.captures.length, 0)
-  assert.deepEqual(f.configurations, ['relay'])
-  await f.engine.retryPreparation(true)
-  assert.equal(f.engine.getSnapshot().phase, 'preview'); assert.deepEqual(f.configurations, ['relay', 'all'])
-  assert.equal(f.engine.getSnapshot().settings.relayOnly, false); assert.equal(f.captures.length, 1)
+  f.addPeer(); await f.join()
+  assert.deepEqual(f.configurations, ['all'])
+  assert.equal('relayOnly' in f.engine.getSnapshot().settings, false); assert.equal(f.captures.length, 1)
+  assert.equal(f.bus.joins[0].policy, 'all')
+  assert.equal(f.pcs[0].configuration.iceTransportPolicy, 'all')
+  assert.deepEqual(f.pcs[0].configuration.iceServers, [{ urls: ['stun:stun.example.test:3478'] }])
 })
 
 test('three participants negotiate exactly three peer pairs with deterministic offerers', async t => {
@@ -218,6 +229,7 @@ test('lease expiry stops media independently of an unresponsive poll', async t =
   const f = fixture(t)
   await f.engine.prepare(f.state.target, 'audio')
   const join = f.transport.join; f.transport.join = async (...args) => { const result = await join(...args); result.participants[0].expiresAt = Date.now() + 20; return result }
+  f.transport.poll = () => new Promise(() => {})
   await f.engine.joinPreview(); await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(f.engine.getSnapshot().phase, 'failed'); assert.match(f.engine.getSnapshot().error, /expired/)
   assert.equal(f.tracks[0].readyState, 'ended')
@@ -256,10 +268,10 @@ test('invalid oversized roster and another-device membership never create peer s
   }
 })
 
-test('changing to relay-only while joined releases the direct session instead of silently mixing policies', async t => {
+test('legacy routing updates are discarded without ending an active direct session', async t => {
   const f = fixture(t); f.addPeer(); await f.join(); f.engine.updateSettings({ relayOnly: true }); await pause()
-  assert.equal(f.engine.getSnapshot().phase, 'ended'); assert.match(f.engine.getSnapshot().error, /relay-only/)
-  assert.ok(f.tracks.every(track => track.readyState === 'ended')); assert.equal(f.pcs[0].connectionState, 'closed')
+  assert.equal(f.engine.getSnapshot().phase, 'joined'); assert.equal('relayOnly' in f.engine.getSnapshot().settings, false)
+  assert.ok(f.tracks.every(track => track.readyState === 'live')); assert.notEqual(f.pcs[0].connectionState, 'closed')
 })
 
 test('a peer arriving during microphone replacement receives the same replacement as existing peers', async t => {
@@ -286,4 +298,135 @@ test('camera off during a pending sender replacement stops both camera tracks an
   assert.equal(f.engine.getSnapshot().cameraEnabled, false); assert.equal(f.engine.getSnapshot().localStream.getVideoTracks().length, 0)
   assert.ok(f.tracks.filter(track => track.kind === 'video').every(track => track.readyState === 'ended'))
   assert.equal(sender.track, null)
+})
+
+test('TURN configuration is rejected before capture even if it also contains a valid STUN server', async t => {
+  for (const iceServers of [
+    [{ urls: ['stun:stun.example.test', 'turn:relay.example.test'] }],
+    [{ urls: 'turns:relay.example.test:443', username: 'user', credential: 'secret' }],
+    [{ urls: 'stun:stun.example.test', credential: 'unexpected' }],
+  ]) {
+    const f = fixture(t, { configurationTransport: { async configuration() { return { iceServers, expiresAt: Date.now() + 600_000 } } } })
+    await f.engine.prepare(f.state.target, 'audio')
+    assert.equal(f.engine.getSnapshot().phase, 'failed')
+    assert.match(f.engine.getSnapshot().error, /direct|STUN|relay|configuration/i)
+    assert.equal(f.captures.length, 0); assert.equal(f.pcs.length, 0)
+    assert.equal(f.transport.disposed, true)
+  }
+})
+
+test('relay-only room members cannot start a connection under a direct-call policy', async t => {
+  const f = fixture(t); f.addPeer(B, { policy: 'relay' })
+  await f.engine.prepare(f.state.target, 'audio'); await f.engine.joinPreview()
+  assert.equal(f.engine.getSnapshot().phase, 'failed')
+  assert.match(f.engine.getSnapshot().error, /incompatible/)
+  assert.equal(f.pcs.length, 0); assert.ok(f.tracks.every(track => track.readyState === 'ended'))
+})
+
+test('relayed ICE in signed SDP or trickled candidates closes only the offending peer', async t => {
+  const relayCandidate = 'candidate:relay 1 udp 1 192.0.2.10 12345 typ relay raddr 0.0.0.0 rport 0'
+  for (const payload of [
+    { kind: 'offer', description: { type: 'offer', sdp: `${SDP}a=${relayCandidate}\r\n` } },
+    { kind: 'ice', candidate: { candidate: relayCandidate } },
+  ]) {
+    const f = fixture(t, { key: C }), peer = f.addPeer(A); f.addPeer(B); await f.join()
+    f.signal(peer, payload); await f.poll()
+    assert.equal(f.engine.getSnapshot().participants.find(value => value.publicKey === A).phase, 'failed')
+    assert.equal(f.pcs[0].connectionState, 'closed'); assert.equal(f.pcs[0].candidates.length, 0)
+    assert.equal(f.pcs[0].remoteDescription, undefined)
+    assert.notEqual(f.pcs[1].connectionState, 'closed'); assert.equal(f.engine.getSnapshot().phase, 'joined')
+  }
+})
+
+test('a blocked direct connection times out while other participants stay connected', async t => {
+  const f = fixture(t, { dependencies: { connectTimeoutMs: 25 } }); f.addPeer(B); f.addPeer(C); await f.join()
+  const failedAudio = new Track('audio'); f.pcs[0].ontrack({ track: failedAudio })
+  f.pcs[1].state('connected')
+  await new Promise(resolve => setTimeout(resolve, 50))
+  const peers = f.engine.getSnapshot().participants
+  assert.equal(peers[0].phase, 'failed'); assert.match(peers[0].error, /direct connection.*network/i)
+  assert.equal(f.pcs[0].connectionState, 'closed'); assert.equal(failedAudio.readyState, 'ended')
+  assert.equal(peers[1].phase, 'connected'); assert.equal(f.engine.getSnapshot().phase, 'joined')
+  assert.equal(f.captures.length, 1); assert.ok(f.configurations.every(value => value === 'all'))
+  assert.equal(f.tracks[0].readyState, 'live')
+  await f.engine.leave(); assert.equal(f.tracks[0].readyState, 'ended')
+})
+
+test('WebSocket wake drains a new participant and SDP without waiting for a heartbeat', async t => {
+  const f = fixture(t, { key: B }); await f.join()
+  const peer = f.addPeer(A)
+  f.signal(peer, { kind: 'offer', description: { type: 'offer', sdp: SDP } })
+  f.transport.wake(); await pause()
+  assert.equal(f.pcs.length, 1); assert.equal(f.pcs[0].remoteDescription.sdp, SDP)
+  assert.ok(f.bus.sent.some(signal => signal.payload.kind === 'answer'))
+  assert.equal(f.transport.listenerCount(), 1)
+  const oldTransport = f.transport
+  await f.engine.leave()
+  assert.equal(oldTransport.listenerCount(), 0); assert.equal(oldTransport.disposed, true)
+  oldTransport.wake(); await pause()
+  assert.equal(f.engine.getSnapshot().phase, 'ended'); assert.equal(f.pcs.length, 1)
+})
+
+test('pushes during a pending drain are coalesced without concurrent roster requests or lost signals', async t => {
+  const pending = deferred(), f = fixture(t, { key: B }); await f.join()
+  const peer = f.addPeer(A), originalPoll = f.transport.poll
+  let requests = 0, active = 0, maxActive = 0
+  f.transport.poll = async (...args) => {
+    const index = ++requests; maxActive = Math.max(maxActive, ++active)
+    const result = await originalPoll(...args)
+    if (index === 1) await pending.promise
+    active--
+    return result
+  }
+  f.transport.wake(); await pause()
+  f.signal(peer, { kind: 'offer', description: { type: 'offer', sdp: SDP } })
+  for (let index = 0; index < 10; index++) f.transport.wake()
+  assert.equal(requests, 1)
+  pending.resolve(); await pause()
+  assert.equal(maxActive, 1); assert.equal(requests, 2)
+  assert.equal(f.pcs[0].remoteDescription.sdp, SDP)
+  assert.equal(f.bus.sent.filter(signal => signal.payload.kind === 'answer').length, 1)
+})
+
+test('idle room signaling refreshes its lease every ten seconds rather than rapidly polling', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const f = fixture(t, { dependencies: { heartbeatIntervalMs: undefined } }); await f.join()
+  let requests = 0
+  const poll = f.transport.poll
+  f.transport.poll = async (...args) => { requests++; return poll(...args) }
+  t.mock.timers.tick(9_999); await pause(); assert.equal(requests, 0)
+  t.mock.timers.tick(1); await pause(); assert.equal(requests, 1)
+  await f.engine.leave()
+  t.mock.timers.tick(20_000); await pause(); assert.equal(requests, 1)
+})
+
+test('leaving then rejoining opens a fresh room socket and keeps reusable STUN configuration available', async t => {
+  const f = fixture(t); f.addPeer(B); await f.join()
+  const first = f.transport, firstAudio = f.tracks[0]
+  await f.engine.leave()
+  assert.equal(first.disposed, true); assert.equal(first.listenerCount(), 0)
+  assert.equal(firstAudio.readyState, 'ended'); assert.notEqual(f.configurationTransport.disposed, true)
+  await f.join()
+  assert.notEqual(f.transport, first); assert.notEqual(f.transport.sessionId, first.sessionId)
+  assert.notEqual(f.transport.disposed, true); assert.equal(f.transport.listenerCount(), 1)
+  assert.equal(f.pcs.length, 2); assert.equal(f.captures.length, 2)
+  f.engine.dispose(); await pause()
+  assert.equal(f.transport.disposed, true); assert.equal(f.configurationTransport.disposed, true)
+  assert.ok(f.tracks.every(track => track.readyState === 'ended'))
+})
+
+test('a full wire page drains immediately even if every signal on that page was filtered out', async t => {
+  const f = fixture(t, { key: B }); await f.join()
+  const peer = f.addPeer(A), originalPoll = f.transport.poll
+  const cursors = []
+  f.transport.poll = async (target, after) => {
+    cursors.push(after)
+    if (cursors.length === 1) return { room: f.room(), signals: [], nextCursor: after + 100, hasMore: true }
+    return originalPoll(target, after)
+  }
+  f.signal(peer, { kind: 'offer', description: { type: 'offer', sdp: SDP } })
+  f.transport.wake(); await pause()
+  assert.deepEqual(cursors, [0, 100])
+  assert.equal(f.pcs[0].remoteDescription.sdp, SDP)
+  assert.equal(f.bus.sent.filter(signal => signal.payload.kind === 'answer').length, 1)
 })

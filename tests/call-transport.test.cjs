@@ -1,4 +1,4 @@
-/* Real WebCrypto, signed HTTP, encrypted browser transport, and SQLite arbitration. */
+/* Real WebCrypto, encrypted client envelopes, signed handler requests and SQLite arbitration. Socket delivery is tested separately. */
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -48,6 +48,27 @@ function harness(t) {
   function load(filename) {
     if (!path.extname(filename)) filename += '.ts'
     if (cache.has(filename)) return cache.get(filename).exports
+    if (filename === path.join(root, 'lib/call-socket.ts')) {
+      class CallTransportError extends Error { constructor(message, code) { super(message); this.code = code } }
+      return { CallTransportError, createCallSocket(identity, sessionId) {
+        return {
+          async request(action, data) {
+            assert.equal(data.sessionId, sessionId)
+            const proof = await auth.createRequestProof(action, data, identity.privateKey, identity.publicKey)
+            const body = { version: 1, action, data, proof }
+            requests.push(body)
+            const response = await POST(new Request(`${origin}/api/calls`, {
+              method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+            }))
+            const result = await response.json()
+            if (!response.ok || result.success !== true) throw new CallTransportError(result.error, result.code)
+            return result
+          },
+          subscribe() { return () => {} },
+          dispose() {},
+        }
+      } }
+    }
     const module = { exports: {} }; cache.set(filename, module)
     const output = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
     const sourceRequire = specifier => {
@@ -240,25 +261,35 @@ test('private history suppression is sticky through terminal races and returned 
   assert.equal((await bob.transport.finish(another.callId, 'ended', true)).noHistory, true, 'late private completion can only suppress history')
 })
 
-test('TURN uses short-lived operator credentials and relay-only fails closed without TURN', async t => {
-  const h = harness(t)
-  const alice = await h.identity()
-  await assert.rejects(alice.transport.configuration('relay'), /not configured/)
+test('configuration is STUN-only and ignores all obsolete relay credentials without a provider request', async t => {
+  const h = harness(t), alice = await h.identity()
+  Object.assign(h.env, { CALL_TURN_URLS: 'turn:relay.example:3478', CALL_TURN_SECRET: 'obsolete-secret-with-long-test-value',
+    CALL_TURN_KEY_ID: 'obsolete-turn-key-id', CALL_TURN_API_TOKEN: 'obsolete-provider-token' })
+  let providerRequests = 0
+  h.state.turnFetch = async () => { providerRequests++; throw new Error('No provider requests are allowed') }
   const direct = await alice.transport.configuration('all')
   assert.equal(direct.relayAvailable, false)
-  assert.ok(direct.iceServers.every(server => server.urls.every(url => url.startsWith('stun:'))))
-  h.env.CALL_TURN_URLS = 'turn:relay.example:3478,turns:relay.example:5349'
-  h.env.CALL_TURN_SECRET = 'a-test-operator-shared-secret-at-least-24-characters'
-  const relay = await alice.transport.configuration('relay')
-  assert.equal(relay.relayAvailable, true)
-  assert.equal(relay.expiresAt - h.state.now, 600000)
-  assert.equal(relay.iceServers.length, 1)
-  const server = relay.iceServers[0]
-  assert.equal(server.username.split(':')[0], String(Math.floor(relay.expiresAt / 1000)))
-  assert.equal(server.username.includes(alice.publicKey), false)
-  const expected = require('node:crypto').createHmac('sha1', h.env.CALL_TURN_SECRET).update(server.username).digest('base64')
-  assert.equal(server.credential, expected)
-  assert.equal(JSON.stringify(relay).includes(h.env.CALL_TURN_SECRET), false)
+  assert.equal(direct.expiresAt - h.state.now, 600000)
+  assert.deepEqual(direct.iceServers, [{ urls: ['stun:stun.l.google.com:19302'] }])
+  assert.equal(providerRequests, 0)
+  assert.equal(JSON.stringify(direct).includes('obsolete'), false)
+  const action = 'call:configuration', data = { sessionId: alice.transport.sessionId, policy: 'relay' }
+  const proof = await h.auth.createRequestProof(action, data, alice.privateKey, alice.publicKey)
+  const response = await h.post({ version: 1, action, data, proof })
+  assert.equal(response.status, 409)
+  assert.equal((await response.json()).code, 'direct-only')
+  assert.equal(providerRequests, 0)
+})
+
+test('only valid STUN URLs without credentials, query parameters or invalid ports reach the browser', async t => {
+  const h = harness(t), alice = await h.identity()
+  h.env.CALL_STUN_URLS = ['turn:relay.example:3478', 'stun:user@host:3478', 'stun:host:65536', 'stun:host:0', 'stun:host/path',
+    'stun:host?transport=udp', 'stun://host', 'stun:bad..host', 'stun:-bad.example', 'stun:good.example:3478',
+    'stuns:secure.example:5349', 'stun:[::1]:3478', 'stun:good.example:3478'].join(',')
+  assert.deepEqual((await alice.transport.configuration('all')).iceServers,
+    [{ urls: ['stun:good.example:3478', 'stuns:secure.example:5349', 'stun:[::1]:3478'] }])
+  h.env.CALL_STUN_URLS = 'turn:relay.example,https://relay.example'
+  assert.deepEqual((await alice.transport.configuration('all')).iceServers, [])
 })
 
 test('failed invitation signal releases both reservations and repeated invites are rate limited', async t => {
@@ -274,66 +305,42 @@ test('failed invitation signal releases both reservations and repeated invites a
   await assert.rejects(alice.transport.invite(bob.publicKey, crypto.randomUUID(), invite), /Too many/)
 })
 
-test('Cloudflare TURN returns only short-lived validated relay credentials with UDP and TLS routes', async t => {
-  const h = harness(t)
-  const alice = await h.identity()
-  h.env.CALL_TURN_KEY_ID = 'test-turn-key-id'
-  h.env.CALL_TURN_API_TOKEN = 'server-only-turn-api-token'
-  let requests = 0
-  h.state.turnFetch = async (url, init) => {
-    requests++
-    assert.equal(url, 'https://rtc.live.cloudflare.com/v1/turn/keys/test-turn-key-id/credentials/generate-ice-servers')
-    assert.equal(init.method, 'POST')
-    assert.equal(init.redirect, 'error')
-    assert.equal(init.headers.Authorization, 'Bearer server-only-turn-api-token')
-    assert.deepEqual(JSON.parse(init.body), { ttl: 600 })
-    assert.ok(init.signal instanceof AbortSignal)
-    return Response.json({ iceServers: [
-      { urls: ['stun:stun.cloudflare.com:3478'] },
-      { urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turns:turn.cloudflare.com:443?transport=tcp', 'turn:turn.cloudflare.com:53?transport=udp'], username: 'short-lived-user', credential: 'short-lived-password' },
-    ] }, { status: 201 })
-  }
-  const relay = await alice.transport.configuration('relay')
-  assert.equal(requests, 1)
-  assert.equal(relay.relayAvailable, true)
-  assert.equal(relay.expiresAt - h.state.now, 600000)
-  assert.deepEqual(relay.iceServers, [{ urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turns:turn.cloudflare.com:443?transport=tcp'], username: 'short-lived-user', credential: 'short-lived-password' }])
-  assert.equal(JSON.stringify(relay).includes(h.env.CALL_TURN_API_TOKEN), false)
-  assert.equal(JSON.stringify(relay).includes(h.env.CALL_TURN_KEY_ID), false)
+test('socket authentication binds a fresh signed device and rejects replay, tampering and retired identities', async t => {
+  const h = harness(t), alice = await h.identity()
+  const action = 'call:socket', data = { sessionId: alice.transport.sessionId }
+  const proof = await h.auth.createRequestProof(action, data, alice.privateKey, alice.publicKey)
+  const body = { version: 1, action, data, proof }
+  const response = await h.post(body)
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { success: true, publicKey: alice.publicKey, sessionId: data.sessionId })
+  assert.equal((await h.post(body)).status, 409)
+  assert.equal((await h.post({ ...body, data: { sessionId: crypto.randomUUID() } })).status, 401)
+  h.sqlite.prepare('INSERT INTO RetiredIdentity(publicKey, retiredAt) VALUES (?, ?)').run(alice.publicKey, h.state.now)
+  const fresh = await h.auth.createRequestProof(action, data, alice.privateKey, alice.publicKey)
+  assert.equal((await h.post({ ...body, proof: fresh })).status, 403)
 })
 
-test('Cloudflare failure preserves relay-only privacy and does not expose provider errors', async t => {
-  const h = harness(t)
-  const alice = await h.identity()
-  h.env.CALL_TURN_KEY_ID = 'test-turn-key-id'
-  h.env.CALL_TURN_API_TOKEN = 'server-only-turn-api-token'
-  h.state.turnFetch = async () => Response.json({ error: 'private provider error server-only-turn-api-token' }, { status: 401 })
-  await assert.rejects(alice.transport.configuration('relay'), error => {
-    assert.equal(error.code, 'relay-unavailable')
-    assert.match(error.message, /site owner.*TURN/)
-    assert.equal(error.message.includes('server-only-turn-api-token'), false)
-    return true
-  })
-  const direct = await alice.transport.configuration('all')
-  assert.equal(direct.relayAvailable, false)
-  assert.ok(direct.iceServers.every(server => server.urls.every(url => url.startsWith('stun:'))))
+test('socket authentication is rate bounded independently of normal signaling', async t => {
+  const h = harness(t), alice = await h.identity()
+  const action = 'call:socket', data = { sessionId: alice.transport.sessionId }
+  for (let i = 0; i < 31; i++) {
+    const proof = await h.auth.createRequestProof(action, data, alice.privateKey, alice.publicKey)
+    assert.equal((await h.post({ version: 1, action, data, proof })).status, i === 30 ? 429 : 200)
+  }
 })
 
-test('malformed Cloudflare TURN responses cannot become browser ICE configuration', async t => {
-  const h = harness(t)
-  const alice = await h.identity()
-  h.env.CALL_TURN_KEY_ID = 'test-turn-key-id'
-  h.env.CALL_TURN_API_TOKEN = 'server-only-turn-api-token'
-  for (const response of [
-    { iceServers: [{ urls: ['https://attacker.example'], username: 'user', credential: 'password' }] },
-    { iceServers: [{ urls: ['turn:turn.cloudflare.com:3478'], username: 'user' }] },
-    { iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }] },
-    { iceServers: [{ urls: ['turn:turn.cloudflare.com:3478'], username: 'user', credential: 'password' }, { urls: ['https://attacker.example'] }] },
-  ]) {
-    h.state.turnFetch = async () => Response.json(response)
-    await assert.rejects(alice.transport.configuration('relay'), error => error.code === 'relay-unavailable')
-    const direct = await alice.transport.configuration('all')
-    assert.equal(direct.relayAvailable, false)
-    assert.ok(direct.iceServers.every(server => server.urls.every(url => url.startsWith('stun:'))))
+test('successful call mutations notify only verified participants and failed mutations expose no targets', async t => {
+  const h = harness(t), [alice, bob] = await pair(h), stranger = await h.identity()
+  const call = await alice.transport.invite(bob.publicKey, crypto.randomUUID(), invite)
+  async function signed(identity, action, data) {
+    const proof = await h.auth.createRequestProof(action, data, identity.privateKey, identity.publicKey)
+    return h.post({ version: 1, action, data, proof })
   }
+  const denied = await signed(stranger, 'call:finish', { sessionId: stranger.transport.sessionId, callId: call.callId, reason: 'ended', noHistory: false })
+  assert.equal(denied.status, 409)
+  assert.equal((await denied.json())._notify, undefined)
+  const claimed = await signed(bob, 'call:claim', { sessionId: bob.transport.sessionId, callId: call.callId, noHistory: false })
+  assert.deepEqual((await claimed.json())._notify.sort(), [alice.publicKey, bob.publicKey].sort())
+  const ended = await signed(alice, 'call:finish', { sessionId: alice.transport.sessionId, callId: call.callId, reason: 'ended', noHistory: false })
+  assert.deepEqual((await ended.json())._notify.sort(), [alice.publicKey, bob.publicKey].sort())
 })

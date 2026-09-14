@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 
-const phaseLabels: Record<string, string> = { idle: "Ready", preparing: "Preparing devices", routing: "Choose call routing", preview: "Review your devices", joining: "Joining call", joined: "In call", ended: "You left the call", failed: "Call failed" }
+const phaseLabels: Record<string, string> = { idle: "Ready", preparing: "Preparing devices", preview: "Review your devices", joining: "Joining call", joined: "In call", ended: "You left the call", failed: "Call failed" }
 const participantLabels: Record<string, string> = { connecting: "Connecting", connected: "Connected", reconnecting: "Reconnecting", failed: "Connection failed" }
 
 function durationLabel(started: number | null, now: number) {
@@ -129,16 +129,6 @@ export function RoomCallingSurface() {
       {snapshot.participants.map(participant => <RoomAudio key={`${participant.publicKey}:${participant.sessionId}`} participantId={`${participant.publicKey}:${participant.sessionId}`} stream={participant.stream} label={participant.label} elements={audioElements.current} onBlocked={reportAudioBlocked} />)}
     </section>
 
-    <Dialog open={snapshot.phase === "routing"} onOpenChange={open => { if (!open) void run(() => engine.leave()) }}>
-      <DialogContent className="max-h-[90dvh] overflow-y-auto">
-        <DialogHeader><DialogTitle>Choose how to connect</DialogTitle><DialogDescription>The server’s calling relay is unavailable. Your microphone and camera are still off.</DialogDescription></DialogHeader>
-        <p className="text-sm leading-6">You can allow direct connections to try joining {snapshot.targetLabel}. This may reveal your network address to other participants. Media remains encrypted between participants.</p>
-        <p className="text-xs leading-5 text-muted-foreground">Allowing direct connections changes your call preference for this identity on this browser. You can turn relay-only routing back on in Call settings after leaving the call. Some networks still need a working relay to connect.</p>
-        {snapshot.error && <p role="alert" className="text-sm text-destructive">{snapshot.error}</p>}
-        <DialogFooter className="sm:flex-wrap"><Button type="button" variant="outline" className="min-h-11" onClick={() => void run(() => engine.leave())}>Cancel</Button><Button type="button" variant="outline" className="min-h-11" onClick={() => void run(() => engine.retryPreparation())}><RotateCw />Retry relay</Button><Button type="button" className="min-h-11" onClick={() => void run(() => engine.retryPreparation(true))}>Allow direct connections</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
-
     <Dialog open={preflight} onOpenChange={open => { if (!open) void run(() => engine.leave()) }}>
       <DialogContent className="max-h-[90dvh] overflow-y-auto">
         <DialogHeader><DialogTitle>Join {snapshot.targetLabel}</DialogTitle><DialogDescription>Review your microphone{voiceOnly ? "" : " and camera"}. Other members receive your media only after you choose Join call.</DialogDescription></DialogHeader>
@@ -146,7 +136,7 @@ export function RoomCallingSurface() {
           <ParticipantTile stream={snapshot.localStream} label="You" microphoneMuted={snapshot.microphoneMuted} cameraEnabled={snapshot.cameraEnabled} status={voiceOnly ? "Your microphone is not shared yet" : "Only you can see this preview"} local voiceOnly={voiceOnly} />
           <RoomDeviceControls />
         </>}
-        <p className="flex items-start gap-2 text-xs leading-5 text-muted-foreground"><Shield className="mt-0.5 size-4 shrink-0" /><span>{snapshot.settings.relayOnly ? "Relay-only routing keeps your network address from other participants. The call stops if the relay is unavailable." : "Direct connections are allowed. Other participants may see your network address. Media remains encrypted between participants."}</span></p>
+        <p className="flex items-start gap-2 text-xs leading-5 text-muted-foreground"><Shield className="mt-0.5 size-4 shrink-0" /><span>Calls connect directly between participants. Other participants may see your network address. Audio and video stay encrypted between your devices. Some restrictive networks cannot connect.</span></p>
         <p className="text-xs leading-5 text-muted-foreground">Up to 8 people can join. Keep Serotine open during the call. Joining does not ring other members.</p>
         {snapshot.notice && <p role="status" className="text-sm text-muted-foreground">{snapshot.notice}</p>}
         {(error || snapshot.error) && <p role="alert" className="text-sm text-destructive">{error || snapshot.error}</p>}

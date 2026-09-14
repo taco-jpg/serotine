@@ -6,6 +6,7 @@ export const CALL_PRESENCE_TTL_MS = 30_000
 export const CALL_LEASE_TTL_MS = 30_000
 export const CALL_PAGE_SIZE = 64
 export const CALL_PACKET_LIMIT = 96_000
+/** The legacy relay value is decoded only so updated clients can reject it explicitly. */
 export type CallRoutingPolicy = "all" | "relay"
 export type CallEndReason = "ended" | "cancelled" | "declined" | "busy" | "unanswered" | "failed"
 export type CallSignalPayload =
@@ -45,6 +46,17 @@ export interface EncryptedCallSignal extends Omit<CallSignal, "payload"> {
   sequence?: number
 }
 export interface CallConfiguration { iceServers: RTCIceServer[]; relayAvailable: boolean; expiresAt: number }
+/** RFC 7064 server URI without userinfo, paths, query parameters or credentials. */
+export function isStunUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 512) return false
+  const match = /^stuns?:([^\s/?#@]+)$/.exec(value)
+  if (!match) return false
+  const endpoint = /^(\[[0-9a-fA-F:.]+\]|[a-zA-Z0-9.-]+)(?::([0-9]{1,5}))?$/.exec(match[1])
+  if (!endpoint || (endpoint[2] !== undefined && (Number(endpoint[2]) < 1 || Number(endpoint[2]) > 65535))) return false
+  const host = endpoint[1]
+  if (!host.startsWith("[")) return host.length <= 253 && host.split(".").every(label => /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(label))
+  try { return new URL(`https://${host}`).hostname === host.toLowerCase() } catch { return false }
+}
 export const isCallId = (value: unknown): value is string => typeof value === "string" && ID_PATTERN.test(value)
 export const isCallPeer = (value: unknown): value is string => typeof value === "string" && PUBLIC_KEY_PATTERN.test(value)
 export const isCallObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value)

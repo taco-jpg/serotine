@@ -1,4 +1,5 @@
-import { CallTransportError, createCallTransport } from "./call-transport"
+import { createCallTransport } from "./call-transport"
+import { assertDirectCandidate, assertDirectDescription, directIceConfiguration } from "./call-ice"
 import { callRoomId, createCallRoomTransport, type CallRoomTarget } from "./call-room-transport"
 import type { CallRoomSignal, CallRoomState } from "./call-room-protocol"
 import type { CallSignalPayload } from "./call-protocol"
@@ -7,6 +8,7 @@ import type { CallRoomController, CallRoomEngineOptions, CallRoomParticipantSnap
 import { canJoinCommunityVoiceChannel } from "./community-protocol"
 
 type RoomTransport = ReturnType<typeof createCallRoomTransport>
+type ConfigurationTransport = Pick<ReturnType<typeof createCallTransport>, "configuration"> & { dispose?: () => void }
 type RoomPayload = Exclude<CallSignalPayload, { kind: "invite" | "accept" }>
 type Member = CallRoomState["participants"][number]
 interface Peer {
@@ -23,14 +25,15 @@ interface Peer {
   closed: boolean
 }
 export interface CallRoomEngineDependencies {
-  transport?: RoomTransport
+  /** Each join needs a fresh device session and signaling socket. */
   createTransport?: () => RoomTransport
-  configurationTransport?: Pick<ReturnType<typeof createCallTransport>, "configuration">
+  configurationTransport?: ConfigurationTransport
   mediaDevices?: Pick<MediaDevices, "getUserMedia" | "enumerateDevices">
   createPeerConnection?: (configuration: RTCConfiguration) => RTCPeerConnection
   createMediaStream?: (tracks?: MediaStreamTrack[]) => MediaStream
   now?: () => number
-  pollIntervalMs?: number
+  /** Lease refresh only; signaling updates arrive over WebSocket. */
+  heartbeatIntervalMs?: number
   prepareTimeoutMs?: number
   connectTimeoutMs?: number
   reconnectTimeoutMs?: number
@@ -49,7 +52,7 @@ const label = (target: CallRoomTarget) => target.kind === "group" ? target.group
 /** Memory-only, consent-first mesh calling. A room has at most eight identities. */
 export class CallRoomEngine implements CallRoomController {
   private transport: RoomTransport | null = null
-  private readonly configurationTransport: Pick<ReturnType<typeof createCallTransport>, "configuration">
+  private readonly configurationTransport: ConfigurationTransport
   private readonly mediaDevices: CallRoomEngineDependencies["mediaDevices"]
   private readonly now: () => number
   private readonly listeners = new Set<() => void>()
@@ -63,10 +66,13 @@ export class CallRoomEngine implements CallRoomController {
   private readonly peers = new Map<string, Peer>()
   private readonly seen = new Set<string>()
   private pollTimer: ReturnType<typeof setTimeout> | null = null
+  private unsubscribeTransport: (() => void) | null = null
+  private tickGeneration: number | null = null
+  private tickPending = false
   private deadline: ReturnType<typeof setTimeout> | null = null
   private leaseTimer: ReturnType<typeof setTimeout> | null = null
-  private connectionPolicy: RTCIceTransportPolicy = "relay"
-  private configuration: RTCConfiguration = { iceServers: [], iceTransportPolicy: "relay" }
+  private readonly connectionPolicy = "all" as const
+  private configuration: RTCConfiguration = { iceServers: [], iceTransportPolicy: "all" }
   private configurationExpiresAt = 0
   private mediaGeneration = { audio: 0, video: 0 }
   private mediaQueue: Record<"audio" | "video", Promise<void>> = { audio: Promise.resolve(), video: Promise.resolve() }
@@ -79,8 +85,8 @@ export class CallRoomEngine implements CallRoomController {
     this.initial = {
       phase: "idle", target: null, targetLabel: "", roomId: null, mode: "audio", localStream: null,
       participants: [], microphoneMuted: false, cameraEnabled: false, devices: [], microphoneId: "", cameraId: "",
-      joinedAt: null, error: null, notice: null, relayAvailable: false,
-      settings: { silenceIncoming: false, relayOnly: true, ...options.settings },
+      joinedAt: null, error: null, notice: null,
+      settings: { silenceIncoming: options.settings?.silenceIncoming ?? false },
       supported: Boolean(this.mediaDevices?.getUserMedia && (dependencies.createPeerConnection || typeof RTCPeerConnection !== "undefined")),
     }
     this.snapshot = this.initial
@@ -117,10 +123,15 @@ export class CallRoomEngine implements CallRoomController {
   private schedule(generation: number) {
     if (!this.live(generation) || TERMINAL.has(this.snapshot.phase)) return
     if (this.pollTimer) clearTimeout(this.pollTimer)
-    this.pollTimer = setTimeout(() => { this.pollTimer = null; void this.tick(generation) }, this.dependencies.pollIntervalMs ?? 1_200)
+    this.pollTimer = setTimeout(() => { this.pollTimer = null; void this.tick(generation) }, this.dependencies.heartbeatIntervalMs ?? 10_000)
   }
   private async tick(generation = this.generation) {
     if (!this.live(generation) || TERMINAL.has(this.snapshot.phase)) return
+    // Pushes can arrive while a roster/SDP operation awaits the browser. Coalesce
+    // them into another drain without racing cursors or losing a notification.
+    if (this.tickGeneration === generation) { this.tickPending = true; return }
+    this.tickGeneration = generation
+    this.tickPending = false
     const transport = this.transport
     try {
       const target = this.currentTarget()
@@ -131,13 +142,22 @@ export class CallRoomEngine implements CallRoomController {
         // Re-check live local governance after the network wait, before adding any peer.
         this.currentTarget()
         this.cursor = response.nextCursor
+        if (response.hasMore) this.tickPending = true
         await this.reconcile(response.room, generation)
         if (!this.live(generation)) return
         await Promise.all(response.signals.map(signal => this.receive(signal, generation)))
       }
     } catch (error) {
       if (this.live(generation)) await this.finish("failed", message(error))
-    } finally { this.schedule(generation) }
+    } finally {
+      if (this.tickGeneration === generation) {
+        this.tickGeneration = null
+        if (this.tickPending && this.live(generation)) {
+          this.tickPending = false
+          void this.tick(generation)
+        } else this.schedule(generation)
+      }
+    }
   }
 
   async prepare(target: CallRoomTarget, mode: CallMode) {
@@ -147,24 +167,17 @@ export class CallRoomEngine implements CallRoomController {
     }
     this.cleanup()
     const generation = ++this.generation
-    this.transport = this.dependencies.createTransport?.() ?? this.dependencies.transport ?? createCallRoomTransport(this.options.identity)
+    this.transport = this.dependencies.createTransport?.() ?? createCallRoomTransport(this.options.identity)
+    this.unsubscribeTransport = this.transport.subscribe(() => { void this.tick(generation) })
     this.cursor = 0
     this.seen.clear()
     this.joining = false
     this.joined = false
-    this.connectionPolicy = this.snapshot.settings.relayOnly ? "relay" : "all"
     this.update({ phase: "preparing", target, targetLabel: label(target), roomId: callRoomId(target), mode: target.kind === "channel" ? "audio" : mode, localStream: null,
       participants: [], microphoneMuted: false, cameraEnabled: false, joinedAt: null, error: null, notice: null })
     this.deadline = setTimeout(() => { if (this.live(generation)) void this.finish("failed", "Call preparation timed out. Try again when you are ready.") }, this.dependencies.prepareTimeoutMs ?? 120_000)
     this.schedule(generation)
     await this.prepareMedia(generation)
-  }
-  async retryPreparation(allowDirect = false) {
-    if (this.disposed || this.snapshot.phase !== "routing") return
-    if (allowDirect) this.updateSettings({ relayOnly: false })
-    this.connectionPolicy = this.snapshot.settings.relayOnly ? "relay" : "all"
-    this.update({ phase: "preparing", error: null })
-    await this.prepareMedia(this.generation)
   }
   private async prepareMedia(generation: number) {
     try {
@@ -189,8 +202,7 @@ export class CallRoomEngine implements CallRoomController {
       if (this.live(generation)) this.update({ phase: "preview" })
     } catch (error) {
       if (!this.live(generation)) return
-      if (error instanceof CallTransportError && error.code === "relay-unavailable") this.update({ phase: "routing", relayAvailable: false, error: message(error) })
-      else await this.finish("failed", captureMessage(error))
+      await this.finish("failed", captureMessage(error))
     }
   }
   async joinPreview() {
@@ -213,7 +225,8 @@ export class CallRoomEngine implements CallRoomController {
       this.deadline = null
       this.update({ phase: "joined", joinedAt: this.now() })
       await this.reconcile(room, generation)
-      this.schedule(generation)
+      // Drain signals queued while join was awaiting its roster response.
+      void this.tick(generation)
     } catch (error) { if (this.live(generation)) await this.finish("failed", message(error)) }
     finally { if (this.live(generation)) this.joining = false }
   }
@@ -221,10 +234,8 @@ export class CallRoomEngine implements CallRoomController {
   private async refreshConfiguration(generation: number) {
     const configuration = await this.configurationTransport.configuration(this.connectionPolicy)
     if (!this.live(generation)) return
-    if (this.connectionPolicy === "relay" && !configuration.relayAvailable) throw new CallTransportError("Relay calling is not configured on this server. Enable direct connections in Call settings to continue; this shares your network address with other participants.", "relay-unavailable")
-    this.configuration = { iceServers: configuration.iceServers, iceTransportPolicy: this.connectionPolicy, bundlePolicy: "max-bundle" }
+    this.configuration = directIceConfiguration(configuration.iceServers)
     this.configurationExpiresAt = configuration.expiresAt
-    this.update({ relayAvailable: configuration.relayAvailable })
   }
   private async reconcile(room: CallRoomState, generation: number) {
     if (!this.live(generation)) return
@@ -238,7 +249,7 @@ export class CallRoomEngine implements CallRoomController {
     for (const [key, peer] of this.peers) {
       if (!members.some(member => member.publicKey === key && member.sessionId === peer.member.sessionId)) { this.closePeer(peer); this.peers.delete(key) }
     }
-    if (members.some(member => member.policy !== this.connectionPolicy)) throw new Error("This call uses a different connection privacy setting. Leave and choose the matching setting before rejoining.")
+    if (members.some(member => member.policy !== this.connectionPolicy)) throw new Error("This room contains an incompatible calling session. Ask the participants to update Serotine and rejoin for a direct call.")
     if (members.some(member => !this.peers.has(member.publicKey)) && this.configurationExpiresAt <= this.now() + 30_000) await this.refreshConfiguration(generation)
     if (!this.live(generation)) return
     const latest = this.currentTarget()
@@ -271,7 +282,11 @@ export class CallRoomEngine implements CallRoomController {
     }
     this.peers.set(member.publicKey, peer)
     pc.onicecandidate = event => {
-      if (event.candidate && this.peerLive(peer, generation)) void this.sendCandidate(peer, event.candidate.toJSON(), generation)
+      if (event.candidate && this.peerLive(peer, generation)) {
+        try { assertDirectCandidate(event.candidate.candidate) }
+        catch (error) { this.failPeer(peer, generation, message(error)); return }
+        void this.sendCandidate(peer, event.candidate.toJSON(), generation)
+      }
     }
     pc.ontrack = event => {
       if (!this.peerLive(peer, generation)) { event.track.stop(); return }
@@ -295,7 +310,7 @@ export class CallRoomEngine implements CallRoomController {
   }
   private peerDeadline(peer: Peer, generation: number, milliseconds: number) {
     if (peer.deadline) clearTimeout(peer.deadline)
-    peer.deadline = setTimeout(() => this.failPeer(peer, generation, "Could not connect to this participant. A TURN relay may be needed for these networks."), milliseconds)
+    peer.deadline = setTimeout(() => this.failPeer(peer, generation, "A direct connection to this participant could not be established. One of your networks may block peer-to-peer calls. Try a different network and rejoin."), milliseconds)
   }
   private async send(peer: Peer, payload: RoomPayload, generation: number) {
     if (!this.peerLive(peer, generation) || !this.joined || !this.transport || !this.snapshot.roomId) return
@@ -319,6 +334,7 @@ export class CallRoomEngine implements CallRoomController {
     if (!this.peerLive(peer, generation) || !this.isOfferer(peer)) return
     const description = await peer.pc.createOffer({ iceRestart: restart })
     if (!this.peerLive(peer, generation)) return
+    assertDirectDescription(description.sdp ?? "")
     await peer.pc.setLocalDescription(description)
     if (this.peerLive(peer, generation)) await this.send(peer, { kind: "offer", description: { type: "offer", sdp: peer.pc.localDescription!.sdp } }, generation)
   }
@@ -349,10 +365,12 @@ export class CallRoomEngine implements CallRoomController {
           }
           const description = await peer.pc.createAnswer()
           if (!this.peerLive(peer, generation)) return
+          assertDirectDescription(description.sdp ?? "")
           await peer.pc.setLocalDescription(description)
           if (this.peerLive(peer, generation)) await this.send(peer, { kind: "answer", description: { type: "answer", sdp: peer.pc.localDescription!.sdp } }, generation)
         }
       } else if (payload.kind === "ice") {
+        assertDirectCandidate(payload.candidate.candidate ?? "")
         if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(payload.candidate)
         else if (peer.pendingIce.length < 128) peer.pendingIce.push(payload.candidate)
       } else if (payload.kind === "restart") {
@@ -361,6 +379,7 @@ export class CallRoomEngine implements CallRoomController {
     })
   }
   private authenticateDescription(peer: Peer, sdp: string) {
+    assertDirectDescription(sdp)
     const fingerprints = [...sdp.matchAll(/^a=fingerprint:sha-256 ([A-Fa-f0-9:]+)\r?$/gm)].map(match => match[1].toUpperCase())
     if (!fingerprints.length || fingerprints.some(value => !/^(?:[A-F0-9]{2}:){31}[A-F0-9]{2}$/.test(value) || value !== fingerprints[0])) throw new Error("This participant's media identity could not be verified.")
     if (peer.fingerprint && peer.fingerprint !== fingerprints[0]) throw new Error("This participant's media identity changed. They need to rejoin the call.")
@@ -524,10 +543,9 @@ export class CallRoomEngine implements CallRoomController {
     await Promise.all([...this.peers.values()].map(peer => this.send(peer, this.mediaState(), generation).catch(error => this.failPeer(peer, generation, message(error)))))
   }
   updateSettings(settings: Partial<CallSettings>) {
-    const next = { ...this.snapshot.settings, ...settings }
+    const next = { silenceIncoming: settings.silenceIncoming ?? this.snapshot.settings.silenceIncoming }
     this.update({ settings: next })
     this.options.onSettingsChange?.(next)
-    if (next.relayOnly && this.connectionPolicy === "all" && !TERMINAL.has(this.snapshot.phase)) void this.finish("ended", "Rejoin the call to use relay-only connections.")
   }
   async leave() { await this.finish("ended") }
   dismiss() {
@@ -545,9 +563,12 @@ export class CallRoomEngine implements CallRoomController {
     this.joining = false
     this.transport = null
     this.update({ phase, error: error ?? null, localStream: null, participants: [], cameraEnabled: false })
-    if (notify && transport && roomId) await transport.leave(roomId).catch(() => {})
+    try { if (notify && transport && roomId) await transport.leave(roomId).catch(() => {}) }
+    finally { transport?.dispose() }
   }
   private cleanup() {
+    this.unsubscribeTransport?.(); this.unsubscribeTransport = null
+    this.tickGeneration = null; this.tickPending = false
     for (const timer of [this.pollTimer, this.deadline, this.leaseTimer]) if (timer) clearTimeout(timer)
     this.pollTimer = null; this.deadline = null; this.leaseTimer = null
     this.mediaGeneration.audio++; this.mediaGeneration.video++
@@ -562,6 +583,7 @@ export class CallRoomEngine implements CallRoomController {
     this.disposed = true
     this.generation++
     this.cleanup()
+    this.configurationTransport.dispose?.()
     this.listeners.clear()
     if (typeof window !== "undefined") {
       window.removeEventListener("pagehide", this.onPageHide)

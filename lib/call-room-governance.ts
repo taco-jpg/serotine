@@ -7,7 +7,7 @@ interface Options {
   getTarget: (target: CallRoomTarget) => CallRoomTarget | null
 }
 interface Dependencies {
-  transport?: Pick<CallRoomTransport, "status">
+  transport?: Pick<CallRoomTransport, "status"> & Partial<Pick<CallRoomTransport, "dispose">>
   retryDelayMs?: number
   maxScopes?: number
 }
@@ -27,7 +27,7 @@ const scope = (target: CallRoomTarget) => target.kind === "group" ? callRoomId(t
  * can outlive local media so a channel deletion still reaches the relay. */
 export class CallRoomGovernance {
   private readonly entries = new Map<string, Entry>()
-  private readonly transport: Pick<CallRoomTransport, "status">
+  private readonly transport: Pick<CallRoomTransport, "status"> & Partial<Pick<CallRoomTransport, "dispose">>
   private disposed = false
   constructor(private readonly options: Options, private readonly dependencies: Dependencies = {}) {
     this.transport = dependencies.transport ?? createCallRoomTransport(options.identity)
@@ -96,5 +96,6 @@ export class CallRoomGovernance {
     this.disposed = true
     for (const entry of this.entries.values()) clearTimeout(entry.timer)
     this.entries.clear()
+    this.transport.dispose?.()
   }
 }

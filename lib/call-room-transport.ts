@@ -3,7 +3,7 @@ import type { RequestProof } from "./protocol"
 import { decryptFromPeer, encryptForPeer, importKey } from "./crypto"
 import { createRequestProof, verifyRequestProof } from "./request-auth"
 import { CALL_PAGE_SIZE, CALL_SIGNAL_TTL_MS, isCallId, isCallObject, type CallRoutingPolicy } from "./call-protocol"
-import { CallTransportError } from "./call-transport"
+import { CallTransportError, createCallSocket } from "./call-socket"
 import { canJoinCommunityVoiceChannel } from "./community-protocol"
 import { callRoomId, isCallRoomState, isCallRoomPayload, isEncryptedCallRoomSignal,
   type CallRoomTarget, type CallRoomState, type CallRoomPayload, type CallRoomSignal, type EncryptedCallRoomSignal } from "./call-room-protocol"
@@ -16,33 +16,8 @@ export function createCallRoomTransport(identity: Identity, sessionId = crypto.r
   if (!isCallId(sessionId)) throw new CallTransportError("Invalid calling device session.")
   const key = importKey(identity.privateKey, "encryption", "private")
   const seen = new Map<string, number>()
-  async function request(action: string, data: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const proof = await createRequestProof(action, data, identity.privateKey, identity.publicKey)
-    const controller = new AbortController()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new CallTransportError("The calling service took too long to respond. Retry the call.")) }, 10_000) })
-    try {
-      return await Promise.race([timeout, (async () => {
-        const response = await fetch("/api/calls", { method: "POST", mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store",
-          referrerPolicy: "strict-origin", headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({ version: 1, action, data, proof }), signal: controller.signal })
-        if (response.status === 404) throw new CallTransportError("Group calling is not available on this server yet.")
-        if (response.status >= 500) throw new CallTransportError("Calling is temporarily unavailable. Your conversation is still available.")
-        if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "")) throw new CallTransportError(UNEXPECTED)
-        const result: unknown = await response.json()
-        if (!isCallObject(result)) throw new CallTransportError(UNEXPECTED)
-        if (result.success === false) {
-          if (typeof result.error !== "string" || result.error.length > 500 || /[<>]/.test(result.error) || [...result.error].some(c => c.charCodeAt(0) < 32)) throw new CallTransportError(UNEXPECTED)
-          throw new CallTransportError(result.error)
-        }
-        if (!response.ok || result.success !== true) throw new CallTransportError(UNEXPECTED)
-        return result
-      })()])
-    } catch (error) {
-      if (error instanceof CallTransportError) throw error
-      throw new CallTransportError("Could not reach the calling service. Check your connection and retry.")
-    } finally { clearTimeout(timer); controller.abort() }
-  }
+  const socket = createCallSocket(identity, sessionId)
+  const request = socket.request
   function room(result: Record<string, unknown>, target: CallRoomTarget): CallRoomState {
     const members = target.kind === "group" ? target.group.members : target.community.members.filter(p => canJoinCommunityVoiceChannel(target.community, p, target.channelId))
     if (!isCallRoomState(result.room) || result.room.roomId !== callRoomId(target) || result.room.participants.some(p => !members.includes(p.publicKey))) throw new CallTransportError(UNEXPECTED)
@@ -67,6 +42,8 @@ export function createCallRoomTransport(identity: Identity, sessionId = crypto.r
   }
   return {
     sessionId,
+    subscribe: socket.subscribe,
+    dispose: socket.dispose,
     async join(target: CallRoomTarget, mode: "voice" | "video", policy: CallRoutingPolicy): Promise<CallRoomState> {
       if (target.kind === "channel" && mode !== "voice") throw new CallTransportError("Voice channels support microphone audio. Start a group video call to use a camera.")
       const state = room(await request("room:join", { sessionId, target, mode, policy }), target)
@@ -74,7 +51,7 @@ export function createCallRoomTransport(identity: Identity, sessionId = crypto.r
       return state
     },
     async status(target: CallRoomTarget): Promise<CallRoomState> { return room(await request("room:status", { sessionId, target }), target) },
-    async poll(target: CallRoomTarget, after = 0): Promise<{ room: CallRoomState; signals: CallRoomSignal[]; nextCursor: number }> {
+    async poll(target: CallRoomTarget, after = 0): Promise<{ room: CallRoomState; signals: CallRoomSignal[]; nextCursor: number; hasMore?: boolean }> {
       const result = await request("room:poll", { sessionId, target, after })
       const state = room(result, target)
       if (!Array.isArray(result.signals) || result.signals.length > CALL_PAGE_SIZE || !result.signals.every(isEncryptedCallRoomSignal)
@@ -84,7 +61,7 @@ export function createCallRoomTransport(identity: Identity, sessionId = crypto.r
       if (result.nextCursor !== last) throw new CallTransportError(UNEXPECTED)
       for (const [id, expires] of seen) if (expires <= Date.now()) seen.delete(id)
       const decoded = await Promise.all(result.signals.map(signal => open(signal, state)))
-      return { room: state, signals: decoded.filter((signal): signal is CallRoomSignal => signal !== null), nextCursor: last }
+      return { room: state, signals: decoded.filter((signal): signal is CallRoomSignal => signal !== null), nextCursor: last, hasMore: result.signals.length === CALL_PAGE_SIZE }
     },
     async send(roomId: string, peer: string, targetSession: string, payload: CallRoomPayload): Promise<void> {
       if (!isCallRoomPayload(payload)) throw new CallTransportError("Invalid room negotiation.")

@@ -6,9 +6,9 @@ import { CALL_INVITE_TTL_MS, CALL_PAGE_SIZE, CALL_SIGNAL_TTL_MS, isCallId, isCal
   type CallSession, type CallSignal, type CallSignalPayload, type EncryptedCallSignal } from "./call-protocol"
 import type { RequestProof } from "./protocol"
 
-export class CallTransportError extends Error {
-  constructor(message: string, public code?: "relay-unavailable") { super(message) }
-}
+import { createCallSocket, CallTransportError } from "./call-socket"
+import { directIceConfiguration } from "./call-ice"
+export { CallTransportError } from "./call-socket"
 const UNEXPECTED = "The calling service returned an unexpected response. Reload Serotine and retry."
 
 /** One memory-only device session per engine. No signaling or credentials enter storage/backups. */
@@ -17,38 +17,8 @@ export function createCallTransport(identity: Identity, sessionId = crypto.rando
   const key = importKey(identity.privateKey, "encryption", "private")
   const seen = new Map<string, number>()
 
-  async function request(action: string, data: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const proof = await createRequestProof(action, data, identity.privateKey, identity.publicKey)
-    const controller = new AbortController()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => { controller.abort(); reject(new CallTransportError("The calling service took too long to respond. Retry the call.")) }, 10_000)
-    })
-    try {
-      return await Promise.race([timeout, (async () => {
-        const response = await fetch("/api/calls", {
-          method: "POST", mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store",
-          referrerPolicy: "strict-origin", headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({ version: 1, action, data, proof }), signal: controller.signal,
-        })
-        if (response.status === 404) throw new CallTransportError("Calling is not available on this server yet.")
-        if (response.status >= 500) throw new CallTransportError("Calling is temporarily unavailable. Your conversation is still available.")
-        if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "")) throw new CallTransportError(UNEXPECTED)
-        const result: unknown = await response.json()
-        if (!isCallObject(result)) throw new CallTransportError(UNEXPECTED)
-        if (result.success === false) {
-          if (typeof result.error !== "string" || result.error.length > 500 || /[<>]/.test(result.error)
-            || [...result.error].some(character => character.charCodeAt(0) < 32)) throw new CallTransportError(UNEXPECTED)
-          throw new CallTransportError(result.error, result.code === "relay-unavailable" ? "relay-unavailable" : undefined)
-        }
-        if (!response.ok || result.success !== true) throw new CallTransportError(UNEXPECTED)
-        return result
-      })()])
-    } catch (error) {
-      if (error instanceof CallTransportError) throw error
-      throw new CallTransportError("Could not reach the calling service. Check your connection and retry.")
-    } finally { clearTimeout(timer); controller.abort() }
-  }
+  const socket = createCallSocket(identity, sessionId)
+  const request = socket.request
 
   async function seal(callId: string, peer: string, targetSession: string | null, payload: CallSignalPayload): Promise<EncryptedCallSignal> {
     if (!isCallPayload(payload)) throw new CallTransportError("Invalid call negotiation.")
@@ -99,6 +69,8 @@ export function createCallTransport(identity: Identity, sessionId = crypto.rando
 
   return {
     sessionId,
+    subscribe: socket.subscribe,
+    dispose: socket.dispose,
     async heartbeat(acceptedPeers: string[], incomingPeers = acceptedPeers): Promise<void> {
       const peers = [...new Set(acceptedPeers)].filter(peer => peer !== identity.publicKey).slice(0, 500)
       await request("call:heartbeat", { sessionId, peers, incomingPeers: [...new Set(incomingPeers)].filter(peer => peers.includes(peer)) })
@@ -123,7 +95,7 @@ export function createCallTransport(identity: Identity, sessionId = crypto.rando
       const signal = await seal(callId, peer, targetSession, payload)
       await request("call:send", { sessionId, signal, noHistory: "private" in payload && payload.private })
     },
-    async poll(after = 0): Promise<{ signals: CallSignal[]; sessions: CallSession[]; nextCursor: number }> {
+    async poll(after = 0): Promise<{ signals: CallSignal[]; sessions: CallSession[]; nextCursor: number; hasMore?: boolean }> {
       const result = await request("call:poll", { sessionId, after })
       if (!Array.isArray(result.sessions) || result.sessions.length > 32 || !result.sessions.every(isCallSession)
         || !Array.isArray(result.signals) || result.signals.length > CALL_PAGE_SIZE || !result.signals.every(isEncryptedCallSignal)
@@ -137,23 +109,16 @@ export function createCallTransport(identity: Identity, sessionId = crypto.rando
       if (last !== result.nextCursor) throw new CallTransportError(UNEXPECTED)
       for (const [id, expiry] of seen) if (expiry <= Date.now()) seen.delete(id)
       const decoded = await Promise.all(result.signals.map(signal => open(signal, result.sessions as CallSession[])))
-      return { signals: decoded.filter((signal): signal is CallSignal => signal !== null), sessions: result.sessions, nextCursor: last }
+      return { signals: decoded.filter((signal): signal is CallSignal => signal !== null), sessions: result.sessions, nextCursor: last, hasMore: result.signals.length === CALL_PAGE_SIZE }
     },
     async finish(callId: string, reason: CallEndReason, noHistory = false): Promise<CallSession> {
       return resultSession(await request("call:finish", { sessionId, callId, reason, noHistory }), callId)
     },
     async configuration(policy: CallRoutingPolicy): Promise<CallConfiguration> {
       const result = await request("call:configuration", { sessionId, policy })
-      if (typeof result.relayAvailable !== "boolean" || !Array.isArray(result.iceServers) || result.iceServers.length > 8
-        || !Number.isSafeInteger(result.expiresAt)) throw new CallTransportError(UNEXPECTED)
-      for (const server of result.iceServers) {
-        if (!isCallObject(server) || !Array.isArray(server.urls) || server.urls.length > 8 || !server.urls.every(url => typeof url === "string" && /^(stun|turn)s?:[^\s@]+$/.test(url))
-          || (server.username !== undefined && typeof server.username !== "string") || (server.credential !== undefined && typeof server.credential !== "string")) throw new CallTransportError(UNEXPECTED)
-      }
-      if (policy === "relay" && (!result.relayAvailable || !result.iceServers.some(server => (server.urls as string[]).some(url => /^turns?:/.test(url))))) {
-        throw new CallTransportError("Relay calling needs a configured TURN relay. You can explicitly allow a direct connection, but some networks require a relay.", "relay-unavailable")
-      }
-      return { relayAvailable: result.relayAvailable, iceServers: result.iceServers as RTCIceServer[], expiresAt: Number(result.expiresAt) }
+      if (!Array.isArray(result.iceServers) || !Number.isSafeInteger(result.expiresAt) || result.relayAvailable === true) throw new CallTransportError(UNEXPECTED)
+      const configuration = directIceConfiguration(result.iceServers as RTCIceServer[])
+      return { relayAvailable: false, iceServers: configuration.iceServers!, expiresAt: Number(result.expiresAt) }
     },
   }
 }

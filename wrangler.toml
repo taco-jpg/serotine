@@ -2,7 +2,7 @@
 name = "serotine"
 compatibility_date = "2026-05-06"
 compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
-main = ".open-next/worker.js"
+main = "custom-worker.ts"
 
 # Workers + Static Assets — serve _next/static/* from .open-next/assets
 assets = { directory = ".open-next/assets", binding = "ASSETS" }
@@ -11,6 +11,15 @@ assets = { directory = ".open-next/assets", binding = "ASSETS" }
 [[services]]
 binding = "WORKER_SELF_REFERENCE"
 service = "serotine"
+
+# WebSocket signaling only. Audio/video stays on direct WebRTC connections.
+[[durable_objects.bindings]]
+name = "CALL_SIGNALING"
+class_name = "CallSignalingHub"
+
+[[migrations]]
+tag = "v1-call-signaling"
+new_sqlite_classes = ["CallSignalingHub"]
 
 [[d1_databases]]
 binding = "serotine_db"

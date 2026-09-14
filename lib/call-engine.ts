@@ -291,10 +291,12 @@ export class CallEngine implements CallController {
         this.update({ phase: "ringing" })
         const session = await this.transport.invite(peer, callId, { kind: "invite", mode: wireMode(this.snapshot.mode), policy: this.connectionPolicy, private: this.privateCall })
         if (!this.live(generation)) { await this.transport.finish(callId, "cancelled").catch(() => {}); return }
-        this.session = session
+        // Polling may have already delivered the recipient's acceptance while
+        // this HTTP response was in flight. Preserve that newer session and timer.
+        this.session ??= session
         this.privateCall ||= session.noHistory
         this.published = true
-        this.timer(session.inviteExpiresAt - this.now(), "unanswered")
+        if (!this.accepted) this.timer(session.inviteExpiresAt - this.now(), "unanswered")
       } else {
         const session = await this.transport.claim(callId, this.privateCall)
         if (!this.live(generation)) { await this.transport.finish(callId, "cancelled").catch(() => {}); return }
@@ -344,9 +346,17 @@ export class CallEngine implements CallController {
     if (FINAL_PHASES.has(this.snapshot.phase) || signal.callId !== this.snapshot.callId || signal.sender !== this.snapshot.peer
       || !this.eligible(signal.sender) || signal.targetSession !== this.transport.sessionId) return
     if (payload.kind === "accept") {
-      if (this.snapshot.direction !== "outgoing" || this.snapshot.phase !== "ringing" || !this.session) return
+      if (this.snapshot.direction !== "outgoing" || this.snapshot.phase !== "ringing") return
+      const session = this.session ?? this.sessions.get(signal.callId)
       // A valid acceptance is bound to the session atomically selected by the relay.
-      if (this.session.status !== "active" || signal.senderSession !== this.session.recipientSession) return
+      // The poll can arrive before our invite request returns; it still carries
+      // authenticated server state and must not lose that early acceptance.
+      if (!session || session.status !== "active" || session.caller !== this.options.identity.publicKey
+        || session.recipient !== signal.sender || session.callerSession !== this.transport.sessionId
+        || signal.senderSession !== session.recipientSession) return
+      this.session = session
+      this.published = true
+      this.privateCall ||= session.noHistory
       this.peerSession = signal.senderSession
       this.privateCall ||= Boolean(payload.private)
       this.accepted = true

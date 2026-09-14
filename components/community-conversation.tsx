@@ -19,7 +19,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { useChatDraft } from "@/hooks/use-chat-draft"
 import { useMentionDraft } from "@/hooks/use-mention-draft"
 import { useLocalNickname } from "@/hooks/use-local-nickname"
-import { attachmentFileLimit, sendAttachment } from "@/lib/attachments"
+import { attachmentFileLimit, sendAttachment, stageAttachment, publishAttachment } from "@/lib/attachments"
 import { canJoinCommunityVoiceChannel, canPostToCommunityChannel, communityChannelKey, isCommunityModerator } from "@/lib/community-protocol"
 import { findMentionQuery, insertMention, serializeMentionDraft, updateMentionSpans, validMentionSpans, type MentionQuery } from "@/lib/composer-mentions"
 import { formatMentionText } from "@/lib/mention-display"
@@ -111,6 +111,8 @@ function CommunityTextConversation({ api, community, channel, onReport, onHide }
   const messageNodes = useRef(new Map<string, HTMLDivElement>())
   const nearBottom = useRef(true)
   const seenIds = useRef<Set<string> | null>(null)
+  const attachmentAccess = useRef("")
+  attachmentAccess.current = canPost && api.identity ? `${myPub}:${community.id}:${channel.id}` : ""
   const mounted = useRef(true)
   const sendLock = useRef(false)
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -268,7 +270,7 @@ function CommunityTextConversation({ api, community, channel, onReport, onHide }
     } catch (cause) { if (mounted.current) setError(failure(cause)) }
     finally { sendLock.current = false; if (mounted.current) { setRetrying(null); setBatchProgress("") } }
   }
-  const attachmentView = (message: CommunityMessage) => !message.hidden && message.attachment && <AttachmentView metadata={message.attachment} chunks={api.getAttachmentChunks(community.id, channel.id, message.id)} />
+  const attachmentView = (message: CommunityMessage) => !message.hidden && message.attachment && <AttachmentView identity={api.identity} metadata={message.attachment} chunks={api.getAttachmentChunks(community.id, channel.id, message.id)} />
   const openMessageFromInfo = (id: string) => { setInfoOpen(false); requestAnimationFrame(() => jumpToMessage(id)) }
   const moveMatch = (direction: number) => { if (matches.length) setMatchIndex((selectedMatch + direction + matches.length) % matches.length) }
   const messageInput = <div className="flex min-w-0 items-end gap-1"><Button type="button" variant="ghost" size="icon" className="size-9 shrink-0" aria-label="More message tools" title="Files, GIFs and message tools" aria-expanded={toolsOpen} aria-controls="community-message-tools" onClick={() => setToolsOpen(value => !value)}>{toolsOpen ? <X className="size-4" /> : <Plus className="size-4" />}</Button><Textarea ref={input} aria-label={`Message ${channel.name}`} placeholder={`Message #${channel.name}`} value={content} maxLength={MAX_MESSAGE_LENGTH} disabled={!canPost || !draftReady} readOnly={busy} rows={1} className="max-h-36 min-h-9 min-w-0 flex-1 resize-none border-0 bg-transparent px-1.5 py-2 text-base shadow-none focus-visible:ring-0 md:text-sm" onChange={event => changeMessage(event.target.value, event.target.selectionStart, event.target.selectionEnd)} onSelect={event => { const node = event.currentTarget; if (document.activeElement === node) updateMentionQuery(node.value, node.selectionStart, node.selectionEnd) }} onBlur={() => setMentionOpen(false)} aria-autocomplete="list" aria-controls={mentionOpen ? "community-mention-options" : undefined} aria-activedescendant={mentionOpen && mentionCandidates.length ? `community-mention-${selectedMentionIndex}` : undefined} onKeyDown={event => {
@@ -326,12 +328,24 @@ function CommunityTextConversation({ api, community, channel, onReport, onHide }
     {failed.length > 1 && <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border px-3 py-1 text-xs"><span className="text-destructive">{batchProgress || `${failed.length} messages need another delivery attempt`}</span><Button size="sm" variant="ghost" disabled={sending} onClick={() => void retryMessages([...failed])}>Retry all</Button></div>}
     {canPost ? <footer className="shrink-0 border-t border-border bg-background px-2 py-2 sm:px-4">
       {replyTo && byId.get(replyTo) && <div className="mb-1 flex items-center gap-2 border-l-2 border-primary bg-primary/5 px-2 py-1 text-xs"><Reply className="size-3 shrink-0" /><div className="min-w-0 flex-1"><span className="text-primary">Replying to {displayName(byId.get(replyTo)!.senderPubKey)}</span><p className="truncate text-muted-foreground">{displaySummary(byId.get(replyTo)!)}</p></div><Button size="icon-sm" variant="ghost" aria-label="Cancel reply" onClick={() => setReplyTo(undefined)}><X className="size-3" /></Button></div>}
-      <form onSubmit={event => { event.preventDefault(); void submit() }}><div className="rounded-sm border border-border bg-card p-1 focus-within:border-ring"><AttachmentComposer owner={myPub} captureRef={chatRoot} pasteRef={input} composerRef={attachmentComposer} onStateChange={setAttachmentState} maxFileBytes={attachmentFileLimit(attachmentGroup)} toolbarId="community-message-tools" toolbarVisible={toolsOpen} disabled={!canPost || sending || !draftReady} extraActions={<><MessageFormattingTools content={content} inputRef={input} disabled={!canPost || sending || !draftReady} onInsert={insertFormatting} /><Button type="button" size="sm" variant="ghost" disabled={!canPost || sending} onClick={() => setPollOpen(true)}><BarChart3 className="size-4" />Poll</Button><Button type="button" size="sm" variant="ghost" disabled={!canPost || sending} aria-expanded={mentionOpen} onClick={() => { setMentionQuery(findMentionQuery(content, input.current?.selectionStart ?? content.length, input.current?.selectionEnd ?? content.length)); setMentionIndex(0); setMentionOpen(!mentionOpen); if (!mentionOpen) requestAnimationFrame(() => document.getElementById("community-mention-0")?.focus()); else input.current?.focus() }}><AtSign className="size-4" />Mention</Button></>} onSelectGif={url => {
+      <form onSubmit={event => { event.preventDefault(); void submit() }}><div className="rounded-sm border border-border bg-card p-1 focus-within:border-ring"><AttachmentComposer scopeKey={`${myPub}:${community.id}:${channel.id}`} owner={myPub} captureRef={chatRoot} pasteRef={input} composerRef={attachmentComposer} onStateChange={setAttachmentState} maxFileBytes={attachmentFileLimit(attachmentGroup)} toolbarId="community-message-tools" toolbarVisible={toolsOpen} disabled={!canPost || !draftReady} extraActions={<><MessageFormattingTools content={content} inputRef={input} disabled={!canPost || sending || !draftReady} onInsert={insertFormatting} /><Button type="button" size="sm" variant="ghost" disabled={!canPost || sending} onClick={() => setPollOpen(true)}><BarChart3 className="size-4" />Poll</Button><Button type="button" size="sm" variant="ghost" disabled={!canPost || sending} aria-expanded={mentionOpen} onClick={() => { setMentionQuery(findMentionQuery(content, input.current?.selectionStart ?? content.length, input.current?.selectionEnd ?? content.length)); setMentionIndex(0); setMentionOpen(!mentionOpen); if (!mentionOpen) requestAnimationFrame(() => document.getElementById("community-mention-0")?.focus()); else input.current?.focus() }}><AtSign className="size-4" />Mention</Button></>} onSelectGif={url => {
         if (!canPost || sending || !draftReady) return
         const next = content.trim() ? `${content}\n${url}` : url
         if (next.length > MAX_MESSAGE_LENGTH) { setError("Send or shorten your draft before adding this GIF."); return }
         changeMessage(next, next.length); requestAnimationFrame(() => input.current?.focus())
-      }} onSend={async (file, kind, onProgress, caption) => {
+      }} onStage={async (file, kind, onProgress, signal) => {
+        if (!api.identity || !canPost) throw new Error("This channel is not available for attachments.")
+        return stageAttachment((_id, eventKind, payload) => api.sendEvent(community.id, channel.id, eventKind, payload), community.id, file, api.identity, kind, onProgress, signal, attachmentGroup)
+      }} onPublish={async (prepared, caption) => {
+        if (!api.identity || !canPost) throw new Error("This channel is not available for attachments.")
+        const scope = `${myPub}:${community.id}:${channel.id}`
+        const id = await publishAttachment((_id, eventKind, payload) => {
+          if (!mounted.current || attachmentAccess.current !== scope) throw new Error("This channel is no longer available for attachments.")
+          return api.sendEvent(community.id, channel.id, eventKind, payload)
+        }, community.id, prepared, caption ? replyTo : undefined, caption)
+        if (mounted.current) jumpToLatest()
+        return id
+      }} onDiscard={prepared => prepared.discard()} onSend={async (file, kind, onProgress, caption) => {
         const id = await sendAttachment((_id, eventKind, payload) => api.sendEvent(community.id, channel.id, eventKind, payload), community.id, file, kind, onProgress, caption ? replyTo : undefined, attachmentGroup, caption)
         if (mounted.current) jumpToLatest()
         return id

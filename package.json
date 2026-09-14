@@ -28,7 +28,10 @@
     "test:private": "node scripts/private-chat-smoke.cjs",
     "test:qr": "node scripts/qr-smoke.cjs",
     "test:cleanup": "node scripts/chat-cleanup-smoke.cjs",
-    "test:recovery": "node scripts/recovery-smoke.cjs"
+    "test:recovery": "node scripts/recovery-smoke.cjs",
+    "test:ringing": "node scripts/ringing-smoke.cjs",
+    "test:backpack": "node scripts/backpack-storage-smoke.cjs",
+    "test:uploads": "node scripts/staged-uploads-smoke.cjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

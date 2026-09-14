@@ -143,7 +143,7 @@ export class CommunityService {
       this.actionTarget(prior.id, data.channelId, data.type as EventKind, data)
     if ("replyTo" in data && data.replyTo && !this.model.messages.some(message => message.id === data.replyTo && message.conversationId === prior.id && message.channelId === data.channelId && !message.hidden))
       throw new Error("The message you are replying to is no longer available.")
-    if (data.type === "attachment" && this.attachmentChunks(prior.id, data.channelId, this.address, data).length !== data.attachment.chunks)
+    if (data.type === "attachment" && !data.attachment.remote && this.attachmentChunks(prior.id, data.channelId, this.address, data).length !== data.attachment.chunks)
       throw new Error("The community changed or this upload is incomplete. Attach the file again to restart the transfer.")
     if (data.type === "state" && data.state.owner !== prior.owner && this.model.requests.some(request => request.communityId === prior.id && request.status === "pending"))
       throw new Error("A new join request arrived. Try transferring ownership again so it can be resolved first.")
@@ -444,7 +444,7 @@ export class CommunityService {
   getAttachmentChunks = (id: string, channelId: string, messageId: string): Array<{ index: number; data: string }> => {
     const key = messageKey(id, channelId, messageId), index = this.index
     const message = index.messages.get(key)
-    if (!message?.attachment) return NO_ATTACHMENT_PIECES
+    if (!message?.attachment || message.attachment.remote) return NO_ATTACHMENT_PIECES
     const metadata = index.originals.get(key)?.payload.community
     if (metadata?.type !== "attachment") return NO_ATTACHMENT_PIECES
     return this.attachmentChunks(id, channelId, message.senderPubKey, metadata)

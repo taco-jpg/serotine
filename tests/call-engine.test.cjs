@@ -217,6 +217,44 @@ test('cancelling while invite request is in flight releases capture and cancels 
   assert.equal(f.finished.at(-1).reason, 'cancelled'); assert.equal(f.pcs.length, 0)
 })
 
+test('acceptance arriving before a delayed invitation response connects once and keeps the newer session deadline', async t => {
+  const f = fixture(t), pending = deferred()
+  const invite = f.transport.invite
+  f.transport.invite = async (...args) => { const oldResponse = { ...await invite(...args) }; await pending.promise; return oldResponse }
+  await f.engine.prepareOutgoing(PEER, 'audio')
+  const inviting = f.engine.connectPreview()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.engine.session, null)
+  await f.acceptOutgoing()
+  assert.equal(f.engine.getSnapshot().phase, 'connecting'); assert.equal(f.pcs.length, 1)
+  const selected = f.engine.session.recipientSession
+  f.pcs[0].state('connected')
+  assert.equal(f.engine.deadline, null)
+  pending.resolve(); await inviting
+  assert.equal(f.engine.getSnapshot().phase, 'connected')
+  assert.equal(f.engine.session.status, 'active'); assert.equal(f.engine.session.recipientSession, selected)
+  assert.equal(f.engine.deadline, null, 'Late ringing response must not replace connected state with an unanswered deadline')
+  assert.equal(f.sent.filter(signal => signal.payload.kind === 'offer').length, 1)
+})
+
+test('early acceptance from an unselected recipient session cannot connect during invitation publication', async t => {
+  const f = fixture(t), pending = deferred()
+  const invite = f.transport.invite
+  f.transport.invite = async (...args) => { const session = await invite(...args); await pending.promise; return session }
+  await f.engine.prepareOutgoing(PEER, 'audio')
+  const inviting = f.engine.connectPreview()
+  await new Promise(resolve => setImmediate(resolve))
+  const session = f.sessions.get(f.engine.getSnapshot().callId)
+  session.status = 'active'; session.recipientSession = crypto.randomUUID()
+  f.queued.push({ id: crypto.randomUUID(), callId: session.callId, sender: PEER, recipient: OWNER,
+    senderSession: crypto.randomUUID(), targetSession: f.transport.sessionId, expiresAt: Date.now() + 30_000,
+    payload: { kind: 'accept', mode: 'voice', private: false } })
+  await f.poll()
+  assert.equal(f.engine.getSnapshot().phase, 'ringing'); assert.equal(f.pcs.length, 0)
+  pending.resolve(); await inviting
+  assert.equal(f.pcs.length, 0)
+})
+
 test('relay-only preflight fails without a relay, without obtaining any microphone or camera', async t => {
   const f = fixture(t, { relayAvailable: false, settings: { relayOnly: true } })
   await f.engine.prepareOutgoing(PEER, 'video')

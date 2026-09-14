@@ -4,6 +4,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { test, before, beforeEach } = require('node:test')
 const ts = require('typescript')
+const remoteAttachment = require('./fixtures/remote-attachment.cjs')
 const root = path.join(__dirname, '..')
 const local = new Map(), databases = new Map(), cache = new Map()
 let writes = 0, failCommit = false, beforeLegacyPut
@@ -364,6 +365,34 @@ async function saveEvent(author, cid, kind, payload, extra = {}) {
   await events.saveStoredEvent(alice.publicKey, record)
   return record
 }
+
+test('encrypted full backup restores remote file descriptors and captions without materializing file chunks', async () => {
+  local.set('serotine_identity_v2', JSON.stringify(alice))
+  const attachment = remoteAttachment()
+  const record = await saveEvent(alice, bob.publicKey, 'attachment', { attachment, content: 'Keep the download with this caption' })
+  const exported = await backup.exportFullBackup(alice, password)
+  assert.equal(exported.includes(attachment.remote.key), false)
+  assert.equal(exported.includes(attachment.remote.capability), false)
+  const plain = await decryptPayload(exported)
+  assert.equal(plain.messaging.events.length, 1)
+  assert.deepEqual(plain.messaging.events[0].event.payload.attachment, attachment)
+  local.clear(); databases.clear()
+  await backup.restoreBackup(exported, password)
+  const restored = await events.exportMessagingSnapshot(alice.publicKey)
+  assert.equal(restored.events.length, 1)
+  assert.equal(restored.events[0].event.id, record.event.id)
+  assert.deepEqual(restored.events[0].event.payload, { attachment, content: 'Keep the download with this caption' })
+})
+
+test('a validly signed but malformed remote file in an encrypted backup is rejected before writes', async () => {
+  const invalid = snapshot(), attachment = remoteAttachment()
+  attachment.remote.hashes.pop()
+  const event = await messaging.signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: alice.publicKey,
+    conversationId: bob.publicKey, recipients: [bob.publicKey], timestamp: Date.now(), kind: 'attachment', payload: { attachment } }, alice)
+  invalid.messaging.events.push({ key: events.eventStorageKey(event), event, local: true, delivered: [], receivedAt: Date.now() })
+  await assert.rejects(backup.restoreBackup(await encryptPayload(invalid), password), /invalid|event/i)
+  assert.equal(writes, 0)
+})
 
 test('individual deletion removes text and controls while retaining replies, other messages and conversations', async () => {
   const target = await saveEvent(bob, bob.publicKey, 'message', { content: 'Remove only this secret' })

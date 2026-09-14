@@ -3,6 +3,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { test, before, beforeEach } = require('node:test')
 const ts = require('typescript')
+const remoteAttachment = require('./fixtures/remote-attachment.cjs')
 const root = path.join(__dirname, '..')
 const modules = new Map(), stores = new Map(), prefs = new Map(), cursors = new Map()
 const packets = [], attempts = []
@@ -614,6 +615,51 @@ test('retrying an attachment retries failed chunks and retains successful pieces
   await receiver.synchronize()
   const message = receiver.instance.model.messages.find(m => m.id === id)
   assert.equal((await files.assembleAttachment(message.attachment, receiver.instance.getAttachmentChunks(alice.publicKey, id))).size, files.ATTACHMENT_CHUNK_BYTES * 5)
+})
+
+test('a 1 GB remote file sends one encrypted message and receives delivery and read receipts without legacy chunks', async t => {
+  prefs.set(bob.publicKey, { ...defaults(), accepted: [alice.publicKey] })
+  const sender = await engine(alice), receiver = await engine(bob), attachment = remoteAttachment()
+  t.after(() => { sender.instance.dispose(); receiver.instance.dispose() })
+  const id = await sender.instance.sendEvent(bob.publicKey, 'attachment', { attachment, content: 'Uploaded while writing this caption' })
+  assert.equal(sender.instance.records.filter(record => record.event.kind === 'attachment-chunk').length, 0)
+  await sender.synchronize()
+  assert.equal(sender.instance.model.messages.find(message => message.id === id).delivery, 'sent')
+  assert.equal(packets.filter(packet => packet.id === id).length, 1)
+  assert.equal(JSON.stringify(packets).includes(attachment.remote.key), false, 'the encryption key stays inside the encrypted event')
+  await receiver.synchronize()
+  const message = receiver.instance.model.messages.find(message => message.id === id)
+  assert.deepEqual(message.attachment, attachment)
+  assert.equal(message.content, 'Uploaded while writing this caption')
+  assert.equal(message.delivery, 'received')
+  assert.deepEqual(receiver.instance.getAttachmentChunks(alice.publicKey, id), [])
+  await receiver.synchronize(); await sender.synchronize()
+  assert.deepEqual(sender.instance.model.messages.find(message => message.id === id).deliveredTo, [bob.publicKey])
+  await receiver.instance.markRead(alice.publicKey)
+  await receiver.synchronize(); await sender.synchronize()
+  assert.deepEqual(sender.instance.model.messages.find(message => message.id === id).readBy, [bob.publicKey])
+  assert.equal(receiver.instance.records.some(record => record.event.kind === 'attachment-chunk'), false)
+})
+
+test('malformed remote file descriptors fail before queueing or sending', async t => {
+  const sender = await engine(alice)
+  t.after(() => sender.instance.dispose())
+  for (const damage of [meta => { meta.remote.hashes.pop() }, meta => { meta.remote.key = 'invalid' }, meta => { meta.remote.chunkBytes = 30 * 1024 }, meta => { meta.size++ }]) {
+    const attachment = remoteAttachment()
+    damage(attachment)
+    await assert.rejects(sender.instance.sendEvent(bob.publicKey, 'attachment', { attachment }), /invalid|large/i)
+  }
+  assert.equal(sender.instance.records.length, 0)
+  assert.equal(packets.length, 0)
+})
+
+test('legacy file metadata without its chunks remains pending after a successful relay send', async t => {
+  const sender = await engine(alice)
+  t.after(() => sender.instance.dispose())
+  const attachment = { id: crypto.randomUUID(), name: 'unfinished.txt', mime: 'text/plain', size: 2, chunks: 1, sha256: 'a'.repeat(64), kind: 'file' }
+  const id = await sender.instance.sendEvent(bob.publicKey, 'attachment', { attachment })
+  await sender.synchronize()
+  assert.equal(sender.instance.model.messages.find(message => message.id === id).delivery, 'pending')
 })
 
 test('archiving survives reload and new direct messages without restoring the request list', async () => {

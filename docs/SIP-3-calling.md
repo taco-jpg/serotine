@@ -10,6 +10,8 @@ Starting a call opens a local preparation view. The microphone is requested afte
 
 The call bar remains visible across conversations. It includes connection state, duration, microphone and camera controls, device choices, and an end button. Video expands into a larger view. Camera-off releases camera capture. Ending, cancelling, timeout, identity change, and page exit release local media. A late permission response after cancellation also releases its tracks. Camera failure leaves audio available.
 
+Incoming invitations play a local ringtone and outgoing calls play a quieter waiting tone. **Calling · Waiting for answer** means the invitation has not been accepted; it does not confirm that another device is making sound. Browsers require an interaction before playing audio; use **Enable call sounds** when shown. Sounds stop on answer, cancel, timeout, silence, or identity change. A fast answer is retained even when the outgoing invitation response arrives later.
+
 Invitations expire after 40 seconds. Connection setup has a 30-second deadline; interruption permits a bounded 15-second reconnection attempt, preserving media choices. A new call requires another explicit action. Browsers can suspend background tabs, especially on phones; suspended or closed browsers cannot reliably ring or maintain calls.
 
 One live call reserves both participants' identities on the relay. A conditional database write selects the first incoming device that accepts. Other tabs/devices stop ringing on their next poll. Concurrent outgoing calls cannot reserve the same identity twice.
@@ -46,6 +48,8 @@ The Cloudflare Worker can issue short-lived coturn-compatible REST credentials u
 
 Keep the shared TURN secret in a Worker secret, never in a `NEXT_PUBLIC_` variable. The browser receives expiring credentials, not the shared secret. TURN service operation, traffic charges, quotas, and production credentials belong to the site operator. This implementation does not provision or deploy a TURN service.
 
+The Cloudflare token used to administer a Worker is different from the token belonging to a TURN key. Provisioning a TURN key through the API requires account **Calls Write**; adding Worker secrets requires **Workers Scripts Write**.
+
 For Cloudflare, create a Realtime TURN key using the [Cloudflare TURN setup](https://developers.cloudflare.com/realtime/turn/generate-credentials/), then set the Worker's `CALL_TURN_KEY_ID` and `CALL_TURN_API_TOKEN` bindings. For example, `npx wrangler secret put CALL_TURN_KEY_ID` and `npx wrangler secret put CALL_TURN_API_TOKEN` prompt for the values without putting them in source code. The Worker requests ten-minute credentials from Cloudflare and returns validated TURN endpoints, excluding port 53. A complete coturn configuration takes precedence when both providers are configured. A Cloudflare credential failure keeps relay-only calls blocked; only users who already allowed direct routing can continue with STUN.
 
 The existing `serotine_db` D1 binding hosts new transient calling tables. They initialize additively through authenticated requests. `/api/calls` is separate from retained message events. No migration removes or rewrites existing conversations.
@@ -70,7 +74,7 @@ Switching an ordinary call to private suppresses its summary on both participant
 
 ## Validation
 
-Run `npm test`, `npm run typecheck`, and `npm run lint` for automated checks. `npm run test:calling` exercises direct browser WebRTC with synthetic devices and the local authenticated D1 relay; `npm run test:call-rooms` exercises three-person rooms and group/channel UI. Set `SEROTINE_CHROMIUM_PATH` if Chromium is installed outside Playwright's default cache. Browser suites start their own server and should run sequentially.
+Run `npm run test:ringing` to verify the real browser autoplay gate, synthesized audio, and sound cleanup without a calling server. Run `npm test`, `npm run typecheck`, and `npm run lint` for automated checks. `npm run test:calling` exercises direct browser WebRTC with synthetic devices and the local authenticated D1 relay; `npm run test:call-rooms` exercises three-person rooms and group/channel UI. Set `SEROTINE_CHROMIUM_PATH` if Chromium is installed outside Playwright's default cache. Browser suites start their own server and should run sequentially.
 
 The default calling smoke requires a live media connection. Restricted runners that cannot gather ICE candidates can explicitly use `SEROTINE_CALL_SMOKE_SIGNALING_ONLY=1` to check signaling, permissions/capture cleanup, private history, and UI. That mode does **not** verify RTP transport or cross-network calling and must not be reported as doing so.
 

@@ -57,7 +57,7 @@ test('disabled, tiny, incompressible and already compressed files keep their ori
 
 test('source size is bounded before reading and files at the send cap may be compacted', async () => {
   const tooBig = { size: MAX_COMPACT_INPUT_BYTES + 1, name: 'huge.txt', stream() { assert.fail('must not read oversized file') } }
-  await assert.rejects(compactAttachment(tooBig, true), /50 MB/)
+  assert.equal((await compactAttachment(tooBig, true)).file, tooBig)
   const large = new File([new Uint8Array(MAX_COMPACT_INPUT_BYTES)], 'large.dat')
   const compacted = await compactAttachment(large, true)
   assert.equal(compacted.compacted, true)
@@ -67,9 +67,9 @@ test('source size is bounded before reading and files at the send cap may be com
   assert.equal(decoded.byteLength, MAX_COMPACT_INPUT_BYTES)
   assert.equal(new Uint8Array(decoded).every(byte => byte === 0), true)
   assert.equal((await compactAttachment(large, false)).file, large)
-  await assert.rejects(compactAttachment({ size: MAX_FILE_BYTES + 1, name: 'random.bin', stream() { assert.fail('must not read oversized file') } }, true), /50 MB/)
-  await assert.rejects(compactAttachment({ size: MAX_FILE_BYTES + 1, name: 'photo.png', stream() { assert.fail('must not read oversized file') } }, true), /50 MB/)
-  const exactCap = new File([new Uint8Array(MAX_FILE_BYTES)], 'archive.zip')
+  await assert.rejects(compactAttachment({ size: MAX_FILE_BYTES + 1, name: 'random.bin', stream() { assert.fail('must not read oversized file') } }, true), /1 GB/)
+  await assert.rejects(compactAttachment({ size: MAX_FILE_BYTES + 1, name: 'photo.png', stream() { assert.fail('must not read oversized file') } }, true), /1 GB/)
+  const exactCap = { size: MAX_FILE_BYTES, name: 'archive.zip', type: 'application/zip', stream() { assert.fail('large files bypass compression') } }
   assert.equal((await compactAttachment(exactCap, true)).file, exactCap)
 })
 
@@ -81,7 +81,7 @@ test('unsupported or failing browser compression falls back only within the ordi
     for (const unsupported of [undefined, class BrokenCompression { constructor() { throw new Error('Unavailable') } }]) {
       globalThis.CompressionStream = unsupported
       assert.equal((await compactAttachment(ordinary, true)).file, ordinary)
-      await assert.rejects(compactAttachment(oversized, true), /50 MB/)
+      await assert.rejects(compactAttachment(oversized, true), /1 GB/)
     }
   } finally { globalThis.CompressionStream = available }
 })

@@ -90,9 +90,11 @@ export function CallingProvider({ messaging, communities, children, onCompleted 
         if (room && room.getSnapshot().settings.silenceIncoming !== settings.silenceIncoming) room.updateSettings(settings)
       },
     }, {
-      // Push notifications still drain immediately; this only slows the fallback
-      // presence renewal / resync timer that otherwise hits D1 every eight seconds.
-      pollIntervalMs: 30_000,
+      // WSS pushes still drain immediately. The fallback must also recover a
+      // missed wakeup comfortably before the 30s WebRTC connection deadline.
+      // Calling's transient state now lives in the realtime Durable Object, so
+      // this does not restore the old always-on D1 write churn.
+      pollIntervalMs: 10_000,
     })
     const room: CallRoomEngine = new CallRoomEngine({
       identity,

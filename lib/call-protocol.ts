@@ -3,8 +3,11 @@ import { ID_PATTERN, PUBLIC_KEY_PATTERN } from "./protocol"
 // Bound small clock/latency differences without disabling expiry or replay checks.
 export const CALL_CLOCK_SKEW_MS = 5_000
 export const CALL_INVITE_TTL_MS = 40_000
+// Offer/answer/ICE packets are deliberately short-lived. Reliability comes from
+// WSS wakeups plus a substantially faster fallback resync, not longer-lived
+// negotiation material.
 export const CALL_SIGNAL_TTL_MS = 30_000
-// Presence and active-call leases intentionally outlive the 30s fallback refresh.
+// Presence and active-call leases intentionally outlive the fallback refresh.
 // WSS change pushes still trigger immediate resync; these TTLs only absorb timer
 // throttling or a missed renewal without returning to an 8s D1 write cadence.
 export const CALL_PRESENCE_TTL_MS = 120_000

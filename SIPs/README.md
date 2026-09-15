@@ -23,11 +23,12 @@ Status review: **2026-09-14**, against application `main` at [801f09a](https://g
 | [SIP-15](SIP-15-server-side-conversation-lifecycle-purging.md) | Server-side conversation lifecycle purging | Draft | Purge retained relay/storage data when a DM relationship is removed or a group/community is terminally deleted, with minimal replay-prevention state. |
 | [SIP-16](SIP-16-unified-product-design-and-motion.md) | Unified product design and motion | Draft | Unify landing and authenticated-app design language and add restrained, shared motion without replacing SIP-2 theming. |
 | [SIP-17](SIP-17-stable-conversation-ordering-and-list-motion.md) | Stable conversation ordering and list motion | Draft | Stop local navigation from promoting a conversation to the top; reorder only for real activity and preserve spatial continuity. |
+| [SIP-18](SIP-18-ephemeral-attachment-delivery.md) | Ephemeral attachment delivery | Draft | Treat server attachment storage as a temporary delivery buffer: purge verified DM attachments promptly, purge group attachments after required recipients receive them or expiry, and bound community retention. |
 
 Use the [status definitions](../STATUS.md). Final applies to the documented implemented scope; later extensions stay separate. Accepted does not certify a production release, and Draft does not mean a feature has been approved or implemented. This review checks repository evidence, not the current live deployment.
 
 When adding one, use a filename like:
 
-`SIP-18-example-title.md`
+`SIP-19-example-title.md`
 
 The repository root contains the process, format, status definitions, and template.

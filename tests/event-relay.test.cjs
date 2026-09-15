@@ -55,7 +55,7 @@ function harness(t, hooks = {}) {
       }
     },
   }
-  const load = loader({ '@opennextjs/cloudflare': { getCloudflareContext: () => ({ env: { serotine_db: db } }) } })
+  const load = loader({ '@opennextjs/cloudflare': { getCloudflareContext: () => ({ env: { SEROTINE_STORAGE_VERSION: '1', serotine_db: db } }) } })
   const cryptography = load(path.join(root, 'lib/crypto.ts'))
   const auth = load(path.join(root, 'lib/request-auth.ts'))
   const { POST } = load(path.join(root, 'app/api/relay/route.ts'))

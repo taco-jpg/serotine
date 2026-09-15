@@ -31,7 +31,7 @@ export async function authorize(action: string, data: unknown, proof: RequestPro
     throw new CallRelayError("This identity has been retired. Use your current address.", 403)
   }
   const now = Date.now()
-  await db.prepare("DELETE FROM RequestNonce WHERE rowid IN (SELECT rowid FROM RequestNonce WHERE expiresAt <= ? LIMIT 256)").bind(now).run()
+  await db.prepare("DELETE FROM RequestNonce WHERE rowid IN (SELECT rowid FROM RequestNonce WHERE expiresAt < ? LIMIT 256)").bind(now).run()
   const used = await db.prepare("INSERT OR IGNORE INTO RequestNonce(publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)")
     .bind(proof.publicKey, proof.nonce, action, Math.max(now, proof.timestamp) + AUTH_WINDOW_MS).run()
   if (used.meta.changes !== 1) throw new CallRelayError("This calling request was already used. Retry the action.", 409)

@@ -37,7 +37,7 @@ function harness({ legacy = false, batch = true } = {}) {
     const module = { exports: {} }; cache.set(filename, module)
     const output = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
     const requireSource = specifier => {
-      if (specifier === '@opennextjs/cloudflare') return { getCloudflareContext: () => ({ env: state.binding ? { serotine_db: db } : {} }) }
+      if (specifier === '@opennextjs/cloudflare') return { getCloudflareContext: () => ({ env: state.binding ? { SEROTINE_STORAGE_VERSION: '1', serotine_db: db } : {} }) }
       if (specifier.startsWith('@/')) return load(path.join(root, specifier.slice(2)))
       if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
       return require(specifier)

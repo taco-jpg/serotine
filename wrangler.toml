@@ -30,3 +30,20 @@ database_id = "16f6cdd1-ce00-4562-833a-ec5c533a33b1"
 [[r2_buckets]]
 binding = "serotine_files"
 bucket_name = "serotine-files"
+
+# Storage v2: transient rows in DO SQLite; encrypted payloads in private R2.
+[vars]
+SEROTINE_STORAGE_VERSION = "2"
+SEROTINE_D1_METRICS = "1"
+
+[[durable_objects.bindings]]
+name = "SEROTINE_REALTIME"
+class_name = "RelayRealtimeStore"
+
+[[migrations]]
+tag = "v2-relay-realtime"
+new_sqlite_classes = ["RelayRealtimeStore"]
+
+# Bounded legacy payload migration and expired durable history cleanup.
+[triggers]
+crons = ["*/5 * * * *"]

@@ -41,6 +41,7 @@ function loadTs(filename) {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true,
   }, fileName: filename }).outputText
   function requireSource(specifier) {
+    if (specifier === '@opennextjs/cloudflare') return { getCloudflareContext: async () => ({ env: { SEROTINE_STORAGE_VERSION: '1' } }) }
     if (specifier === '@/lib/db') return { RelayConfigurationError, getDB: async () => {
       if (dbFailure) throw dbFailure
       if (dbUnavailable) throw new Error('simulated D1 binding unavailable')

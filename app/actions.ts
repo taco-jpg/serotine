@@ -1,5 +1,6 @@
 "use server"
 
+import { storeRelayPayload, hydrateRelayPayloads, RELAY_PAYLOAD_BYTES_SQL } from "@/lib/relay-payloads"
 import { getDB, RelayConfigurationError, type D1DatabaseBinding } from "@/lib/db"
 import { requestProofFailureMessage, verifyRequestProofResult } from "@/lib/request-auth"
 import { relayFailureKind } from "@/lib/relay-diagnostics"
@@ -110,15 +111,16 @@ export async function storeEncryptedMessage(data: { id: string; recipientPubKey:
     const existing = await db.prepare("SELECT id FROM RelayMessage WHERE recipientPubKey = ? AND senderPubKey = ? AND id = ?")
       .bind(data.recipientPubKey, proof.publicKey, data.id).first()
     if (existing) return { success: true }
+    const storedPayload = await storeRelayPayload(data.encryptedData)
     // Keep both quotas in the insert: concurrent sends cannot overfill a sender's inboxes.
     const inserted = await db.prepare(`INSERT INTO RelayMessage (id, senderPubKey, recipientPubKey, encryptedData, createdAt, expiresAt)
       SELECT ?, ?, ?, ?, ?, ? FROM (
-        SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(CAST(encryptedData AS BLOB))), 0) AS bytes
+        SELECT COUNT(*) AS count, COALESCE(SUM(${RELAY_PAYLOAD_BYTES_SQL}), 0) AS bytes
         FROM RelayMessage WHERE senderPubKey = ?
       ) AS pending WHERE pending.count < 500 AND pending.bytes + ? <= ?
         AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?))
       ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING`)
-      .bind(data.id, proof.publicKey, data.recipientPubKey, data.encryptedData, now, now + 7 * 86400_000, proof.publicKey, packetBytes, MAX_PENDING_BYTES, proof.publicKey, data.recipientPubKey).run()
+      .bind(data.id, proof.publicKey, data.recipientPubKey, storedPayload, now, now + 7 * 86400_000, proof.publicKey, packetBytes, MAX_PENDING_BYTES, proof.publicKey, data.recipientPubKey).run()
     if (inserted.meta.changes !== 1) {
       await requireActiveParticipants(db, proof.publicKey, data.recipientPubKey)
       // Another request may have saved this same stable message ID while we waited.
@@ -146,7 +148,7 @@ export async function getMyMessages(data: InboxRequest, proof: RequestProof): Pr
       .bind(proof.publicKey, data.senderPubKey, Date.now(), proof.publicKey, ...(after ? [after.createdAt, after.createdAt, after.id] : []), MESSAGE_PAGE_SIZE).all<RelayMessage>()
     if (results.length === 0) await requireActiveIdentity(db, proof.publicKey)
     const last = results.at(-1)
-    return { success: true, messages: results, nextCursor: results.length === MESSAGE_PAGE_SIZE && last ? { createdAt: last.createdAt, id: last.id } : null }
+    return { success: true, messages: await hydrateRelayPayloads(results), nextCursor: results.length === MESSAGE_PAGE_SIZE && last ? { createdAt: last.createdAt, id: last.id } : null }
   } catch (error) { return failure(error) }
 }
 
@@ -168,7 +170,7 @@ export async function getLegacyInbox(data: LegacyInboxRequest, proof: RequestPro
       .bind(proof.publicKey, Date.now(), proof.publicKey, ...(after ? [after.createdAt, after.createdAt, after.id, after.createdAt, after.id, after.senderPubKey] : []), MESSAGE_PAGE_SIZE).all<RelayMessage>()
     if (results.length === 0) await requireActiveIdentity(db, proof.publicKey)
     const last = results.at(-1)
-    return { success: true, messages: results, nextCursor: results.length === MESSAGE_PAGE_SIZE && last ? { createdAt: last.createdAt, id: last.id, senderPubKey: last.senderPubKey } : null }
+    return { success: true, messages: await hydrateRelayPayloads(results), nextCursor: results.length === MESSAGE_PAGE_SIZE && last ? { createdAt: last.createdAt, id: last.id, senderPubKey: last.senderPubKey } : null }
   } catch (error) { return failure(error) }
 }
 
@@ -192,6 +194,7 @@ export async function storeEncryptedEvent(data: { id: string; recipientPubKey: s
     const existing = await db.prepare("SELECT id FROM RelayEvent WHERE recipientPubKey = ? AND senderPubKey = ? AND id = ?")
       .bind(data.recipientPubKey, proof.publicKey, data.id).first()
     if (existing) return { success: true }
+    const storedPayload = await storeRelayPayload(data.encryptedData)
     // Admission and insertion are one statement, preventing concurrent requests
     // from overshooting the per-identity row/byte budget. Triggers maintain usage.
     const result = await db.prepare(`INSERT INTO RelayEvent (id, senderPubKey, recipientPubKey, encryptedData, payloadBytes, createdAt, expiresAt)
@@ -200,7 +203,7 @@ export async function storeEncryptedEvent(data: { id: string; recipientPubKey: s
         AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= ?
         AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?))
       ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING`)
-      .bind(data.id, proof.publicKey, data.recipientPubKey, data.encryptedData, payloadBytes, now, now + 7 * 86400_000,
+      .bind(data.id, proof.publicKey, data.recipientPubKey, storedPayload, payloadBytes, now, now + 7 * 86400_000,
         proof.publicKey, MAX_RETAINED_EVENT_COUNT, proof.publicKey, payloadBytes, MAX_RETAINED_EVENT_BYTES, proof.publicKey, data.recipientPubKey).run()
     if (result.meta.changes === 0) {
       await requireActiveParticipants(db, proof.publicKey, data.recipientPubKey)
@@ -225,7 +228,7 @@ export async function getEventFeed(data: EventFeedRequest, proof: RequestProof):
       .bind(proof.publicKey, proof.publicKey, after, Date.now(), proof.publicKey).all<RelayEvent>()
     if (results.length === 0) await requireActiveIdentity(db, proof.publicKey)
     const messages = results.slice(0, EVENT_FEED_PAGE_SIZE)
-    return { success: true, messages, nextCursor: messages.at(-1)?.sequence ?? after, hasMore: results.length > EVENT_FEED_PAGE_SIZE }
+    return { success: true, messages: await hydrateRelayPayloads(messages), nextCursor: messages.at(-1)?.sequence ?? after, hasMore: results.length > EVENT_FEED_PAGE_SIZE }
   } catch (error) { return failure(error) }
 }
 

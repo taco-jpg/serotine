@@ -31,7 +31,9 @@
     "test:recovery": "node scripts/recovery-smoke.cjs",
     "test:ringing": "node scripts/ringing-smoke.cjs",
     "test:backpack": "node scripts/backpack-storage-smoke.cjs",
-    "test:uploads": "node scripts/staged-uploads-smoke.cjs"
+    "test:uploads": "node scripts/staged-uploads-smoke.cjs",
+    "test:d1": "node --test tests/d1-storage.test.cjs tests/relay-payload-migration.test.cjs",
+    "measure:d1": "node tests/support/d1-workload.cjs --optimized"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

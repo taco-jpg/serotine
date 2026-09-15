@@ -1,0 +1,123 @@
+{
+  "baselineRef": "42f794ecc791bc9a11e9a79d7ecca77a76b6acc1",
+  "engine": "Miniflare/workerd D1 meta.rows_written",
+  "clients": 3,
+  "setup": {
+    "rowsWritten": 129,
+    "bySql": {
+      "CREATE TABLE IF NOT EXISTS RequestNonce ( publicKey TEXT NOT NULL, nonce TEXT NOT NULL, action TEXT NOT NULL, expiresAt INTEGER NOT NULL, PRIMARY KEY (publicKey, nonce) )": 3,
+      "CREATE INDEX IF NOT EXISTS idx_nonce_expiry ON RequestNonce(expiresAt)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_nonce_rate ON RequestNonce(publicKey, action, expiresAt)": 1,
+      "CREATE TABLE IF NOT EXISTS RelayMessage ( id TEXT NOT NULL, senderPubKey TEXT NOT NULL, recipientPubKey TEXT NOT NULL, encryptedData TEXT NOT NULL, createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, PRIMARY KEY (recipientPubKey, senderPubKey, id) )": 3,
+      "CREATE INDEX IF NOT EXISTS idx_relay_conversation ON RelayMessage(recipientPubKey, senderPubKey, createdAt)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_relay_expiry ON RelayMessage(expiresAt)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_relay_sender ON RelayMessage(senderPubKey)": 1,
+      "CREATE TABLE IF NOT EXISTS RelaySignal ( senderPubKey TEXT NOT NULL, recipientPubKey TEXT NOT NULL, encryptedData TEXT NOT NULL, expiresAt INTEGER NOT NULL, PRIMARY KEY (senderPubKey, recipientPubKey) )": 3,
+      "CREATE INDEX IF NOT EXISTS idx_signal_expiry ON RelaySignal(expiresAt)": 1,
+      "CREATE TABLE IF NOT EXISTS RetiredIdentity ( publicKey TEXT PRIMARY KEY, retiredAt INTEGER NOT NULL )": 3,
+      "INSERT OR IGNORE INTO RequestNonce (publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 28,
+      "CREATE TABLE IF NOT EXISTS RelayEvent ( sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, senderPubKey TEXT NOT NULL, recipientPubKey TEXT NOT NULL, encryptedData TEXT NOT NULL, payloadBytes INTEGER NOT NULL, createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, UNIQUE(recipientPubKey, senderPubKey, id) )": 5,
+      "CREATE INDEX IF NOT EXISTS idx_event_recipient_sequence ON RelayEvent(recipientPubKey, sequence)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_event_sender_sequence ON RelayEvent(senderPubKey, sequence)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_event_expiry ON RelayEvent(expiresAt)": 1,
+      "CREATE TABLE IF NOT EXISTS RelayEventUsage ( senderPubKey TEXT PRIMARY KEY, eventCount INTEGER NOT NULL, payloadBytes INTEGER NOT NULL )": 3,
+      "CREATE TRIGGER IF NOT EXISTS relay_event_usage_insert AFTER INSERT ON RelayEvent BEGIN INSERT INTO RelayEventUsage(senderPubKey, eventCount, payloadBytes) VALUES(NEW.senderPubKey, 1, NEW.payloadBytes) ON CONFLICT(senderPubKey) DO UPDATE SET eventCount = eventCount + 1, payloadBytes = payloadBytes + NEW.payloadBytes; END": 1,
+      "CREATE TRIGGER IF NOT EXISTS relay_event_usage_delete AFTER DELETE ON RelayEvent BEGIN UPDATE RelayEventUsage SET eventCount = eventCount - 1, payloadBytes = payloadBytes - OLD.payloadBytes WHERE senderPubKey = OLD.senderPubKey; DELETE FROM RelayEventUsage WHERE senderPubKey = OLD.senderPubKey AND eventCount = 0; END": 1,
+      "INSERT OR IGNORE INTO RequestNonce(publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 24,
+      "CREATE TABLE IF NOT EXISTS CallPresence ( publicKey TEXT NOT NULL, sessionId TEXT NOT NULL, peers TEXT NOT NULL, incomingPeers TEXT NOT NULL, expiresAt INTEGER NOT NULL, PRIMARY KEY(publicKey, sessionId) )": 3,
+      "CREATE INDEX IF NOT EXISTS idx_call_presence_expiry ON CallPresence(expiresAt)": 1,
+      "CREATE TABLE IF NOT EXISTS CallSession ( callId TEXT PRIMARY KEY, caller TEXT NOT NULL, recipient TEXT NOT NULL, callerSession TEXT NOT NULL, recipientSession TEXT, status TEXT NOT NULL, createdAt INTEGER NOT NULL, inviteExpiresAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, callerAliveUntil INTEGER NOT NULL, recipientAliveUntil INTEGER NOT NULL, reason TEXT, noHistory INTEGER NOT NULL DEFAULT 0 )": 3,
+      "CREATE INDEX IF NOT EXISTS idx_call_caller ON CallSession(caller, status, expiresAt)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_call_recipient ON CallSession(recipient, status, expiresAt)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_call_expiry ON CallSession(expiresAt)": 1,
+      "CREATE TABLE IF NOT EXISTS CallSignal ( sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, callId TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL, senderSession TEXT NOT NULL, targetSession TEXT, expiresAt INTEGER NOT NULL, encryptedData TEXT NOT NULL )": 3,
+      "CREATE INDEX IF NOT EXISTS idx_call_signal_recipient ON CallSignal(recipient, sequence)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_call_signal_call ON CallSignal(callId)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_call_signal_expiry ON CallSignal(expiresAt)": 1,
+      "CREATE TABLE IF NOT EXISTS CallRoomAuthority ( scopeId TEXT PRIMARY KEY, kind TEXT NOT NULL, signature TEXT NOT NULL, checkpointJson TEXT NOT NULL, stateJson TEXT )": 3,
+      "CREATE TABLE IF NOT EXISTS CallRoomMember ( publicKey TEXT PRIMARY KEY, roomId TEXT NOT NULL, scopeId TEXT NOT NULL, channelId TEXT, sessionId TEXT NOT NULL, mode TEXT NOT NULL, policy TEXT NOT NULL, joinedAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL )": 3,
+      "CREATE INDEX IF NOT EXISTS idx_call_room_member_room ON CallRoomMember(roomId, expiresAt)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_call_room_member_expiry ON CallRoomMember(expiresAt)": 1,
+      "CREATE TABLE IF NOT EXISTS CallRoomSignal ( sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, roomId TEXT NOT NULL, sender TEXT NOT NULL, recipient TEXT NOT NULL, senderSession TEXT NOT NULL, targetSession TEXT NOT NULL, expiresAt INTEGER NOT NULL, encryptedData TEXT NOT NULL )": 3,
+      "CREATE INDEX IF NOT EXISTS idx_call_room_signal_recipient ON CallRoomSignal(recipient, sequence)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_call_room_signal_expiry ON CallRoomSignal(expiresAt)": 1,
+      "INSERT INTO CallPresence(publicKey, sessionId, peers, incomingPeers, expiresAt) SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM CallPresence WHERE publicKey = ?) < 16 OR EXISTS(SELECT 1 FROM CallPresence WHERE publicKey = ? AND sessionId = ?) ON CONFLICT(publicKey,sessionId) DO UPDATE SET peers = excluded.peers, incomingPeers = excluded.incomingPeers, expiresAt = excluded.expiresAt": 9,
+      "INSERT INTO RelayEvent (id, senderPubKey, recipientPubKey, encryptedData, payloadBytes, createdAt, expiresAt) SELECT ?, ?, ?, ?, ?, ?, ? WHERE COALESCE((SELECT eventCount FROM RelayEventUsage WHERE senderPubKey = ?), 0) < ? AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= ? AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?)) ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING": 8
+    }
+  },
+  "scenarios": {
+    "idle-10m": {
+      "rowsWritten": 4243,
+      "bySql": {
+        "DELETE FROM RequestNonce WHERE expiresAt < ?": 547,
+        "INSERT OR IGNORE INTO RequestNonce (publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 2880,
+        "DELETE FROM RequestNonce WHERE rowid IN (SELECT rowid FROM RequestNonce WHERE expiresAt <= ? LIMIT 256)": 216,
+        "INSERT OR IGNORE INTO RequestNonce(publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 480,
+        "INSERT INTO CallPresence(publicKey, sessionId, peers, incomingPeers, expiresAt) SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM CallPresence WHERE publicKey = ?) < 16 OR EXISTS(SELECT 1 FROM CallPresence WHERE publicKey = ? AND sessionId = ?) ON CONFLICT(publicKey,sessionId) DO UPDATE SET peers = excluded.peers, incomingPeers = excluded.incomingPeers, expiresAt = excluded.expiresAt": 120
+      }
+    },
+    "active-10m": {
+      "rowsWritten": 4727,
+      "bySql": {
+        "DELETE FROM RequestNonce WHERE expiresAt < ?": 618,
+        "INSERT OR IGNORE INTO RequestNonce (publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 3040,
+        "DELETE FROM RequestNonce WHERE rowid IN (SELECT rowid FROM RequestNonce WHERE expiresAt <= ? LIMIT 256)": 258,
+        "INSERT OR IGNORE INTO RequestNonce(publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 480,
+        "INSERT INTO CallPresence(publicKey, sessionId, peers, incomingPeers, expiresAt) SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM CallPresence WHERE publicKey = ?) < 16 OR EXISTS(SELECT 1 FROM CallPresence WHERE publicKey = ? AND sessionId = ?) ON CONFLICT(publicKey,sessionId) DO UPDATE SET peers = excluded.peers, incomingPeers = excluded.incomingPeers, expiresAt = excluded.expiresAt": 120,
+        "INSERT INTO RelayEvent (id, senderPubKey, recipientPubKey, encryptedData, payloadBytes, createdAt, expiresAt) SELECT ?, ?, ?, ?, ?, ?, ? WHERE COALESCE((SELECT eventCount FROM RelayEventUsage WHERE senderPubKey = ?), 0) < ? AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= ? AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?)) ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING": 211
+      }
+    },
+    "call-10m": {
+      "rowsWritten": 4670,
+      "bySql": {
+        "DELETE FROM RequestNonce WHERE rowid IN (SELECT rowid FROM RequestNonce WHERE expiresAt <= ? LIMIT 256)": 248,
+        "INSERT OR IGNORE INTO RequestNonce(publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 488,
+        "DELETE FROM CallSignal WHERE sequence IN (SELECT sequence FROM CallSignal WHERE expiresAt <= ? OR callId IN (SELECT callId FROM CallSession WHERE status = 'ended') LIMIT 256)": 1,
+        "INSERT INTO CallSession(callId, caller, recipient, callerSession, recipientSession, status, createdAt, inviteExpiresAt, expiresAt, callerAliveUntil, recipientAliveUntil, reason, noHistory) SELECT ?, ?, ?, ?, NULL, 'ringing', ?, ?, ?, ?, ?, NULL, ? WHERE NOT EXISTS(SELECT 1 FROM CallSession WHERE status != 'ended' AND expiresAt > ? AND (caller IN (?, ?) OR recipient IN (?, ?))) AND NOT EXISTS(SELECT 1 FROM CallRoomMember WHERE expiresAt > ? AND publicKey IN (?, ?)) AND NOT EXISTS(SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?)) AND EXISTS(SELECT 1 FROM CallPresence p WHERE publicKey = ? AND expiresAt > ? AND EXISTS(SELECT 1 FROM json_each(p.incomingPeers) WHERE value = ?)) AND EXISTS(SELECT 1 FROM CallPresence p WHERE publicKey = ? AND sessionId = ? AND expiresAt > ? AND EXISTS(SELECT 1 FROM json_each(p.peers) WHERE value = ?)) ON CONFLICT(callId) DO NOTHING": 5,
+        "INSERT INTO CallSignal(id, callId, sender, recipient, senderSession, targetSession, expiresAt, encryptedData) SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM CallSession c WHERE c.callId = ? AND c.expiresAt > ? AND ((? = 1 AND c.status = 'ringing' AND c.caller = ? AND c.recipient = ? AND c.callerSession = ?) OR (? = 0 AND c.status = 'active' AND ((c.caller = ? AND c.callerSession = ? AND c.recipient = ? AND c.recipientSession = ?) OR (c.recipient = ? AND c.recipientSession = ? AND c.caller = ? AND c.callerSession = ?)))) AND (SELECT COUNT(*) FROM CallSignal WHERE callId = ?) < 512 AND NOT EXISTS(SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?)) ON CONFLICT(id) DO NOTHING": 6,
+        "UPDATE CallSession SET status = 'active', recipientSession = ?, callerAliveUntil = ?, recipientAliveUntil = ?, expiresAt = ?, noHistory = MAX(noHistory, ?) WHERE callId = ? AND recipient = ? AND status = 'ringing' AND expiresAt > ? AND inviteExpiresAt > ? AND EXISTS(SELECT 1 FROM CallPresence p WHERE p.publicKey = ? AND p.sessionId = ? AND p.expiresAt > ? AND EXISTS(SELECT 1 FROM json_each(p.incomingPeers) WHERE value = CallSession.caller))": 4,
+        "DELETE FROM RequestNonce WHERE expiresAt < ?": 598,
+        "INSERT OR IGNORE INTO RequestNonce (publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 2880,
+        "INSERT INTO CallPresence(publicKey, sessionId, peers, incomingPeers, expiresAt) SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM CallPresence WHERE publicKey = ?) < 16 OR EXISTS(SELECT 1 FROM CallPresence WHERE publicKey = ? AND sessionId = ?) ON CONFLICT(publicKey,sessionId) DO UPDATE SET peers = excluded.peers, incomingPeers = excluded.incomingPeers, expiresAt = excluded.expiresAt": 120,
+        "UPDATE CallSession SET callerAliveUntil = ?, expiresAt = MIN(?, recipientAliveUntil) WHERE caller = ? AND callerSession = ? AND status = 'active' AND expiresAt > ?": 160,
+        "UPDATE CallSession SET recipientAliveUntil = ?, expiresAt = MIN(?, callerAliveUntil) WHERE recipient = ? AND recipientSession = ? AND status = 'active' AND expiresAt > ?": 160
+      }
+    },
+    "room-10m": {
+      "rowsWritten": 6241,
+      "bySql": {
+        "DELETE FROM RequestNonce WHERE rowid IN (SELECT rowid FROM RequestNonce WHERE expiresAt <= ? LIMIT 256)": 1059,
+        "INSERT OR IGNORE INTO RequestNonce(publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 1448,
+        "DELETE FROM CallSession WHERE callId IN (SELECT callId FROM CallSession WHERE status = 'ended' AND expiresAt <= ? LIMIT 128)": 1,
+        "UPDATE CallRoomAuthority SET stateJson = NULL WHERE stateJson IS NOT NULL AND scopeId IN (SELECT a.scopeId FROM CallRoomAuthority a WHERE a.stateJson IS NOT NULL AND NOT EXISTS(SELECT 1 FROM CallRoomMember WHERE scopeId = a.scopeId AND expiresAt > ?) LIMIT 128)": 1,
+        "INSERT OR IGNORE INTO CallRoomAuthority(scopeId, kind, signature, checkpointJson, stateJson) VALUES (?, ?, ?, ?, ?)": 2,
+        "UPDATE CallRoomAuthority SET stateJson = ? WHERE scopeId = ? AND signature = ?": 2,
+        "INSERT INTO CallRoomMember(publicKey, roomId, scopeId, channelId, sessionId, mode, policy, joinedAt, expiresAt) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS(SELECT 1 FROM CallRoomAuthority WHERE scopeId = ? AND signature = ? AND stateJson IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM RetiredIdentity WHERE publicKey = ?) AND NOT EXISTS(SELECT 1 FROM CallSession WHERE (caller = ? OR recipient = ?) AND status != 'ended' AND expiresAt > ?) AND NOT EXISTS(SELECT 1 FROM CallRoomMember WHERE publicKey = ? AND expiresAt > ? AND (roomId != ? OR sessionId != ?)) AND NOT EXISTS(SELECT 1 FROM CallRoomMember WHERE roomId = ? AND expiresAt > ? AND policy != ?) AND ((SELECT COUNT(*) FROM CallRoomMember WHERE roomId = ? AND expiresAt > ?) < ? OR EXISTS(SELECT 1 FROM CallRoomMember WHERE publicKey = ? AND roomId = ? AND sessionId = ? AND expiresAt > ?)) ON CONFLICT(publicKey) DO UPDATE SET roomId = excluded.roomId, scopeId = excluded.scopeId, channelId = excluded.channelId, sessionId = excluded.sessionId, mode = excluded.mode, policy = excluded.policy, joinedAt = CASE WHEN CallRoomMember.sessionId = excluded.sessionId THEN CallRoomMember.joinedAt ELSE excluded.joinedAt END, expiresAt = excluded.expiresAt": 8,
+        "INSERT OR IGNORE INTO RequestNonce (publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 2880,
+        "INSERT INTO CallPresence(publicKey, sessionId, peers, incomingPeers, expiresAt) SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM CallPresence WHERE publicKey = ?) < 16 OR EXISTS(SELECT 1 FROM CallPresence WHERE publicKey = ? AND sessionId = ?) ON CONFLICT(publicKey,sessionId) DO UPDATE SET peers = excluded.peers, incomingPeers = excluded.incomingPeers, expiresAt = excluded.expiresAt": 120,
+        "UPDATE CallRoomMember SET expiresAt = ? WHERE publicKey = ? AND sessionId = ? AND roomId = ? AND expiresAt > ? AND EXISTS(SELECT 1 FROM CallRoomAuthority WHERE scopeId = ? AND signature = ?)": 720
+      }
+    },
+    "mixed-files-10m": {
+      "rowsWritten": 4780,
+      "bySql": {
+        "DELETE FROM RequestNonce WHERE expiresAt < ?": 634,
+        "INSERT OR IGNORE INTO RequestNonce (publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 3008,
+        "DELETE FROM RequestNonce WHERE rowid IN (SELECT rowid FROM RequestNonce WHERE expiresAt <= ? LIMIT 256)": 263,
+        "INSERT OR IGNORE INTO RequestNonce(publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)": 512,
+        "INSERT INTO CallPresence(publicKey, sessionId, peers, incomingPeers, expiresAt) SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM CallPresence WHERE publicKey = ?) < 16 OR EXISTS(SELECT 1 FROM CallPresence WHERE publicKey = ? AND sessionId = ?) ON CONFLICT(publicKey,sessionId) DO UPDATE SET peers = excluded.peers, incomingPeers = excluded.incomingPeers, expiresAt = excluded.expiresAt": 120,
+        "INSERT INTO RelayEvent (id, senderPubKey, recipientPubKey, encryptedData, payloadBytes, createdAt, expiresAt) SELECT ?, ?, ?, ?, ?, ?, ? WHERE COALESCE((SELECT eventCount FROM RelayEventUsage WHERE senderPubKey = ?), 0) < ? AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= ? AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?)) ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING": 217,
+        "CREATE TABLE IF NOT EXISTS FileUpload ( uploadId TEXT PRIMARY KEY, owner TEXT NOT NULL, size INTEGER NOT NULL, chunkCount INTEGER NOT NULL, accessHash TEXT NOT NULL, status TEXT NOT NULL, createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, reservedBytes INTEGER NOT NULL, cleanupAt INTEGER NOT NULL DEFAULT 0, deletedAt INTEGER )": 3,
+        "CREATE INDEX IF NOT EXISTS idx_file_upload_owner ON FileUpload(owner, status)": 1,
+        "CREATE INDEX IF NOT EXISTS idx_file_upload_cleanup ON FileUpload(status, expiresAt, cleanupAt)": 1,
+        "CREATE TABLE IF NOT EXISTS FileUploadChunk ( uploadId TEXT NOT NULL, chunkIndex INTEGER NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL, ready INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(uploadId, chunkIndex) )": 3,
+        "INSERT OR IGNORE INTO FileUpload(uploadId, owner, size, chunkCount, accessHash, status, createdAt, expiresAt, reservedBytes) SELECT ?, ?, ?, ?, ?, 'staged', ?, ?, ? WHERE (SELECT COALESCE(SUM(reservedBytes), 0) FROM FileUpload WHERE owner = ?) <= ? AND (SELECT COALESCE(SUM(reservedBytes), 0) FROM FileUpload) <= ? AND (SELECT COUNT(*) FROM FileUpload WHERE owner = ? AND status != 'deleted') < 100": 4,
+        "INSERT OR IGNORE INTO FileUploadChunk(uploadId, chunkIndex, size, digest) SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM FileUpload WHERE uploadId = ? AND owner = ? AND status = 'staged' AND expiresAt > ?)": 2,
+        "UPDATE FileUploadChunk SET ready = 1 WHERE uploadId = ? AND chunkIndex = ? AND digest = ? AND EXISTS (SELECT 1 FROM FileUpload WHERE uploadId = ? AND status = 'staged' AND expiresAt > ?)": 1,
+        "UPDATE FileUpload SET status = 'ready' WHERE uploadId = ? AND owner = ? AND status = 'staged' AND expiresAt > ? AND (SELECT COUNT(*) FROM FileUploadChunk WHERE uploadId = ? AND ready = 1) = chunkCount AND (SELECT COALESCE(SUM(size), 0) FROM FileUploadChunk WHERE uploadId = ? AND ready = 1) = size + 16 * chunkCount": 3,
+        "UPDATE FileUpload SET status = 'published', expiresAt = ? WHERE uploadId = ? AND owner = ? AND status = 'ready' AND expiresAt > ?": 3,
+        "INSERT INTO RelayMessage (id, senderPubKey, recipientPubKey, encryptedData, createdAt, expiresAt) SELECT ?, ?, ?, ?, ?, ? FROM ( SELECT COUNT(*) AS count, COALESCE(SUM(LENGTH(CAST(encryptedData AS BLOB))), 0) AS bytes FROM RelayMessage WHERE senderPubKey = ? ) AS pending WHERE pending.count < 500 AND pending.bytes + ? <= ? AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?)) ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING": 5
+      }
+    }
+  }
+}

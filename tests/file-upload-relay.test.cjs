@@ -39,8 +39,9 @@ function harness(t) {
     },
   }
   const bucket = {
-    async put(key, value) {
+    async put(key, value, options) {
       if (state.beforePut) await state.beforePut()
+      if (options?.onlyIf?.etagDoesNotMatch === "*" && objects.has(key)) return null
       objects.set(key, value.slice(0))
       if (state.afterPut) await state.afterPut()
     },
@@ -53,7 +54,7 @@ function harness(t) {
       for (const key of Array.isArray(keys) ? keys : [keys]) objects.delete(key)
     },
   }
-  const env = { serotine_db: db, serotine_files: bucket }
+  const env = { SEROTINE_STORAGE_VERSION: '1', serotine_db: db, serotine_files: bucket }
   const cache = new Map()
   function load(filename) {
     if (!path.extname(filename)) filename += '.ts'

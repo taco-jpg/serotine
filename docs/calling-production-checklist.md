@@ -23,4 +23,4 @@ After TURN is configured, run the browser calling smoke test with direct candida
 
 ## Timing contract
 
-WSS `changed` pushes are the fast path. The periodic poll is a recovery path for a missed push. Negotiation packets therefore remain valid for substantially longer than one fallback poll interval; do not reduce the signal TTL to the same duration as the fallback timer or connection deadline.
+WSS `changed` pushes are the fast path. The periodic poll is a recovery path for a missed push. Offer/answer/ICE signals remain deliberately short-lived at 30 seconds; reliability comes from polling substantially faster than that expiry window. Keep the fallback resync at 10 seconds or less so several recovery opportunities fit inside one signal lifetime. Do not stretch signal retention merely to compensate for slow polling.

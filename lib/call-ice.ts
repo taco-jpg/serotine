@@ -29,14 +29,20 @@ export interface CallConnectionDiagnostics {
   roundTripMs: number | null
   bytesSent: number
   bytesReceived: number
+  iceConnectionState: RTCIceConnectionState | null
+  iceGatheringState: RTCIceGatheringState | null
+  localCandidateCount: number
+  remoteCandidateCount: number
 }
 export const callRouteLabels: Record<CallRoute, string> = {
   unknown: "Checking connection", direct: "Direct P2P", stun: "STUN-assisted P2P", turn: "TURN relay",
 }
 
 /** Classify only the selected pair. Never expose addresses, candidate IDs, ports,
- * URLs, SDP, credentials, or the raw stats report. */
-export function callConnectionDiagnostics(stats: RTCStatsReport): CallConnectionDiagnostics {
+ * URLs, SDP, credentials, or the raw stats report. Candidate counts and native
+ * ICE states are safe enough to distinguish gathering, signaling and routing
+ * failures during real-device acceptance tests. */
+export function callConnectionDiagnostics(stats: RTCStatsReport, state?: Pick<RTCPeerConnection, "iceConnectionState" | "iceGatheringState">): CallConnectionDiagnostics {
   const rows: Record<string, unknown>[] = []
   stats.forEach(row => rows.push(row))
   const transport = rows.find(row => row.type === "transport" && typeof row.selectedCandidatePairId === "string")
@@ -52,14 +58,17 @@ export function callConnectionDiagnostics(stats: RTCStatsReport): CallConnection
   const counter = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0
   return { route, localType, remoteType, protocol: ["udp", "tcp"].includes(local?.protocol) ? local.protocol : null,
     roundTripMs: typeof pair?.currentRoundTripTime === "number" && Number.isFinite(pair.currentRoundTripTime) && pair.currentRoundTripTime >= 0 ? Math.round(pair.currentRoundTripTime * 1000) : null,
-    bytesSent: counter(pair?.bytesSent), bytesReceived: counter(pair?.bytesReceived) }
+    bytesSent: counter(pair?.bytesSent), bytesReceived: counter(pair?.bytesReceived),
+    iceConnectionState: state?.iceConnectionState ?? null, iceGatheringState: state?.iceGatheringState ?? null,
+    localCandidateCount: rows.filter(row => row.type === "local-candidate").length,
+    remoteCandidateCount: rows.filter(row => row.type === "remote-candidate").length }
 }
 
 export function observeCallConnection(pc: RTCPeerConnection, update: (value: CallConnectionDiagnostics) => void) {
   let stopped = false, timer: ReturnType<typeof setTimeout> | undefined
   async function sample() {
     if (stopped || pc.connectionState === "closed") return
-    try { const stats = await pc.getStats(); if (!stopped) update(callConnectionDiagnostics(stats)) } catch { /* Diagnostics cannot interrupt media. */ }
+    try { const stats = await pc.getStats(); if (!stopped) update(callConnectionDiagnostics(stats, pc)) } catch { /* Diagnostics cannot interrupt media. */ }
     if (!stopped) timer = setTimeout(() => { void sample() }, 2_000)
   }
   if (typeof pc.getStats === "function") void sample()

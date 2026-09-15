@@ -18,13 +18,16 @@ function report(localType, remoteType) {
 }
 test('selected pair diagnoses direct, reflexive, and local or remote TURN without sensitive stats', () => {
   for (const [local, remote, route] of [['host', 'host', 'direct'], ['srflx', 'host', 'stun'], ['host', 'prflx', 'stun'], ['relay', 'host', 'turn'], ['host', 'relay', 'turn']]) {
-    const result = callConnectionDiagnostics(report(local, remote))
+    const result = callConnectionDiagnostics(report(local, remote), { iceConnectionState: 'connected', iceGatheringState: 'complete' })
     assert.equal(result.route, route)
-    assert.deepEqual(Object.keys(result).sort(), ['route', 'localType', 'remoteType', 'protocol', 'roundTripMs', 'bytesSent', 'bytesReceived'].sort())
+    assert.deepEqual(Object.keys(result).sort(), ['route', 'localType', 'remoteType', 'protocol', 'roundTripMs', 'bytesSent', 'bytesReceived', 'iceConnectionState', 'iceGatheringState', 'localCandidateCount', 'remoteCandidateCount'].sort())
     assert.equal(result.roundTripMs, 42); assert.equal(result.bytesReceived, 5000)
+    assert.equal(result.iceConnectionState, 'connected'); assert.equal(result.iceGatheringState, 'complete')
+    assert.equal(result.localCandidateCount, 2); assert.equal(result.remoteCandidateCount, 1)
     assert.doesNotMatch(JSON.stringify(result), /192\.0\.2|private|4567|9999|selected/)
   }
-  assert.equal(callConnectionDiagnostics(new Map()).route, 'unknown')
+  const empty = callConnectionDiagnostics(new Map(), { iceConnectionState: 'checking', iceGatheringState: 'gathering' })
+  assert.equal(empty.route, 'unknown'); assert.equal(empty.localCandidateCount, 0); assert.equal(empty.remoteCandidateCount, 0)
   const waiting = report('host', 'host'); waiting.get('transport').selectedCandidatePairId = 'missing'
   assert.equal(callConnectionDiagnostics(waiting).route, 'unknown', 'gathered or unselected relays do not prove relay use')
 })
@@ -37,10 +40,16 @@ test('native ICE is allowed to prefer direct routes while gathering Cloudflare T
   assert.equal(configuration.bundlePolicy, 'max-bundle')
   assert.equal(configuration.iceServers.length, 2)
 })
-test('diagnostic observer detaches even when a stats request resolves after hangup', async () => {
-  let resolve, updates = 0
-  const pc = { connectionState: 'connected', getStats: () => new Promise(done => { resolve = done }) }
-  const stop = observeCallConnection(pc, () => updates++)
-  stop(); resolve(report('relay', 'host')); await new Promise(done => setImmediate(done))
-  assert.equal(updates, 0)
+test('diagnostic observer reports native ICE progress and detaches after hangup', async () => {
+  let resolve, update
+  const pc = { connectionState: 'connected', iceConnectionState: 'checking', iceGatheringState: 'gathering', getStats: () => new Promise(done => { resolve = done }) }
+  const stop = observeCallConnection(pc, value => { update = value })
+  resolve(report('host', 'host')); await new Promise(done => setImmediate(done))
+  assert.equal(update.iceConnectionState, 'checking'); assert.equal(update.iceGatheringState, 'gathering')
+  assert.equal(update.localCandidateCount, 2); assert.equal(update.remoteCandidateCount, 1)
+  update = null
+  const pending = observeCallConnection({ ...pc, getStats: () => new Promise(done => { resolve = done }) }, value => { update = value })
+  pending(); resolve(report('relay', 'host')); await new Promise(done => setImmediate(done))
+  assert.equal(update, null)
+  stop()
 })

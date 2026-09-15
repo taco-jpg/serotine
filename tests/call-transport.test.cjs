@@ -43,7 +43,7 @@ function harness(t) {
       catch (error) { sqlite.exec('ROLLBACK'); throw error }
     },
   }
-  const env = { serotine_db: db }
+  const env = { SEROTINE_STORAGE_VERSION: '1', serotine_db: db }
   const cache = new Map()
   function load(filename) {
     if (!path.extname(filename)) filename += '.ts'

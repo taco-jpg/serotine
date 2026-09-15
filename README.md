@@ -124,7 +124,20 @@ Without the key, the GIF picker explains that search is not configured; uploaded
 
 ## Deployment
 
-Deploy to **Cloudflare Workers with OpenNext**. Keep the `serotine_db` D1 binding in `wrangler.toml` pointed at the intended database. Create the private `serotine-files` R2 bucket for the `serotine_files` binding, apply migration `0006`, and configure retention before deploying this upload release; see [encrypted file storage setup](docs/large-file-uploads.md). For Workers Builds, use `npm run build` as the build command and `npm run deploy:built` as the production deploy command. After authenticating Wrangler for that account:
+Deploy to **Cloudflare Workers with OpenNext**. Keep the `serotine_db` D1 binding in `wrangler.toml` pointed at the intended database. Create the private `serotine-files` R2 bucket for the `serotine_files` binding, apply migration `0006`, and configure retention before deploying this upload release; see [encrypted file storage setup](docs/large-file-uploads.md). Storage v2 also requires the Durable Object migration and payload lifecycle setup in [D1 write reduction and rollout](docs/d1-write-reduction.md).
+
+In Cloudflare Workers Builds, open **serotine → Settings → Build** and configure:
+
+| Setting | Value |
+| --- | --- |
+| Production branch | `main` |
+| Build command | `npm run build` (`pnpm run build` also works) |
+| Deploy command | `npm run deploy:built` |
+| Non-production branch deploy command | `npm run deploy:check` |
+
+The default non-production command, `npx wrangler versions upload`, fails with error **10211** when a release adds a Durable Object migration. Cloudflare requires a full deployment to apply that migration. PR branches run the dry-run check to validate the Worker bundle and bindings; production uses OpenNext's full deployment after merge. The check does not publish a preview or apply remote migrations. See Cloudflare's [deployment constraint](https://developers.cloudflare.com/workers/versions-and-deployments/deployment-management/#durable-object-migrations) and [separate branch commands](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#non-production-branch-deploy-command).
+
+These commands are dashboard settings: committing `package.json` does not replace a previously configured `versions upload` command. Save the settings and retry the build on the updated PR commit. After authenticating Wrangler for a reviewed production release, the local equivalent is:
 
 ```sh
 npm run deploy

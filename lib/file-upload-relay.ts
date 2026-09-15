@@ -14,7 +14,7 @@ import {
 
 /** Deliberately small R2 surface, also used by the integration tests. */
 export interface FileUploadBucket {
-  put(key: string, value: ArrayBuffer, options?: { httpMetadata: { contentType: string } }): Promise<unknown>
+  put(key: string, value: ArrayBuffer, options?: { httpMetadata: { contentType: string }; onlyIf?: { etagDoesNotMatch: string } }): Promise<unknown>
   get(key: string): Promise<{ body: ReadableStream<Uint8Array>; size: number } | null>
   delete(keys: string | string[]): Promise<void>
 }
@@ -59,7 +59,7 @@ async function authorize(action: string, data: unknown, proof: RequestProof) {
     throw new FileUploadError("This identity has been retired. Use your current address.", 403)
   }
   const now = Date.now()
-  await db.prepare("DELETE FROM RequestNonce WHERE rowid IN (SELECT rowid FROM RequestNonce WHERE expiresAt <= ? LIMIT 256)").bind(now).run()
+  await db.prepare("DELETE FROM RequestNonce WHERE rowid IN (SELECT rowid FROM RequestNonce WHERE expiresAt < ? LIMIT 256)").bind(now).run()
   const nonce = await db.prepare("INSERT OR IGNORE INTO RequestNonce(publicKey, nonce, action, expiresAt) VALUES (?, ?, ?, ?)")
     .bind(proof.publicKey, proof.nonce, action, Math.max(now, proof.timestamp) + AUTH_WINDOW_MS).run()
   if (nonce.meta.changes !== 1) throw new FileUploadError("This file request was already used. Retry the action.", 409)
@@ -86,7 +86,7 @@ function active(row: UploadRow, now: number) {
  * A 33-day R2 lifecycle rule is the final no-traffic/crashed-worker cleanup backstop.
  */
 async function deleteUpload(db: D1DatabaseBinding, files: FileUploadBucket, row: UploadRow, now: number, cancelOnly = false) {
-  const updated = await db.prepare(`UPDATE FileUpload SET status = 'deleted', deletedAt = COALESCE(deletedAt, ?), cleanupAt = 0
+  const updated = row.status === "deleted" ? { meta: { changes: 1 } } : await db.prepare(`UPDATE FileUpload SET status = 'deleted', deletedAt = COALESCE(deletedAt, ?), cleanupAt = 0
     WHERE uploadId = ? AND ((? = 1 AND status IN ('staged', 'ready', 'deleted'))
       OR (? = 0 AND (status = 'deleted' OR expiresAt <= ? OR owner IN (SELECT publicKey FROM RetiredIdentity))))`)
     .bind(now, row.uploadId, cancelOnly ? 1 : 0, cancelOnly ? 1 : 0, now).run()
@@ -196,23 +196,33 @@ export async function handleFileUploadChunk(data: unknown, proof: RequestProof, 
   if (Number(data.index) >= row.chunkCount || data.size !== fileUploadChunkSize(row.size, Number(data.index))) throw invalid()
   const bytes = await readBody(Number(data.size))
   if (bytes.byteLength !== data.size || await fileUploadDigest(bytes) !== data.digest) throw new FileUploadError("The uploaded file chunk failed its integrity check. Retry the upload.", 400)
-  await db.prepare(`INSERT OR IGNORE INTO FileUploadChunk(uploadId, chunkIndex, size, digest)
-    SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM FileUpload WHERE uploadId = ? AND owner = ? AND status = 'staged' AND expiresAt > ?)`)
-    .bind(row.uploadId, data.index, data.size, data.digest, row.uploadId, proof.publicKey, Date.now()).run()
   const chunk = await db.prepare("SELECT * FROM FileUploadChunk WHERE uploadId = ? AND chunkIndex = ?")
     .bind(row.uploadId, data.index).first<ChunkRow>()
-  if (!chunk || chunk.digest !== data.digest || chunk.size !== data.size) throw new FileUploadError("This file chunk is already finalized or has changed. Attach the file again.", 409)
-  if (chunk.ready) {
+  if (chunk && (chunk.digest !== data.digest || chunk.size !== data.size)) throw new FileUploadError("This file chunk is already finalized or has changed. Attach the file again.", 409)
+  if (chunk?.ready) {
     active(await rowFor(db, row.uploadId, proof.publicKey), Date.now())
     return { success: true }
   }
   const current = await rowFor(db, row.uploadId, proof.publicKey)
   active(current, Date.now())
   if (current.status !== "staged") throw new FileUploadError("This file upload is already finalized.", 409)
-  await files.put(fileKey(row.uploadId, Number(data.index)), bytes, { httpMetadata: { contentType: "application/octet-stream" } })
-  await db.prepare(`UPDATE FileUploadChunk SET ready = 1 WHERE uploadId = ? AND chunkIndex = ? AND digest = ?
-    AND EXISTS (SELECT 1 FROM FileUpload WHERE uploadId = ? AND status = 'staged' AND expiresAt > ?)`)
-    .bind(row.uploadId, data.index, data.digest, row.uploadId, Date.now()).run()
+  // R2 arbitrates immutable content at this chunk key. Persist metadata only
+  // after the bytes exist, collapsing reservation + ready into one D1 write.
+  // A retry after a lost D1 response validates the existing object, and a
+  // competing digest can never replace bytes referenced by the winning row.
+  const key = fileKey(row.uploadId, Number(data.index))
+  const stored = await files.put(key, bytes, { httpMetadata: { contentType: "application/octet-stream" }, onlyIf: { etagDoesNotMatch: "*" } })
+  if (stored === null) {
+    const existing = await files.get(key)
+    if (!existing || existing.size !== data.size || await fileUploadDigest(await new Response(existing.body).arrayBuffer()) !== data.digest) {
+      throw new FileUploadError("This file chunk is already finalized or has changed. Attach the file again.", 409)
+    }
+  }
+  await db.prepare(`INSERT INTO FileUploadChunk(uploadId, chunkIndex, size, digest, ready)
+    SELECT ?, ?, ?, ?, 1 WHERE EXISTS (SELECT 1 FROM FileUpload WHERE uploadId = ? AND owner = ? AND status = 'staged' AND expiresAt > ?)
+    ON CONFLICT(uploadId,chunkIndex) DO UPDATE SET ready = 1
+      WHERE FileUploadChunk.ready = 0 AND FileUploadChunk.digest = excluded.digest AND FileUploadChunk.size = excluded.size`)
+    .bind(row.uploadId, data.index, data.size, data.digest, row.uploadId, proof.publicKey, Date.now()).run()
   const after = await rowFor(db, row.uploadId, proof.publicKey)
   if (after.status === "deleted" || after.expiresAt <= Date.now()) {
     await files.delete(fileKey(row.uploadId, Number(data.index)))

@@ -1,0 +1,58 @@
+{
+  "baselineRef": "42f794ecc791bc9a11e9a79d7ecca77a76b6acc1",
+  "engine": "Miniflare/workerd D1 meta.rows_written",
+  "clients": 3,
+  "setup": {
+    "rowsWritten": 30,
+    "bySql": {
+      "CREATE TABLE IF NOT EXISTS RetiredIdentity ( publicKey TEXT PRIMARY KEY, retiredAt INTEGER NOT NULL )": 3,
+      "CREATE TABLE IF NOT EXISTS RelayMessage ( id TEXT NOT NULL, senderPubKey TEXT NOT NULL, recipientPubKey TEXT NOT NULL, encryptedData TEXT NOT NULL, createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, PRIMARY KEY (recipientPubKey, senderPubKey, id) )": 3,
+      "CREATE INDEX IF NOT EXISTS idx_relay_conversation ON RelayMessage(recipientPubKey, senderPubKey, createdAt)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_relay_expiry ON RelayMessage(expiresAt)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_relay_sender ON RelayMessage(senderPubKey)": 1,
+      "CREATE TABLE IF NOT EXISTS RelayEvent ( sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, senderPubKey TEXT NOT NULL, recipientPubKey TEXT NOT NULL, encryptedData TEXT NOT NULL, payloadBytes INTEGER NOT NULL, createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, UNIQUE(recipientPubKey, senderPubKey, id) )": 5,
+      "CREATE INDEX IF NOT EXISTS idx_event_recipient_sequence ON RelayEvent(recipientPubKey, sequence)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_event_sender_sequence ON RelayEvent(senderPubKey, sequence)": 1,
+      "CREATE INDEX IF NOT EXISTS idx_event_expiry ON RelayEvent(expiresAt)": 1,
+      "CREATE TABLE IF NOT EXISTS RelayEventUsage ( senderPubKey TEXT PRIMARY KEY, eventCount INTEGER NOT NULL, payloadBytes INTEGER NOT NULL )": 3,
+      "CREATE TRIGGER IF NOT EXISTS relay_event_usage_insert AFTER INSERT ON RelayEvent BEGIN INSERT INTO RelayEventUsage(senderPubKey, eventCount, payloadBytes) VALUES(NEW.senderPubKey, 1, NEW.payloadBytes) ON CONFLICT(senderPubKey) DO UPDATE SET eventCount = eventCount + 1, payloadBytes = payloadBytes + NEW.payloadBytes; END": 1,
+      "CREATE TRIGGER IF NOT EXISTS relay_event_usage_delete AFTER DELETE ON RelayEvent BEGIN UPDATE RelayEventUsage SET eventCount = eventCount - 1, payloadBytes = payloadBytes - OLD.payloadBytes WHERE senderPubKey = OLD.senderPubKey; DELETE FROM RelayEventUsage WHERE senderPubKey = OLD.senderPubKey AND eventCount = 0; END": 1,
+      "INSERT INTO RelayEvent (id, senderPubKey, recipientPubKey, encryptedData, payloadBytes, createdAt, expiresAt) SELECT ?, ?, ?, ?, ?, ?, ? WHERE COALESCE((SELECT eventCount FROM RelayEventUsage WHERE senderPubKey = ?), 0) < ? AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= ? AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?)) ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING": 8
+    }
+  },
+  "scenarios": {
+    "idle-10m": {
+      "rowsWritten": 0,
+      "bySql": {}
+    },
+    "active-10m": {
+      "rowsWritten": 211,
+      "bySql": {
+        "INSERT INTO RelayEvent (id, senderPubKey, recipientPubKey, encryptedData, payloadBytes, createdAt, expiresAt) SELECT ?, ?, ?, ?, ?, ?, ? WHERE COALESCE((SELECT eventCount FROM RelayEventUsage WHERE senderPubKey = ?), 0) < ? AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= ? AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?)) ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING": 211
+      }
+    },
+    "call-10m": {
+      "rowsWritten": 0,
+      "bySql": {}
+    },
+    "room-10m": {
+      "rowsWritten": 0,
+      "bySql": {}
+    },
+    "mixed-files-10m": {
+      "rowsWritten": 242,
+      "bySql": {
+        "INSERT INTO RelayEvent (id, senderPubKey, recipientPubKey, encryptedData, payloadBytes, createdAt, expiresAt) SELECT ?, ?, ?, ?, ?, ?, ? WHERE COALESCE((SELECT eventCount FROM RelayEventUsage WHERE senderPubKey = ?), 0) < ? AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= ? AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?)) ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING": 217,
+        "CREATE TABLE IF NOT EXISTS FileUpload ( uploadId TEXT PRIMARY KEY, owner TEXT NOT NULL, size INTEGER NOT NULL, chunkCount INTEGER NOT NULL, accessHash TEXT NOT NULL, status TEXT NOT NULL, createdAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL, reservedBytes INTEGER NOT NULL, cleanupAt INTEGER NOT NULL DEFAULT 0, deletedAt INTEGER )": 3,
+        "CREATE INDEX IF NOT EXISTS idx_file_upload_owner ON FileUpload(owner, status)": 1,
+        "CREATE INDEX IF NOT EXISTS idx_file_upload_cleanup ON FileUpload(status, expiresAt, cleanupAt)": 1,
+        "CREATE TABLE IF NOT EXISTS FileUploadChunk ( uploadId TEXT NOT NULL, chunkIndex INTEGER NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL, ready INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(uploadId, chunkIndex) )": 3,
+        "INSERT OR IGNORE INTO FileUpload(uploadId, owner, size, chunkCount, accessHash, status, createdAt, expiresAt, reservedBytes) SELECT ?, ?, ?, ?, ?, 'staged', ?, ?, ? WHERE (SELECT COALESCE(SUM(reservedBytes), 0) FROM FileUpload WHERE owner = ?) <= ? AND (SELECT COALESCE(SUM(reservedBytes), 0) FROM FileUpload) <= ? AND (SELECT COUNT(*) FROM FileUpload WHERE owner = ? AND status != 'deleted') < 100": 4,
+        "INSERT INTO FileUploadChunk(uploadId, chunkIndex, size, digest, ready) SELECT ?, ?, ?, ?, 1 WHERE EXISTS (SELECT 1 FROM FileUpload WHERE uploadId = ? AND owner = ? AND status = 'staged' AND expiresAt > ?) ON CONFLICT(uploadId,chunkIndex) DO UPDATE SET ready = 1 WHERE FileUploadChunk.ready = 0 AND FileUploadChunk.digest = excluded.digest AND FileUploadChunk.size = excluded.size": 2,
+        "UPDATE FileUpload SET status = 'ready' WHERE uploadId = ? AND owner = ? AND status = 'staged' AND expiresAt > ? AND (SELECT COUNT(*) FROM FileUploadChunk WHERE uploadId = ? AND ready = 1) = chunkCount AND (SELECT COALESCE(SUM(size), 0) FROM FileUploadChunk WHERE uploadId = ? AND ready = 1) = size + 16 * chunkCount": 3,
+        "UPDATE FileUpload SET status = 'published', expiresAt = ? WHERE uploadId = ? AND owner = ? AND status = 'ready' AND expiresAt > ?": 3,
+        "INSERT INTO RelayMessage (id, senderPubKey, recipientPubKey, encryptedData, createdAt, expiresAt) SELECT ?, ?, ?, ?, ?, ? FROM ( SELECT COUNT(*) AS count, COALESCE(SUM(CASE WHEN substr(encryptedData,1,7) = '@r2:v2:' THEN json_extract(substr(encryptedData,8),'$.bytes') ELSE LENGTH(CAST(encryptedData AS BLOB)) END), 0) AS bytes FROM RelayMessage WHERE senderPubKey = ? ) AS pending WHERE pending.count < 500 AND pending.bytes + ? <= ? AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?)) ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING": 5
+      }
+    }
+  }
+}

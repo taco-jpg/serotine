@@ -22,7 +22,8 @@ test('workerd authenticates WSS through the self binding, pushes only peers and 
   const mf = new Miniflare({ name: 'socket-test', modules: true, script: build.outputFiles[0].text,
     compatibilityDate: '2026-05-06', compatibilityFlags: ['nodejs_compat'],
     serviceBindings: { WORKER_SELF_REFERENCE: 'socket-test' },
-    durableObjects: { CALL_SIGNALING: { className: 'CallSignalingHub', useSQLite: true } }, d1Databases: ['serotine_db'],
+    bindings: { SEROTINE_STORAGE_VERSION: '2' }, r2Buckets: ['serotine_files'],
+    durableObjects: { SEROTINE_REALTIME: { className: 'RelayRealtimeStore', useSQLite: true }, CALL_SIGNALING: { className: 'CallSignalingHub', useSQLite: true } }, d1Databases: ['serotine_db'],
   })
   t.after(() => mf.dispose())
   const clientBuild = esbuild.buildSync({ absWorkingDir: root, stdin: { contents: 'export * from "./lib/request-auth.ts"; export * from "./lib/crypto.ts"', resolveDir: root }, bundle: true, write: false, platform: 'node', format: 'cjs', target: 'es2022' })
@@ -84,7 +85,7 @@ test('workerd authenticates WSS through the self binding, pushes only peers and 
   replaySocket.webSocket.accept()
   const rejected = new Promise(resolve => replaySocket.webSocket.addEventListener('message', event => resolve(JSON.parse(event.data)), { once: true }))
   replaySocket.webSocket.send(JSON.stringify(a.authEnvelope))
-  assert.equal((await rejected).status, 409, 'D1 consumes authentication nonces across sockets')
+  assert.equal((await rejected).status, 409, 'Durable Object consumes authentication nonces across sockets')
   const closed = new Promise(resolve => c.socket.addEventListener('close', resolve, { once: true }))
   c.socket.send(new Uint8Array([0, 1, 2]).buffer)
   assert.equal((await closed).code, 1003)

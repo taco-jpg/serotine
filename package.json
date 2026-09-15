@@ -9,6 +9,7 @@
     "build:edge": "npm run build",
     "deploy": "npm run build && npm run deploy:built",
     "deploy:built": "opennextjs-cloudflare deploy",
+    "deploy:check": "wrangler deploy --dry-run",
     "lint": "eslint .",
     "start": "next start",
     "test": "node --test tests/*.test.cjs",

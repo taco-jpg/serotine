@@ -26,3 +26,5 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: 1
       - run: test -f .open-next/worker.js
+      - name: Validate Worker bundle and bindings without deploying
+        run: npm run deploy:check

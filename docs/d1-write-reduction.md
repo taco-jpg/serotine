@@ -39,6 +39,10 @@ Realtime migration first installs D1 write fences on the old transient tables, t
 
 Deployment requires the existing private `serotine_files` R2 bucket, D1 binding, and new `SEROTINE_REALTIME` SQLite Durable Object binding/migration in `wrangler.toml`. `SEROTINE_STORAGE_VERSION=2` is the production setting; a missing setting defaults to v2 and missing bindings fail closed. Version 1 exists solely for explicit pre-cutover compatibility/testing. Do not roll back to a v1 writer or remove the write fences after migration: those rows are no longer the live authority. Use forward fixes that retain the v2 storage boundary. Deploy at 100%, not as a gradual mix of storage versions. A deployment-spanning old request can need a retry while the boundary changes.
 
+The first Cloudflare PR build completed compilation but failed at `npx wrangler versions upload` with error **10211**. That command cannot apply the new Durable Object migration. In **serotine → Settings → Build**, set the production deploy command to `npm run deploy:built` and the non-production branch deploy command to `npm run deploy:check`, with `main` as the production branch. Keep the build command as `npm run build` or `pnpm run build`. Then retry the updated PR build. These dashboard settings cannot be changed by a repository commit. This error is a deployment-method constraint, not evidence that the API token needs more permissions.
+
+`deploy:check` runs `wrangler deploy --dry-run` against the built custom Worker. GitHub CI runs the same check after building. It validates bundling and local configuration, without applying a migration, publishing a preview, or routing production traffic. The approved release uses `deploy:built`, which invokes OpenNext's full `wrangler deploy` path and applies the Durable Object migration and Cron trigger. Remote migration success must still be verified during that release. Cloudflare documents the [migration restriction](https://developers.cloudflare.com/workers/versions-and-deployments/deployment-management/#durable-object-migrations) and [non-production command setting](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/#non-production-branch-deploy-command).
+
 Before deployment, add this lifecycle rule to the new current-payload prefix only, preserving the existing 33-day rule for `encrypted-files/v1/`:
 
 ```sh
@@ -59,6 +63,7 @@ npm test
 npm run typecheck
 npm run db:migrate:local
 npm run build
+npm run deploy:check
 npm run test:d1
 npm run measure:d1
 # To remeasure the untouched baseline, supply a checkout of the pinned commit:

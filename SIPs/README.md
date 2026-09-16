@@ -15,7 +15,7 @@ Status review: **2026-09-14**, against application `main` at [801f09a](https://g
 | [SIP-7](SIP-7-ai-summary-plugin.md) | AI summary plugin | Draft | Summary workflow/provider integration and the SIP-5 plugin foundation are not implemented. |
 | [SIP-8](SIP-8-share-selected-messages.md) | Share selected messages | Draft | Selected-message bundles and their preview/import flow are not implemented; existing file and access-key sharing do not fulfill this SIP. |
 | [SIP-9](SIP-9-force-p2p-mode.md) | Force P2P mode | Draft | Direct-only messaging with persistent no-relay restrictions is not implemented. Existing direct connections do not provide that guarantee. |
-| [SIP-10](SIP-10-android-and-ios-apps.md) | Android and iOS apps | Draft | Native app packages, signing, and distribution are not implemented in the application repository. |
+| [SIP-10](SIP-10-android-and-ios-apps.md) | Android, iOS, Windows, and macOS apps | Draft | Mobile packages plus Windows EXE and macOS APP/DMG distribution, desktop integration, signing, and updates are proposed; app packages are not implemented. |
 | [SIP-11](SIP-11-custom-user-avatars.md) | Custom user avatars | Draft | Custom avatar upload, profile storage, and synchronization are not implemented. SIP-12 is a related draft, not an adopted replacement. |
 | [SIP-12](SIP-12-custom-profiles-and-per-friend-sharing.md) | Custom profiles and per-friend sharing | Draft | Profile editor, GIF banners/pictures, and per-friend field permissions are not implemented. |
 | [SIP-13](SIP-13-group-and-community-receipt-minimization.md) | Group and community receipt minimization | Draft | Stop durable per-recipient delivered/read receipts in multi-person text conversations while preserving sender-local send state. |

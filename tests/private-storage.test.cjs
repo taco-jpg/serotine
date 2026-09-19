@@ -216,6 +216,20 @@ test('imports validate private signatures before any write or destruction', asyn
   assert.deepEqual(rawRows().map(row => row.key), [row.key])
 })
 
+test('ephemeral plugin capabilities are excluded from backup export and ignored on import', async () => {
+  const capability = await signed('plugin-capabilities', { capabilities: {
+    protocol: 1, session: crypto.randomUUID(), sequence: 1,
+    plugins: [{ id: 'serotine.private-chat', version: '1.0.0' }], request: crypto.randomUUID(),
+  } })
+  const ordinary = await signed('message', { content: 'Keep this ordinary history' })
+  await events.saveStoredEvent(owner(), capability)
+  await events.saveStoredEvent(owner(), ordinary)
+  assert.deepEqual((await events.exportMessagingSnapshot(owner())).events.map(row => row.key), [ordinary.key])
+  databases.clear()
+  await events.importMessagingSnapshot(owner(), snapshot([capability, ordinary]))
+  assert.deepEqual(rawRows().map(row => row.key), [ordinary.key])
+})
+
 test('failed destroy transaction leaves both history and replay boundaries unchanged', async () => {
   const timestamp = Date.now() - 5000
   const row = await signed('private-message', { content: 'transactional secret', expiresAt: timestamp + 300000 }, alice, bob, timestamp)

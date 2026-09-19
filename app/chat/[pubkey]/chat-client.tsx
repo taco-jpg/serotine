@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { ArrowLeft, Check, CheckCheck, Loader2, Lock, Send, Shield, RotateCw, ArrowDown, Search, X, ChevronUp, ChevronDown, Copy, Reply, Pencil, Pin, PinOff, Info, Users, BarChart3, AtSign, Bell, Ban, ExternalLink, MessageSquare, MoreHorizontal, Trash2, Timer, KeyRound, Plus } from "lucide-react"
+import { ArrowLeft, Check, CheckCheck, Loader2, Lock, Send, Shield, RotateCw, ArrowDown, Search, X, ChevronUp, ChevronDown, Copy, Reply, Pencil, Pin, PinOff, Info, Users, BarChart3, AtSign, Bell, Ban, ExternalLink, MessageSquare, MoreHorizontal, Trash2, Timer, KeyRound, Plus, Puzzle, Sparkles } from "lucide-react"
 import { useMessaging } from "@/components/messaging-provider"
 import { ConversationActions } from "@/components/conversation-actions"
 import { IdentityIcon } from "@/components/ui/identity-icon"
@@ -32,6 +32,9 @@ import { findMentionQuery, insertMention, serializeMentionDraft, updateMentionSp
 import { EditMessageDialog, GroupSettings, PollCard, PollCreator } from "@/components/chat/conversation-controls"
 import { PrivateChatControls, ShareSecretDialog, privateDurationLabel } from "@/components/chat/private-chat-controls"
 import { SecretMessage } from "@/components/chat/secret-message"
+import { PluginSettings } from "@/components/chat/plugin-settings"
+import { AiSummaryDialog } from "@/components/chat/ai-summary-dialog"
+import { AI_SUMMARY_PLUGIN_ID, PRIVATE_CHAT_PLUGIN_ID, resolvePluginCommand } from "@/lib/plugins"
 import { CallActions } from "@/components/calling/call-actions"
 import { RoomCallActions } from "@/components/calling/room-call-actions"
 import { CallHistory } from "@/components/calling/call-history"
@@ -59,6 +62,10 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const canUsePrivate = !isGroup && !isSelf
   const privateTtlSeconds = messaging.getPrivateMode(conversationId)
   const privateMode = canUsePrivate && privateTtlSeconds > 0
+  const privatePlugin = messaging.plugins.find(plugin => plugin.manifest.id === PRIVATE_CHAT_PLUGIN_ID)
+  const privateAvailability = messaging.getPluginAvailability(PRIVATE_CHAT_PLUGIN_ID, conversationId)
+  const summaryAvailability = messaging.getPluginAvailability(AI_SUMMARY_PLUGIN_ID, conversationId)
+  const privateSendingPaused = privateMode && !privateAvailability.available
   const activeMembers = conversation?.members || []
   const unavailableGroup = isGroup && !conversation
   const blocked = conversation?.blocked || preferences.blocked.includes(conversationId)
@@ -108,6 +115,8 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const [toolsOpen, setToolsOpen] = useState(false)
   const [pollOpen, setPollOpen] = useState(false)
   const [privateOpen, setPrivateOpen] = useState(false)
+  const [pluginsOpen, setPluginsOpen] = useState(false)
+  const [summaryOpen, setSummaryOpen] = useState(false)
   const [secretOpen, setSecretOpen] = useState(false)
   const [infoOpen, setInfoOpen] = useState(false)
   const [infoTab, setInfoTab] = useState<"settings" | "files" | "links" | "pins">("settings")
@@ -135,6 +144,13 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const attachmentAccess = useRef(false)
   attachmentAccess.current = !!identity && usable && !privateMode
   const actionScope = useRef<object | null>(null)
+  const summaryAllowed = usable && !privateMode && summaryAvailability.available
+  const currentSummaryScope = useRef({ owner: myPub, conversationId, allowed: summaryAllowed })
+  currentSummaryScope.current = { owner: myPub, conversationId, allowed: summaryAllowed }
+  const isSummaryAllowed = () => {
+    const scope = currentSummaryScope.current
+    return scope.owner === myPub && scope.conversationId === conversationId && scope.allowed && messaging.getPluginAvailability(AI_SUMMARY_PLUGIN_ID, conversationId).available && messaging.getPrivateMode(conversationId) === 0
+  }
   const searchTerm = query.trim()
   const matches = useMemo(() => {
     const pattern = literalSearch(searchTerm)
@@ -222,9 +238,13 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
     setToolsOpen(false)
     const scope = {}
     actionScope.current = scope; sendLock.current = false; seenIds.current = null; nearBottom.current = true
-    setBusy(false); setRetrying(null); setBatchProgress(null); setSendError(""); setReplyTo(undefined); setDeleteTarget(null); setDeleteError(""); setEditing(null); setPrivateOpen(false); setSecretOpen(false)
+    setBusy(false); setRetrying(null); setBatchProgress(null); setSendError(""); setReplyTo(undefined); setDeleteTarget(null); setDeleteError(""); setEditing(null); setPrivateOpen(false); setSecretOpen(false); setSummaryOpen(false); setPluginsOpen(false)
     return () => { if (actionScope.current === scope) actionScope.current = null }
   }, [myPub, conversationId])
+  useEffect(() => {
+    if (!summaryAllowed) setSummaryOpen(false)
+    if (!privateAvailability.available) setSecretOpen(false)
+  }, [summaryAllowed, privateAvailability.available])
   useEffect(() => {
     if (privateMode) { setReplyTo(undefined); setEditing(null); setPollOpen(false); setMentionOpen(false); setMentionQuery(null) }
   }, [privateMode])
@@ -294,7 +314,16 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
     try { await action(); if (success) setAnnouncement(success) } catch (cause) { setSendError(errorText(cause)) }
     finally { setActionBusy(false) }
   }
+  const openSummary = () => {
+    if (!summaryAvailability.available) { setSendError("Enable AI Summary in Manage plugins to use /summarize. This command was not sent."); return }
+    if (privateMode) { setSendError("Turn off private mode before summarizing ordinary messages. This command was not sent."); return }
+    if (!usable) { setSendError("This conversation is not available for a summary. This command was not sent."); return }
+    setSendError(""); setSummaryOpen(true)
+  }
   const submit = async () => {
+    // Reserved local command even when unavailable: never fall through to message sending.
+    if (resolvePluginCommand(content) === AI_SUMMARY_PLUGIN_ID) { openSummary(); return }
+    if (privateSendingPaused) { setSendError(privateAvailability.reason); return }
     const scope = actionScope.current
     const attachments = privateMode ? null : attachmentComposer.current
     const pending = attachments?.getState()
@@ -358,7 +387,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
             if (mentionCandidates.length && ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab")) { event.preventDefault(); chooseMention(mentionCandidates[selectedMentionIndex]); return }
           }
           if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit() }
-        }} /><Button type="submit" aria-label="Send message" disabled={!usable || !draftReady || (!content.trim() && !hasAttachments) || sending || attachmentsUnavailable} size="icon" className="size-9 shrink-0 rounded-[4px]">{busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}</Button></div>
+        }} /><Button type="submit" aria-label="Send message" disabled={!usable || !draftReady || (!content.trim() && !hasAttachments) || sending || attachmentsUnavailable || (privateSendingPaused && resolvePluginCommand(content) !== AI_SUMMARY_PLUGIN_ID)} size="icon" className="size-9 shrink-0 rounded-[4px]">{busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}</Button></div>
   return <div ref={chatRoot} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
     <header className="flex min-h-15 shrink-0 items-center justify-between gap-1 border-b border-border bg-background px-2 py-1 sm:px-5">
       <div className="flex min-w-0 items-center gap-2.5"><Link href="/chat" aria-label="Back to conversations" className="flex size-11 shrink-0 items-center justify-center rounded-[4px] text-muted-foreground hover:bg-card md:hidden"><ArrowLeft className="size-5" /></Link>{isGroup ? <span className="flex size-8 shrink-0 items-center justify-center rounded-[4px] border border-border bg-card text-primary"><Users className="size-5" /></span> : <span className="hidden shrink-0 sm:block"><IdentityIcon pubKey={conversationId} size={30} /></span>}<div className="min-w-0"><h1 className="truncate font-sans text-base font-medium tracking-tight">{title}{isSelf && <span className="ml-2 text-xs font-normal text-muted-foreground">yourself</span>}</h1><span className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><Lock className="size-3 shrink-0" /><span className="truncate">{conversation?.archived ? "Archived · History saved" : isGroup ? unavailableGroup ? "Group history unavailable" : closedGroup ? "Closed group · Encrypted" : leftGroup ? "Left group · Encrypted" : `${activeMembers.length} members · Encrypted` : privateMode ? `Private · ${privateDurationLabel(privateTtlSeconds)} timer` : "End-to-end encrypted"}</span></span></div></div>
@@ -368,7 +397,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
       </ConversationActions>}</div>
     </header>
     {status !== "online" && !error && <div role="status" className="shrink-0 border-b border-border/70 px-3 py-1 text-[11px] text-destructive">{statusLabel}</div>}
-    {privateMode && <div className="flex shrink-0 items-center gap-2 border-b border-primary/15 bg-primary/5 px-4 py-2 text-xs text-muted-foreground"><Timer className="size-3.5 shrink-0 text-primary" /><span className="min-w-0 flex-1">New text messages disappear {privateDurationLabel(privateTtlSeconds)} after sending. Copies may remain with the recipient.</span><Button variant="ghost" size="sm" className="h-7 px-2 text-xs" disabled={!usable || sending} onClick={() => setPrivateOpen(true)}>Change</Button></div>}
+    {privateMode && <div className="flex shrink-0 items-center gap-2 border-b border-primary/15 bg-primary/5 px-4 py-2 text-xs text-muted-foreground"><Timer className="size-3.5 shrink-0 text-primary" /><span className="min-w-0 flex-1">{privateSendingPaused ? "Private sending is paused until both people have compatible Private Chat enabled. Existing timers continue." : `New text messages disappear ${privateDurationLabel(privateTtlSeconds)} after sending. Copies may remain with the recipient.`}</span><Button variant="ghost" size="sm" className="h-7 px-2 text-xs" disabled={!usable || sending} onClick={() => setPrivateOpen(true)}>Change</Button></div>}
     {searchOpen && <div role="search" aria-label="Search saved messages" className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3 sm:px-7"><Input ref={searchInput} aria-label="Search messages" placeholder="Search ordinary messages…" className="min-w-32 flex-1" value={query} onChange={event => { setQuery(event.target.value); setMatchIndex(0) }} onKeyDown={event => { if (event.nativeEvent.isComposing) return; if (event.key === "Escape") { setSearchOpen(false); setQuery(""); input.current?.focus() } else if (event.key === "Enter") { event.preventDefault(); moveMatch(event.shiftKey ? -1 : 1) } }} /><span role="status" className="text-xs text-muted-foreground">{searchTerm ? matches.length ? `${selectedIndex + 1} of ${matches.length}` : "No matches" : "Private messages excluded"}</span><Button variant="ghost" size="icon" aria-label="Previous match" disabled={!matches.length} onClick={() => moveMatch(-1)}><ChevronUp className="size-4" /></Button><Button variant="ghost" size="icon" aria-label="Next match" disabled={!matches.length} onClick={() => moveMatch(1)}><ChevronDown className="size-4" /></Button><Button variant="ghost" size="icon" aria-label="Close search" onClick={() => { setSearchOpen(false); setQuery(""); input.current?.focus() }}><X className="size-4" /></Button></div>}
     {error && <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-destructive/20 bg-destructive/5 px-5 py-3 text-sm text-destructive"><p role="alert" className="min-w-0 flex-1 [overflow-wrap:anywhere]">{error}</p><Button type="button" size="sm" variant="outline" disabled={sending || actionBusy} onClick={() => void act(() => messaging.sync())}><RotateCw className="size-4" />Reconnect inbox</Button></div>}
     {deliveryError && <div role="alert" className="shrink-0 space-y-1 border-b border-destructive/20 bg-destructive/5 px-5 py-3 text-sm text-destructive [overflow-wrap:anywhere]"><p className="font-medium">Delivery issue in this conversation</p><p>{deliveryError}</p></div>}
@@ -441,9 +470,10 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
         {!privateMode && replyTo && <div className="mb-2 flex items-center gap-2 rounded-[4px] border-l-2 border-primary bg-card p-2 text-xs"><Reply className="size-4 shrink-0 text-primary" /><span className="min-w-0 flex-1"><span className="block text-primary">Replying to {byId.get(replyTo) ? displayName(byId.get(replyTo)!.senderPubKey) : "message"}</span><span className="block truncate text-muted-foreground">{byId.get(replyTo) ? displaySummary(byId.get(replyTo)!) : "Original message"}</span></span><Button variant="ghost" size="icon" aria-label="Cancel reply" onClick={() => setReplyTo(undefined)}><X className="size-4" /></Button></div>}
         <form aria-label="Message composer" onSubmit={event => { event.preventDefault(); if (event.target === event.currentTarget) void submit() }}>
           <div className="rounded-[4px] border border-border bg-card p-1 transition-colors focus-within:border-primary/60 focus-within:ring-1 focus-within:ring-primary/20">
-            {privateMode ? <>{messageInput}<div id="message-tools" className={`${toolsOpen ? "flex" : "hidden"} flex-wrap items-center justify-between gap-2 py-1`}><Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" />Share access key</Button><span className="text-[11px] text-muted-foreground">Plain text only · No files or polls</span></div></> : <AttachmentComposer key={`${myPub}:${conversationId}`} scopeKey={`${myPub}:${conversationId}`} composerRef={attachmentComposer} onStateChange={setAttachmentState} owner={myPub} maxFileBytes={attachmentFileLimit(group)} toolbarVisible={toolsOpen} toolbarId="message-tools" extraActions={<>
+            {privateMode ? <>{messageInput}<div id="message-tools" className={`${toolsOpen ? "flex" : "hidden"} flex-wrap items-center justify-between gap-2 py-1`}><Button type="button" variant="ghost" size="sm" disabled={!usable || sending || !privateAvailability.available} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" />Share access key</Button><span className="text-[11px] text-muted-foreground">Plain text only · No files or polls</span></div></> : <AttachmentComposer key={`${myPub}:${conversationId}`} scopeKey={`${myPub}:${conversationId}`} composerRef={attachmentComposer} onStateChange={setAttachmentState} owner={myPub} maxFileBytes={attachmentFileLimit(group)} toolbarVisible={toolsOpen} toolbarId="message-tools" extraActions={<>
+          {summaryAvailability.available && <Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={openSummary}><Sparkles className="size-4" />Summarize</Button>}
           <MessageFormattingTools key={`format:${myPub}:${conversationId}`} content={content} inputRef={input} disabled={!usable || sending || !draftReady} onInsert={insertFormatting} />
-          {canUsePrivate && <Button type="button" variant="ghost" size="sm" disabled={!usable || sending} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" /><span className="hidden sm:inline">Access key</span><span className="sr-only sm:hidden">Share access key</span></Button>}
+          {canUsePrivate && <Button type="button" variant="ghost" size="sm" disabled={!usable || sending || !privateAvailability.available} onClick={() => setSecretOpen(true)}><KeyRound className="size-4" /><span className="hidden sm:inline">Access key</span><span className="sr-only sm:hidden">Share access key</span></Button>}
           <Button type="button" variant="ghost" size="sm" disabled={!usable} onClick={() => setPollOpen(true)}><BarChart3 className="size-4" />Poll</Button>
           {!isSelf && <Button type="button" variant="ghost" size="sm" disabled={!usable} aria-expanded={mentionOpen} onClick={() => { setMentionQuery(findMentionQuery(content, input.current?.selectionStart ?? content.length, input.current?.selectionEnd ?? content.length)); setMentionIndex(0); setMentionOpen(!mentionOpen); if (!mentionOpen) requestAnimationFrame(() => document.getElementById("message-mention-0")?.focus()); else input.current?.focus() }}><AtSign className="size-4" />Mention</Button>}
         </>} captureRef={chatRoot} pasteRef={input} disabled={!usable || !draftReady} onSelectGif={url => {
@@ -484,8 +514,14 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
         <div className={toolsOpen || (!privateMode && !draftSaved) ? "mt-1 flex flex-wrap justify-between gap-1 text-[11px] text-muted-foreground" : "sr-only"}><span className="hidden sm:inline">Enter to send · Shift + Enter for a new line · Math and Code in message tools</span><span className={!privateMode && !draftSaved ? "text-destructive" : ""}>{privateMode ? "Private draft stays only in this tab" : !draftSaved ? draftIssue === "read" ? "Saved draft could not be loaded" : draftIssue === "clear" ? "Sent text is waiting to be cleared from storage" : "Draft is only in this tab · Do not close it" : content ? "Draft saved on this browser" : "History saved on this browser"}</span></div>{!privateMode && !draftSaved && <Button type="button" size="sm" variant="ghost" onClick={retryDraftSave}>{draftIssue === "read" ? "Try loading draft again" : draftIssue === "clear" ? "Retry draft cleanup" : "Try saving draft again"}</Button>}{content.length > MAX_MESSAGE_LENGTH - 1000 && <p className="mt-1 text-right text-xs text-muted-foreground">{content.length.toLocaleString()} / {MAX_MESSAGE_LENGTH.toLocaleString()}</p>}
       </div>
     </footer>
-    {canUsePrivate && <PrivateChatControls key={`private:${myPub}:${conversationId}`} open={privateOpen} onOpenChange={setPrivateOpen} ttlSeconds={privateTtlSeconds} disabled={!usable || sending} onSetMode={seconds => messaging.setPrivateMode(conversationId, seconds)} onDestroy={async () => { await messaging.destroyPrivateHistory(conversationId); setAnnouncement("Private history destroyed here. The other person’s updated app will remove it when it receives the request.") }} />}
-    {canUsePrivate && secretOpen && <ShareSecretDialog key={`secret:${myPub}:${conversationId}`} recipientName={title} recipientAddress={conversationId} disabled={!usable || sending} onClose={() => setSecretOpen(false)} onSend={async (secret, seconds) => { await messaging.sendSecret(conversationId, secret, seconds); jumpToLatest() }} />}
+    {canUsePrivate && <PrivateChatControls key={`private:${myPub}:${conversationId}`} open={privateOpen} onOpenChange={setPrivateOpen} ttlSeconds={privateTtlSeconds} disabled={!usable || sending} pluginEnabled={!!privatePlugin?.enabled} available={privateAvailability.available} availabilityReason={privateAvailability.reason} onCheckPeer={() => messaging.refreshPeerCapabilities(conversationId)} onManagePlugins={() => { setPrivateOpen(false); setPluginsOpen(true) }} onSetMode={seconds => messaging.setPrivateMode(conversationId, seconds)} onDestroy={async () => { await messaging.destroyPrivateHistory(conversationId); setAnnouncement("Private history destroyed here. The other person’s updated app will remove it when it receives the request.") }} />}
+    {canUsePrivate && privateAvailability.available && secretOpen && <ShareSecretDialog key={`secret:${myPub}:${conversationId}`} recipientName={title} recipientAddress={conversationId} disabled={!usable || sending} onClose={() => setSecretOpen(false)} onSend={async (secret, seconds) => { await messaging.sendSecret(conversationId, secret, seconds); jumpToLatest() }} />}
+    <PluginSettings open={pluginsOpen} onOpenChange={setPluginsOpen} />
+    {identity && summaryAllowed && summaryOpen && <AiSummaryDialog key={`summary:${myPub}:${conversationId}`} identity={identity} conversationId={conversationId} messages={messages} isAllowed={isSummaryAllowed} onClose={() => setSummaryOpen(false)} onSend={async summary => {
+      if (!isSummaryAllowed()) throw new Error("This conversation changed. Open a new summary before sending.")
+      await messaging.sendText(conversationId, summary, undefined, [], 0)
+      jumpToLatest()
+    }} />}
     <PollCreator open={!privateMode && pollOpen} onOpenChange={setPollOpen} onCreate={async (question, options) => { await messaging.createPoll(conversationId, question, options); jumpToLatest() }} />
     <EditMessageDialog message={editing} onClose={() => setEditing(null)} onSave={(id, value) => messaging.editMessage(conversationId, id, value)} />
     <Dialog open={!!deleteTarget} onOpenChange={open => { if (!open && !deleting) setDeleteTarget(null) }}>
@@ -506,6 +542,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
       {infoTab === "links" && (sharedLinks.length ? sharedLinks.map(({ url, message }, index) => <div key={`${message.id}:${index}`} className="space-y-2 rounded-[4px] border border-border p-3"><a href={url} target="_blank" rel="noopener noreferrer" className="flex items-start gap-2 break-all text-sm text-primary hover:underline"><ExternalLink className="mt-0.5 size-4 shrink-0" />{url}</a><button type="button" className="text-xs text-muted-foreground hover:text-foreground" onClick={() => openMessageFromInfo(message.id)}>View message · {displayName(message.senderPubKey)}</button></div>) : <p className="py-8 text-center text-sm text-muted-foreground">Links from this conversation will appear here.</p>)}
       {infoTab === "pins" && (pinned.length ? [...pinned].reverse().map(message => <div key={message.id} className="rounded-[4px] border border-border p-3"><button type="button" className="w-full text-left" onClick={() => openMessageFromInfo(message.id)}><span className="text-xs text-primary">{displayName(message.senderPubKey)}</span><p className="mt-1 line-clamp-4 whitespace-pre-wrap break-words text-sm text-foreground">{displaySummary(message)}</p><span className="mt-2 block text-xs text-muted-foreground">Jump to message</span></button><Button size="sm" variant="ghost" disabled={!usable || actionBusy} onClick={() => void act(() => messaging.pinMessage(conversationId, message.id, false))}><PinOff className="size-3" />Unpin</Button></div>) : <p className="py-8 text-center text-sm text-muted-foreground">Pin a message to find it quickly here.</p>)}
       {infoTab === "settings" && <>
+        <Button variant="outline" onClick={() => { setInfoOpen(false); setPluginsOpen(true) }}><Puzzle className="size-4" />Manage plugins</Button>
         {!isSelf && <div className="space-y-2"><Label htmlFor="conversation-notifications" className="flex items-center gap-2"><Bell className="size-4" />Notifications</Label><select id="conversation-notifications" value={notificationMode} disabled={actionBusy} onChange={event => void act(() => messaging.setNotificationMode(conversationId, event.target.value as NotificationMode))} className="h-10 w-full rounded-[4px] border border-border bg-card px-3 text-sm"><option value="all">All messages</option><option value="mentions">Mentions only</option><option value="muted">Muted</option></select><p className="text-xs leading-relaxed text-muted-foreground">Browser notifications work while Serotine is open. Enable them in the inbox settings.</p></div>}
         {isGroup && group && conversation && <GroupSettings groupName={group.name} members={activeMembers.map(pub => ({ pub, label: displayName(pub) }))} candidates={contacts.filter(contact => !activeMembers.includes(contact.pub)).map(contact => ({ pub: contact.pub, label: contact.alias || shortAddress(contact.pub) }))} canManage={group.admin === myPub && !membershipUpdating} left={leftGroup} ownerPub={group.admin} myPub={myPub} onRename={name => messaging.updateGroup(conversationId, { name })} onAdd={async pub => { const address = await parseContactCode(pub); if (activeMembers.includes(address)) throw new Error("This person is already in the group."); await messaging.updateGroup(conversationId, { members: [...activeMembers, address] }) }} onRemove={pub => messaging.updateGroup(conversationId, { members: activeMembers.filter(member => member !== pub) })} onLeave={() => messaging.leaveGroup(conversationId)} />}
         {!isGroup && <div className="space-y-2"><p className="text-sm font-medium">{isSelf ? "Your address" : "Contact address"}</p><QrCodeCard value={conversationId} title={isSelf ? "Your address QR code" : "Contact address QR code"} /><details className="text-xs text-muted-foreground"><summary className="cursor-pointer">View full public address</summary><p className="mt-2 select-all break-all rounded-[4px] bg-card p-3 font-mono text-xs text-muted-foreground">{conversationId}</p></details></div>}

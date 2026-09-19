@@ -3,7 +3,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { test, before, beforeEach } = require('node:test')
 const ts = require('typescript')
-const root = path.join(__dirname, '..'), modules = new Map(), stores = new Map()
+const root = path.join(__dirname, '..'), modules = new Map(), stores = new Map(), preferences = new Map(), pluginStorage = new Map()
 const packets = [], notices = []
 const defaults = () => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true, archived: [], deleted: {}, deletedMessages: {} })
 const rows = owner => { if (!stores.has(owner)) stores.set(owner, new Map()); return stores.get(owner) }
@@ -11,8 +11,8 @@ const store = {
   createStoredEventReader: owner => ({ read: () => store.getStoredEvents(owner), dispose() {} }),
   defaultMessagingPreferences: defaults,
   eventStorageKey: event => `${event.author}:${event.conversationId}:${event.id}`,
-  getMessagingPreferences: async () => defaults(),
-  saveMessagingPreferences: async () => {},
+  getMessagingPreferences: async owner => structuredClone(preferences.get(owner) || defaults()),
+  saveMessagingPreferences: async (owner, value) => { preferences.set(owner, structuredClone(value)) },
   deleteStoredConversation: async () => {},
   getSyncCursor: async () => 0,
   saveSyncCursor: async () => {},
@@ -51,30 +51,44 @@ function load(filename) {
     if (name === './message-notifications') return { notifyIncoming: message => notices.push(message), requestMessagingNotifications: async () => 'denied' }
     return name.startsWith('.') ? load(path.resolve(path.dirname(filename), name)) : require(name)
   }
-  new Function('require', 'module', 'exports', 'navigator', 'window', 'localStorage', output)(sourceRequire, module, module.exports, {}, new EventTarget(), { getItem: () => null })
+  new Function('require', 'module', 'exports', 'navigator', 'window', 'localStorage', output)(sourceRequire, module, module.exports, {}, new EventTarget(), { getItem: key => pluginStorage.get(key) || null, setItem: (key, value) => pluginStorage.set(key, value) })
   return module.exports
 }
 const cryptography = load(path.join(root, 'lib/crypto.ts'))
 const authentication = load(path.join(root, 'lib/request-auth.ts'))
 const privacy = load(path.join(root, 'lib/private-messaging.ts'))
 const messaging = load(path.join(root, 'lib/messaging.ts'))
+const plugins = load(path.join(root, 'lib/plugins.ts'))
 let alice, bob, charlie
 before(async () => {
   async function identity() { const pair = await cryptography.generateEncryptionKeyPair(); return { version: 2, publicKey: await cryptography.exportPublicKeyToHex(pair.publicKey), privateKey: await cryptography.exportKey(pair.privateKey) } }
   ;[alice, bob, charlie] = await Promise.all([identity(), identity(), identity()])
 })
-beforeEach(() => { stores.clear(); packets.length = 0; notices.length = 0 })
+beforeEach(() => { stores.clear(); preferences.clear(); pluginStorage.clear(); packets.length = 0; notices.length = 0 })
 async function event(author, recipient, kind, payload, timestamp = Date.now() - 1000, extra = {}) {
   return messaging.signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: author.publicKey, conversationId: recipient.publicKey, recipients: [recipient.publicKey], timestamp, kind, payload, ...extra }, author)
 }
 function record(event, owner, index = 0) { return { key: store.eventStorageKey(event), event, local: owner.publicKey === event.author, delivered: [...event.recipients], receivedAt: index } }
 function model(events, owner = alice, prefs = defaults()) { return messaging.buildMessagingModel(events.map((event, i) => record(event, owner, i)), owner.publicKey, [], prefs) }
-async function engine(identity, t) {
+async function engine(identity, t, consent = true) {
   const instance = new messaging.MessagingEngine(identity)
   instance.key = await cryptography.importKey(identity.privateKey, 'encryption', 'private')
   const sync = instance.sync
   instance.sync = async () => {}
   await instance.refresh()
+  if (consent) {
+    // Existing expiry tests start with explicit local permission and a fresh
+    // signed peer response. Negotiation itself is exercised separately below.
+    instance.pluginRegistry.setEnabled(plugins.PRIVATE_CHAT_PLUGIN_ID, true, true)
+    for (const peer of [alice, bob, charlie].filter(peer => peer !== identity)) {
+      await instance.acceptRequest(peer.publicKey)
+      const nonce = instance.pluginNegotiation.challenge(peer.publicKey)
+      const capabilities = { protocol: 1, session: `00000000-0000-0000-0000-000000000001`, sequence: 1, plugins: [{ id: plugins.PRIVATE_CHAT_PLUGIN_ID, version: '1.0.0' }], responseTo: nonce }
+      const signed = await event(peer, identity, 'plugin-capabilities', { capabilities }, Date.now())
+      assert.equal(await messaging.validateMessagingEvent(signed), true)
+      instance.pluginNegotiation.observe(peer.publicKey, capabilities, signed.timestamp)
+    }
+  }
   t.after(() => instance.dispose())
   return { instance, sync }
 }
@@ -252,7 +266,7 @@ test('a submitted private draft cannot become persistent when the mode changes d
   let paused = false
   t.mock.method(store, 'getMessagingPreferences', async () => {
     if (!paused) { paused = true; entered.resolve(); await release.promise }
-    return defaults()
+    return { ...defaults(), accepted: [bob.publicKey, charlie.publicKey] }
   })
   const pending = sender.instance.sendText(bob.publicKey, 'Captured private draft')
   await entered.promise
@@ -271,7 +285,7 @@ test('an older refresh completing after destroy cannot restore plaintext to the 
   let paused = false
   t.mock.method(store, 'getMessagingPreferences', async () => {
     if (!paused) { paused = true; entered.resolve(); await release.promise }
-    return defaults()
+    return { ...defaults(), accepted: [bob.publicKey, charlie.publicKey] }
   })
   const staleRefresh = sender.instance.refresh()
   await entered.promise
@@ -284,7 +298,7 @@ test('an older refresh completing after destroy cannot restore plaintext to the 
 
 test('deleting local history hides the row but reopening retains the shared private timer', async t => {
   const sender = await engine(alice, t)
-  const preferences = defaults()
+  const preferences = { ...defaults(), accepted: [bob.publicKey, charlie.publicKey] }
   t.mock.method(store, 'getMessagingPreferences', async () => structuredClone(preferences))
   t.mock.method(store, 'deleteStoredConversation', async (owner, cid) => {
     const removed = [...rows(owner).values()].filter(record => messaging.conversationForEvent(record.event, owner) === cid && !['private-settings', 'private-destroy'].includes(record.event.kind))
@@ -299,4 +313,133 @@ test('deleting local history hides the row but reopening retains the shared priv
   const id = await sender.instance.sendText(bob.publicKey, 'Reopened private conversation')
   assert.equal(sender.instance.model.messages.find(message => message.id === id).private, true)
   assert.equal(sender.instance.model.conversations.find(conversation => conversation.id === bob.publicKey).privateTtlSeconds, 300)
+})
+
+async function negotiatedPair(t) {
+  const sender = await engine(alice, t, false), receiver = await engine(bob, t, false)
+  await sender.instance.acceptRequest(bob.publicKey)
+  await receiver.instance.acceptRequest(alice.publicKey)
+  await sender.instance.setPluginEnabled(plugins.PRIVATE_CHAT_PLUGIN_ID, true, true)
+  await receiver.instance.setPluginEnabled(plugins.PRIVATE_CHAT_PLUGIN_ID, true, true)
+  for (let i = 0; i < 3; i++) { await sender.sync(); await receiver.sync() }
+  return { sender, receiver }
+}
+
+test('plugin consent is local, version-bound, removable, and not implied by a capability advertisement', async t => {
+  const sender = await engine(alice, t, false)
+  await assert.rejects(sender.instance.setPluginEnabled(plugins.PRIVATE_CHAT_PLUGIN_ID, true), /permissions/)
+  await assert.rejects(sender.instance.sendSecret(bob.publicKey, 'Not consented'), /Enable this plugin/)
+  await sender.instance.setPluginEnabled(plugins.AI_SUMMARY_PLUGIN_ID, true, true)
+  assert.equal(sender.instance.getPluginAvailability(plugins.AI_SUMMARY_PLUGIN_ID, bob.publicKey).available, true)
+  const otherIdentity = new plugins.PluginRegistry(bob.publicKey)
+  assert.equal(otherIdentity.enabled(plugins.AI_SUMMARY_PLUGIN_ID), false)
+  await sender.instance.removePlugin(plugins.AI_SUMMARY_PLUGIN_ID)
+  await assert.rejects(sender.instance.setPluginEnabled(plugins.AI_SUMMARY_PLUGIN_ID, true), /permissions/)
+  await assert.rejects(sender.instance.setPluginEnabled('external.remote-code', true, true), /not available/)
+})
+
+test('authenticated private plugin negotiation enables both peers without messages, unread badges, or notifications', async t => {
+  const { sender, receiver } = await negotiatedPair(t)
+  assert.equal(sender.instance.getPluginAvailability(plugins.PRIVATE_CHAT_PLUGIN_ID, bob.publicKey).available, true)
+  assert.equal(receiver.instance.getPluginAvailability(plugins.PRIVATE_CHAT_PLUGIN_ID, alice.publicKey).available, true)
+  assert.deepEqual(sender.instance.model.messages, [])
+  assert.equal(sender.instance.model.conversations.find(row => row.id === bob.publicKey).updatedAt, 0)
+  assert.equal(receiver.instance.model.conversations.find(row => row.id === alice.publicKey).unreadCount, 0)
+  assert.deepEqual(notices, [])
+  const id = await sender.instance.sendSecret(bob.publicKey, 'Negotiated secret')
+  await sender.sync(); await receiver.sync()
+  assert.equal(receiver.instance.model.messages.find(message => message.id === id).private, true)
+  assert.deepEqual(sender.instance.records.find(row => row.event.id === id).event.payload.plugin, { id: plugins.PRIVATE_CHAT_PLUGIN_ID, version: '1.0.0' })
+})
+
+test('unknown, unsupported and blocked peers cannot activate shared private behavior', async t => {
+  const sender = await engine(alice, t, false), receiver = await engine(bob, t, false)
+  await sender.instance.setPluginEnabled(plugins.PRIVATE_CHAT_PLUGIN_ID, true, true)
+  await assert.rejects(sender.instance.refreshPeerCapabilities(bob.publicKey), /Add or accept/)
+  await sender.instance.acceptRequest(bob.publicKey); await receiver.instance.acceptRequest(alice.publicKey)
+  await sender.instance.refreshPeerCapabilities(bob.publicKey)
+  for (let i = 0; i < 3; i++) { await sender.sync(); await receiver.sync() }
+  assert.equal(sender.instance.getPluginAvailability(plugins.PRIVATE_CHAT_PLUGIN_ID, bob.publicKey).peerStatus, 'unavailable')
+  await assert.rejects(sender.instance.sendSecret(bob.publicKey, 'No peer plugin'), /compatible/)
+  await sender.instance.blockContact(bob.publicKey)
+  await assert.rejects(sender.instance.refreshPeerCapabilities(bob.publicKey), /Add or accept/)
+})
+
+test('removal preserves legacy private safety and refuses to downgrade existing mode or stale drafts', async t => {
+  const { sender, receiver } = await negotiatedPair(t)
+  const ordinary = await sender.instance.sendText(bob.publicKey, 'Ordinary history survives')
+  await sender.instance.setPrivateMode(bob.publicKey, 300)
+  const temporary = await sender.instance.sendText(bob.publicKey, 'Expiring history')
+  await sender.sync(); await receiver.sync()
+  await sender.instance.removePlugin(plugins.PRIVATE_CHAT_PLUGIN_ID)
+  await assert.rejects(sender.instance.sendText(bob.publicKey, 'Must remain private'), /Enable this plugin/)
+  await assert.rejects(sender.instance.sendText(bob.publicKey, 'Stale private draft', undefined, undefined, 300), /Enable this plugin/)
+  assert.equal(sender.instance.model.messages.find(message => message.id === temporary).private, true)
+  await sender.instance.destroyPrivateHistory(bob.publicKey)
+  await sender.instance.setPrivateMode(bob.publicKey, 0)
+  assert.deepEqual(sender.instance.model.messages.map(message => message.id), [ordinary])
+  await sender.instance.sendText(bob.publicKey, 'Explicit ordinary mode')
+})
+
+test('peer revocation arriving before flush cancels queued private delivery', async t => {
+  const { sender, receiver } = await negotiatedPair(t)
+  const id = await sender.instance.sendSecret(bob.publicKey, 'Revoke before delivery')
+  await receiver.instance.setPluginEnabled(plugins.PRIVATE_CHAT_PLUGIN_ID, false)
+  await receiver.sync(); await sender.sync()
+  assert.equal(packets.some(packet => packet.id === id), false)
+  assert.equal(sender.instance.model.messages.find(message => message.id === id).delivery, 'failed')
+})
+
+test('a restored engine must negotiate again and an expired capability lease blocks private sends', async t => {
+  const now = Date.now(); t.mock.timers.enable({ apis: ['Date'], now })
+  const { sender } = await negotiatedPair(t)
+  const reloaded = await engine(alice, t, false)
+  assert.equal(reloaded.instance.getPluginAvailability(plugins.PRIVATE_CHAT_PLUGIN_ID, bob.publicKey).available, false)
+  await reloaded.sync()
+  await assert.rejects(reloaded.instance.sendSecret(bob.publicKey, 'Old signed capability'), /Check compatibility/)
+  t.mock.timers.tick(plugins.PLUGIN_COMPATIBILITY_MS + 1)
+  await assert.rejects(sender.instance.sendSecret(bob.publicKey, 'Expired capability'), /Check compatibility/)
+})
+
+test('capability signatures bind versions and unknown plugins remain inert', async () => {
+  const capabilities = { protocol: 1, session: crypto.randomUUID(), sequence: 1, plugins: [{ id: 'vendor.unknown', version: '1.0.0' }], request: crypto.randomUUID() }
+  const signed = await event(bob, alice, 'plugin-capabilities', { capabilities })
+  assert.equal(await messaging.validateMessagingEvent(signed), true)
+  assert.equal(await messaging.validateMessagingEvent({ ...signed, payload: { capabilities: { ...capabilities, plugins: [{ id: plugins.PRIVATE_CHAT_PLUGIN_ID, version: '1.0.0' }] } } }), false)
+  assert.deepEqual(model([signed]).messages, [])
+  assert.equal(model([signed]).conversations.some(row => row.id === bob.publicKey), false)
+  assert.equal(await messaging.validateMessagingEvent(await event(bob, alice, 'plugin-capabilities', { capabilities: { ...capabilities, plugins: [...capabilities.plugins, ...capabilities.plugins] } })), false)
+})
+
+test('capability versions, replay nonces, and changed device sessions fail closed', () => {
+  const negotiation = new plugins.PluginNegotiation()
+  const manifest = plugins.FIRST_PARTY_PLUGINS.find(plugin => plugin.id === plugins.PRIVATE_CHAT_PLUGIN_ID)
+  const now = Date.now(), session = crypto.randomUUID()
+  const nonce = negotiation.challenge(bob.publicKey, now)
+  negotiation.observe(bob.publicKey, { protocol: 1, session, sequence: 1, plugins: [{ id: manifest.id, version: '2.0.0' }], responseTo: nonce }, now, now)
+  assert.equal(negotiation.availability(bob.publicKey, manifest, now).available, false)
+  const fresh = negotiation.challenge(bob.publicKey, now + 1)
+  negotiation.observe(bob.publicKey, { protocol: 1, session, sequence: 2, plugins: [{ id: manifest.id, version: manifest.version }], responseTo: nonce }, now + 1, now + 1)
+  assert.equal(negotiation.availability(bob.publicKey, manifest, now + 1).available, false)
+  negotiation.observe(bob.publicKey, { protocol: 1, session, sequence: 3, plugins: [{ id: manifest.id, version: manifest.version }], responseTo: fresh }, now + 2, now + 2)
+  assert.equal(negotiation.availability(bob.publicKey, manifest, now + 2).available, true)
+  negotiation.observe(bob.publicKey, { protocol: 1, session: crypto.randomUUID(), sequence: 1, plugins: [{ id: manifest.id, version: manifest.version }] }, now + 3, now + 3)
+  assert.equal(negotiation.availability(bob.publicKey, manifest, now + 3).available, false)
+})
+
+test('disabling private chat during the last storage check prevents the prepared relay request', async t => {
+  const sender = await engine(alice, t)
+  const id = await sender.instance.sendSecret(bob.publicKey, 'Disable while reading')
+  const entered = deferred(), release = deferred(), getStoredEvents = store.getStoredEvents
+  let pause = false
+  const encrypt = cryptography.encryptForPeer
+  t.mock.method(cryptography, 'encryptForPeer', async (...args) => { const result = await encrypt(...args); pause = true; return result })
+  t.mock.method(store, 'getStoredEvents', async owner => {
+    if (pause) { pause = false; entered.resolve(); await release.promise }
+    return getStoredEvents(owner)
+  })
+  const sync = sender.sync(); await entered.promise
+  new plugins.PluginRegistry(alice.publicKey).setEnabled(plugins.PRIVATE_CHAT_PLUGIN_ID, false)
+  release.resolve(); await sync
+  assert.equal(packets.some(packet => packet.id === id), false)
 })

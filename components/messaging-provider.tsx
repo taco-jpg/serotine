@@ -8,6 +8,7 @@ import type { CommunityService } from "@/lib/community-service"
 import type { CommunityModel } from "@/lib/community-types"
 import type { MessagingContextValue } from "@/lib/messaging-types"
 import { CallingProvider } from "@/components/calling-provider"
+import { FIRST_PARTY_PLUGINS } from "@/lib/plugins"
 
 type CommunityMethods = Pick<CommunityService, "createCommunity" | "createInvite" | "joinCommunity" | "retryJoinRequest" | "updateCommunity" | "moderate" | "approveRequest" | "rejectRequest" | "leave" | "sendMessage" | "sendEvent" | "editMessage" | "pinMessage" | "createPoll" | "vote" | "getAttachmentChunks" | "reportMessage" | "hideMessage" | "revokeInvites" | "setCoOwner" | "transferOwnership" | "deleteCommunity">
 export type CommunityContextValue = CommunityMethods & Pick<MessagingContextValue, "identity" | "contacts" | "ready" | "error" | "status" | "preferences" | "setNotificationMode" | "sync" | "retry"> & {
@@ -22,6 +23,9 @@ const emptyCommunityModel: CommunityModel = { communities: [], messages: [], req
 const MessagingContext = createContext<MessagingContextValue | null>(null)
 const unavailable = async (): Promise<never> => { throw new Error("Your identity is still loading. Try again in a moment.") }
 const empty = {
+  plugins: FIRST_PARTY_PLUGINS.map(manifest => ({ manifest, installed: false, enabled: false })),
+  setPluginEnabled: unavailable, removePlugin: unavailable, refreshPeerCapabilities: unavailable,
+  getPluginAvailability: () => ({ available: false, peerStatus: "local" as const, reason: "Your identity is still loading." }),
   identity: null, contacts: [], ready: false, error: null, status: "connecting", conversations: [], messages: [], groups: [], requests: [], preferences: defaultMessagingPreferences(),
   sendText: unavailable, sendSecret: unavailable, setPrivateMode: unavailable, destroyPrivateHistory: unavailable, editMessage: unavailable, deleteMessage: unavailable, pinMessage: unavailable, createPoll: unavailable, vote: unavailable, createGroup: unavailable, updateGroup: unavailable, leaveGroup: unavailable,
   acceptRequest: unavailable, blockContact: unavailable, markRead: unavailable, archiveConversation: unavailable, deleteConversation: unavailable, setNotificationMode: unavailable, setReadReceipts: unavailable, requestNotifications: unavailable, retry: unavailable, sync: unavailable, sendEvent: unavailable, refresh: unavailable,
@@ -85,6 +89,8 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     }
   }, [])
   const value = useMemo<MessagingContextValue>(() => engine ? {
+    plugins: engine.plugins, setPluginEnabled: engine.setPluginEnabled, removePlugin: engine.removePlugin,
+    getPluginAvailability: engine.getPluginAvailability, refreshPeerCapabilities: engine.refreshPeerCapabilities,
     identity: engine.identity, contacts: engine.contacts, ready, error: error ?? engine.error, status: engine.status, preferences: engine.preferences, ...engine.model,
     sendText: engine.sendText, editMessage: engine.editMessage, deleteMessage: engine.deleteMessage, pinMessage: engine.pinMessage, createPoll: engine.createPoll, vote: engine.vote, createGroup: engine.createGroup,
     sendSecret: engine.sendSecret, setPrivateMode: engine.setPrivateMode, destroyPrivateHistory: engine.destroyPrivateHistory,

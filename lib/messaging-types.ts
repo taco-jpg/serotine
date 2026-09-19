@@ -1,6 +1,7 @@
 import type { CommunityEventData } from "./community-types"
 import type { Identity, Contact } from "./identity"
 import type { CallHistorySnapshot } from "./call-history"
+import type { PluginAvailability, PluginCapabilities, PluginCapability, PluginState } from "./plugins"
 
 export type NotificationMode = "all" | "mentions" | "muted"
 export type DeliveryStatus = "pending" | "sent" | "delivered" | "read" | "failed" | "received"
@@ -36,9 +37,11 @@ export interface MessagingPreferences {
   accepted: string[]; blocked: string[]; notifications: Record<string, NotificationMode>; readAt: Record<string, number>; readReceipts: boolean
   archived: string[]; deleted: Record<string, ConversationDeletion>; deletedMessages: Record<string, MessageDeletion>
 }
-export type EventKind = "community" | "message" | "edit" | "pin" | "poll" | "vote" | "receipt" | "group" | "leave" | "attachment" | "attachment-chunk" | "private-settings" | "private-message" | "private-destroy"
+export type EventKind = "community" | "message" | "edit" | "pin" | "poll" | "vote" | "receipt" | "group" | "leave" | "attachment" | "attachment-chunk" | "private-settings" | "private-message" | "private-destroy" | "plugin-capabilities"
 export interface EventPayload {
   community?: CommunityEventData
+  capabilities?: PluginCapabilities
+  plugin?: PluginCapability
   content?: string; replyTo?: string; mentions?: string[]; targetId?: string; pinned?: boolean
   question?: string; options?: string[]; option?: number; receipt?: "delivered" | "read"
   attachment?: AttachmentMeta; attachmentId?: string; index?: number; data?: string
@@ -55,6 +58,11 @@ export interface StoredEvent {
 export interface MessagingSnapshot { version: 3; owner: string; events: StoredEvent[]; preferences: MessagingPreferences; callHistory?: CallHistorySnapshot }
 export interface MessagingModel { conversations: ConversationRecord[]; messages: MessageRecord[]; groups: GroupState[]; requests: ConversationRecord[] }
 export interface MessagingContextValue extends MessagingModel {
+  plugins: PluginState[]
+  setPluginEnabled: (id: string, enabled: boolean, grantPermissions?: boolean) => Promise<void>
+  removePlugin: (id: string) => Promise<void>
+  getPluginAvailability: (id: string, conversationId: string) => PluginAvailability
+  refreshPeerCapabilities: (conversationId: string) => Promise<void>
   identity: Identity | null; contacts: Contact[]; ready: boolean; error: string | null; status: "connecting" | "online" | "offline"; preferences: MessagingPreferences
   sendText: (conversationId: string, text: string, replyTo?: string, mentions?: string[], expectedPrivateTtlSeconds?: PrivateTtlSeconds) => Promise<string>
   getPrivateMode: (conversationId: string) => PrivateTtlSeconds

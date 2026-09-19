@@ -35,6 +35,13 @@ bucket_name = "serotine-files"
 [vars]
 SEROTINE_STORAGE_VERSION = "2"
 SEROTINE_D1_METRICS = "1"
+SUMMARY_AI_ENABLED = "false"
+SUMMARY_AI_MODEL = "@cf/meta/llama-3.1-8b-instruct"
+
+# Optional, paid AI summaries: enable the variable above and uncomment this
+# binding to activate. Left opt-in so local development needs no AI credentials.
+# [ai]
+# binding = "AI"
 
 [[durable_objects.bindings]]
 name = "SEROTINE_REALTIME"

@@ -7,6 +7,7 @@ const assert = require('node:assert/strict')
 const { spawn } = require('node:child_process')
 const { chromium } = require('playwright')
 const esbuild = require('esbuild')
+const { localBrowserEnvironment } = require('./local-browser-support.cjs')
 const root = path.resolve(__dirname, '..')
 const port = process.env.SEROTINE_BROWSER_PORT || '3123'
 assert.match(port, /^\d+$/)
@@ -30,7 +31,8 @@ async function main() {
   const artifacts = process.env.SEROTINE_BROWSER_ARTIFACTS || fs.mkdtempSync('/tmp/serotine-private-chat-')
   fs.mkdirSync(artifacts, { recursive: true })
   const logPath = path.join(artifacts, 'server.log'), log = fs.openSync(logPath, 'w')
-  const server = spawn(process.execPath, [path.join(root, 'node_modules/next/dist/bin/next'), 'dev', '--webpack', '--port', port, '--hostname', '127.0.0.1'], { cwd: root, stdio: ['ignore', log, log] })
+  const environment = await localBrowserEnvironment(root, artifacts)
+  const server = spawn(process.execPath, [path.join(root, 'node_modules/next/dist/bin/next'), 'dev', '--webpack', '--port', port, '--hostname', '127.0.0.1'], { cwd: root, env: environment, stdio: ['ignore', log, log] })
   let serverError, browser
   server.on('error', error => { serverError = error })
   try {
@@ -47,6 +49,8 @@ async function main() {
     const [alice, bob] = await Promise.all([identity(), identity()])
     async function fixture(owner, contact) {
       const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'], colorScheme: 'dark' })
+      context.setDefaultTimeout(15000)
+      await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort('blockedbyclient'))
       contexts.push(context)
       context.on('page', page => page.on('pageerror', error => errors.push(error.message)))
       context.on('request', request => { if (request.url().includes('/api/relay')) relayBodies.push(request.postData() || '') })
@@ -74,6 +78,15 @@ async function main() {
       const states = await Promise.all(peers.map(page => page.evaluate(() => ({ status: engine.status, error: engine.error, count: engine.model.messages.length }))))
       throw new Error(`${label}: ${JSON.stringify(states)}`)
     }
+    // SIP-6 private messaging is opt-in on each identity and requires a fresh,
+    // signed capability exchange before either peer can set a timer or send.
+    await Promise.all(peers.map(page => page.evaluate(() => engine.setPluginEnabled('serotine.private-chat', true, true))))
+    await a.evaluate(peer => engine.refreshPeerCapabilities(peer), bob.publicKey)
+    await b.evaluate(peer => engine.refreshPeerCapabilities(peer), alice.publicKey)
+    await settle(async () => (await Promise.all([
+      a.evaluate(peer => engine.getPluginAvailability('serotine.private-chat', peer).available, bob.publicKey),
+      b.evaluate(peer => engine.getPluginAvailability('serotine.private-chat', peer).available, alice.publicKey),
+    ])).every(Boolean), 'mutual private plugin negotiation')
     const ordinary = await a.evaluate(peer => engine.sendText(peer, 'Ordinary history remains'), bob.publicKey)
     await settle(() => b.evaluate(id => engine.model.messages.some(message => message.id === id), ordinary), 'ordinary encrypted delivery')
     const ui = await contexts[0].newPage()
@@ -83,6 +96,8 @@ async function main() {
     await ui.getByRole('region', { name: 'Conversation messages' }).getByText('Ordinary history remains', { exact: true }).waitFor()
 
     await ui.getByRole('button', { name: 'Private chat settings', exact: true }).click()
+    await ui.getByRole('button', { name: 'Check peer support', exact: true }).click()
+    await settle(() => ui.locator('#private-chat-duration').isEnabled(), 'private UI capability negotiation')
     await ui.locator('#private-chat-duration').selectOption('300')
     await ui.getByRole('button', { name: 'Save timer', exact: true }).click()
     await ui.getByRole('dialog').waitFor({ state: 'hidden' })
@@ -100,6 +115,7 @@ async function main() {
     console.log('PASS shared timer, encrypted private UI send, private draft omission, redacted previews and restricted actions')
 
     const secret = '  synthetic-key-for-browser-test-123456789  '
+    await ui.getByRole('button', { name: 'More message tools', exact: true }).click()
     await ui.getByRole('button', { name: 'Share access key', exact: true }).click()
     let keyDialog = ui.getByRole('dialog', { name: 'Share an access key', exact: true })
     await keyDialog.getByLabel('Access key', { exact: true }).fill(secret)
@@ -155,7 +171,7 @@ async function main() {
       const dimensions = await ui.evaluate(() => ({ width: innerWidth, height: innerHeight, overflow: document.documentElement.scrollWidth > innerWidth, composerOverflow: document.querySelector('footer').scrollWidth > document.querySelector('footer').clientWidth + 1 }))
       assert.equal(dimensions.overflow, false, `${name}: viewport overflow`)
       assert.equal(dimensions.composerOverflow, false, `${name}: composer overflow`)
-      await ui.screenshot({ path: path.join(artifacts, `${name}.png`), fullPage: true, style: 'nextjs-portal { display: none; }' })
+      await ui.screenshot({ path: path.join(artifacts, `${name}.png`), fullPage: true, animations: 'disabled', style: 'nextjs-portal { display: none; }' })
       return dimensions
     }
     const sizes = [await capture('private-desktop')]

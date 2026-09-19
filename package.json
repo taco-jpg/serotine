@@ -27,6 +27,7 @@
     "test:nicknames": "node scripts/nickname-smoke.cjs",
     "test:giphy-runtime": "node scripts/giphy-runtime-smoke.cjs",
     "test:private": "node scripts/private-chat-smoke.cjs",
+    "test:plugins": "node scripts/plugins-smoke.cjs",
     "test:qr": "node scripts/qr-smoke.cjs",
     "test:cleanup": "node scripts/chat-cleanup-smoke.cjs",
     "test:recovery": "node scripts/recovery-smoke.cjs",

@@ -2,12 +2,17 @@
 sip: 12
 title: Custom profiles and per-friend sharing
 author: sodium-qed
-status: Draft
+status: Accepted
 created: 2026-09-14
 related: SIP-11, SIP-1, SIP-2
+updated: 2026-09-19
 ---
 
 # SIP-12: Custom profiles and per-friend sharing
+
+## Implementation status — 2026-09-19
+
+Implemented in [PR #67](https://github.com/taco-jpg/serotine/pull/67); awaiting merge and deployment validation. Optional profiles are private by default, with independent directional grants for picture, banner, display name, about-me text, status, and profile colors. Open Settings → Notification/privacy → Edit profile to customize them. Add, Accept, and each friend’s Profile sharing controls expose six initially unchecked choices. Only authorized fields travel through authenticated encrypted delivery; a shared community or friendship alone grants no profile access. Per-friend versions prevent stale edits from reviving revoked grants. Grants last six days and require explicit renewal; ordinary profile edits and device synchronization never renew them. Expired or uncertain permission state disables disclosure. Blocking/removing a friend revokes grants, and re-adding starts unchecked. Previously downloaded copies cannot be recalled. Optional profile delivery pauses for Force P2P contacts without blocking other contacts.
 
 ## Summary
 
@@ -15,7 +20,7 @@ Give Serotine users expressive profiles with GIF banners, static or animated pro
 
 When adding or accepting a friend, choose exactly which profile fields to share with that person using separate checkboxes. Optional profile information is private by default. Being in the same conversation or community does not grant access, and friendship alone does not share every field.
 
-This is a proposal for discussion, not an implementation. It builds on [SIP-11](SIP-11-custom-user-avatars.md). If adopted, its explicit sharing rules replace SIP-11's assumption that a custom avatar is visible wherever an identity appears, and animated profile pictures become supported rather than an open question.
+The implemented scope is recorded above. This proposal builds on [SIP-11](SIP-11-custom-user-avatars.md). Its explicit sharing rules replace SIP-11's assumption that a custom avatar is visible wherever an identity appears, and animated profile pictures become supported rather than an open question.
 
 ## Motivation
 

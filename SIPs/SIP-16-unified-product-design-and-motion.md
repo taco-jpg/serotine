@@ -2,12 +2,16 @@
 sip: 16
 title: Unified product design and motion
 author: louisliu
-status: Draft
+status: Accepted
 created: 2026-09-14
-updated: 2026-09-14
+updated: 2026-09-19
 ---
 
 # SIP-16: Unified product design and motion
+
+## Implementation status — 2026-09-19
+
+Implemented in [PR #67](https://github.com/taco-jpg/serotine/pull/67); awaiting merge and deployment validation. Shared semantic theme, typography, spacing, control, and motion tokens connect the landing page and application while preserving preset/custom SIP-2 themes. Motion is reduced or removed under prefers-reduced-motion and preserves keyboard focus. Synthetic browser checks exercise responsive layouts, themes, reduced motion, and interaction state; they do not substitute for production or physical-device checks.
 
 ## Summary
 

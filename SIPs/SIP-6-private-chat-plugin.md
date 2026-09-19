@@ -2,11 +2,16 @@
 sip: 6
 title: Private chat plugin
 author: louisliu
-status: Draft
+status: Final
 created: 2026-09-12
+updated: 2026-09-19
 ---
 
 # SIP-6: Private chat plugin
+
+## Implementation status — 2026-09-19
+
+The Private Chat plugin migration was merged in [PR #66](https://github.com/taco-jpg/serotine/pull/66). Both peers explicitly enable the plugin and complete a fresh signed capability exchange before new private sends. Existing expiry/destruction handling continues after disable. Timers are 5 minutes, 1 hour, or 24 hours, measured from sending. See the [usage and privacy guide](https://github.com/taco-jpg/serotine/blob/main/docs/SIP-5-7-plugins.md).
 
 ## Summary
 

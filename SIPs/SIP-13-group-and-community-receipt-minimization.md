@@ -2,12 +2,16 @@
 sip: 13
 title: Group and community receipt minimization
 author: louisliu
-status: Draft
+status: Accepted
 created: 2026-09-14
-updated: 2026-09-14
+updated: 2026-09-19
 ---
 
 # SIP-13: Group and community receipt minimization
+
+## Implementation status — 2026-09-19
+
+Implemented in [PR #67](https://github.com/taco-jpg/serotine/pull/67); awaiting merge and deployment validation. Group/community receive and read actions emit no retained social receipts, and historical receipt events do not restore reader counts or replay from the outbox. Sender-local Pending/Sent/Failed submission state and local unread markers remain. Direct-message receipts are unchanged. Attachment integrity acknowledgements are separate storage controls, never reader lists.
 
 ## Summary
 

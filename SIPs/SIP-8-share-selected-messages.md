@@ -2,11 +2,16 @@
 sip: 8
 title: Share selected messages
 author: louisliu
-status: Draft
+status: Accepted
 created: 2026-09-12
+updated: 2026-09-19
 ---
 
 # SIP-8: Share selected messages
+
+## Implementation status — 2026-09-19
+
+Implemented in [PR #67](https://github.com/taco-jpg/serotine/pull/67); awaiting merge and deployment validation. Selected messages become a new signed encrypted copy after a preview and destination confirmation. Bundles contain at most 20 messages and an 8,000-character fallback. Private, secret, expiring, moderator-hidden, pending, failed, deleted, and already-shared messages are excluded. Attachments contribute name/type/size only; bytes, download capabilities, keys, local aliases, and optional profile fields are never copied. Polls become question/options snapshots without voter identities. Original edits or deletion do not alter a shared copy. Older direct/group clients can display the fallback; strict older community clients require an update.
 
 ## Summary
 

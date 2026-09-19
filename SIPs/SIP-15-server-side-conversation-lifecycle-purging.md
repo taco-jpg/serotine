@@ -2,12 +2,16 @@
 sip: 15
 title: Server-side conversation lifecycle purging
 author: louisliu
-status: Draft
+status: Accepted
 created: 2026-09-14
-updated: 2026-09-14
+updated: 2026-09-19
 ---
 
 # SIP-15: Server-side conversation lifecycle purging
+
+## Implementation status — 2026-09-19
+
+Implemented in [PR #67](https://github.com/taco-jpg/serotine/pull/67); awaiting merge and deployment validation. New retained data uses authenticated scopes, minimal terminal state, and bounded retryable deletion. Removing a direct contact closes server retention for the pair; both parties must explicitly accept a new relationship boundary before relay-backed traffic resumes. Terminal group/community deletion closes its corresponding scope before cleanup, and stale submissions cannot reopen it. Legacy data without a reliable conversation scope keeps its previous retention policy because safe retroactive attribution is unavailable; this release does not retroactively purge those archives. Local history, downloaded files, exports, and screenshots remain outside server cleanup. Local D1/R2 tests exercise actual object deletion and replay/race rejection; production bindings, scheduled cleanup, and deployed behavior still require verification.
 
 ## Summary
 

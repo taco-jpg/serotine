@@ -332,7 +332,7 @@ export async function exportMessagingSnapshot(owner: string): Promise<MessagingS
   // Excluding orphan edits also prevents a late private edit from being copied
   // into a backup after its original private message has already disappeared.
   const publicTargets = new Set(events.filter(record => record.event.kind === "message").map(record => privateMessageTarget(record, owner)))
-  return { version: 3, owner, events: events.filter(record => record.event.kind !== "private-message" && !isDeletedStoredEvent(record, owner, preferences)
+  return { version: 3, owner, events: events.filter(record => record.event.kind !== "private-message" && record.event.kind !== "plugin-capabilities" && !isDeletedStoredEvent(record, owner, preferences)
     && (record.event.kind !== "edit" || !!record.event.payload.targetId && publicTargets.has(privateMessageTarget(record, owner, record.event.payload.targetId)))), preferences,
     ...(callHistory.records.length || callHistory.deleted.length ? { callHistory: mergeCallHistory(emptyCallHistory(), callHistory, preferences.deleted) } : {}) }
 }
@@ -502,7 +502,7 @@ export async function importMessagingSnapshot(owner: string, value: MessagingSna
     // Imports cannot extend private lifetimes or bring private edit text back.
     for (const record of await tx.objectStore("events").getAll()) if (isDeletedStoredEvent(record, owner, preferences) || isPrivateEventExpired(record, owner, state.cutoffs) || privateEdit(record, owner, state.targets)) await tx.objectStore("events").delete(record.key)
     for (const record of snapshot.events) {
-      if (record.event.kind === "private-message" || isDeletedStoredEvent(record, owner, preferences) || privateEdit(record, owner, state.targets)) continue
+      if (record.event.kind === "private-message" || record.event.kind === "plugin-capabilities" || isDeletedStoredEvent(record, owner, preferences) || privateEdit(record, owner, state.targets)) continue
       const existing = await tx.objectStore("events").get(record.key)
       if (existing && JSON.stringify(existing.event) !== JSON.stringify(record.event)) throw new Error("The backup conflicts with a saved message.")
       await tx.objectStore("events").put(existing ? { ...record, local: existing.local || record.local, delivered: [...new Set([...existing.delivered, ...record.delivered])] } : record)

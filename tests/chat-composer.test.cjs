@@ -34,9 +34,10 @@ function harness(options = {}) {
   }
   const messaging = {
     identity: { publicKey: 'self-key' }, ready: true, error: '', status: 'online',
-    contacts: [{ pub: 'friend-key', alias: 'Friend' }], conversations: [], groups: [], messages: [],
+    contacts: [{ pub: 'friend-key', alias: 'Friend' }], conversations: [], groups: [], messages: [], plugins: [],
     preferences: { blocked: [], notifications: {}, readAt: {} },
     getPrivateMode: () => 0, markRead: async () => {},
+    getPluginAvailability: () => ({ available: false, reason: 'This plugin is disabled.', peerStatus: 'local' }),
     sendText: async (...args) => { textSends.push(args); await options.sendText?.(...args) },
     sendEvent: async (...args) => { events.push(args); return 'event-id' },
   }
@@ -64,6 +65,7 @@ function harness(options = {}) {
       if (specifier === '@/hooks/use-local-nickname') return { useLocalNickname: () => '' }
       if (specifier === '@/hooks/use-mention-draft') return { useMentionDraft: () => ({ mentionSpans: spans, saveMentionDraft(_value, next) { spans = next } }) }
       if (specifier === '@/lib/composer-mentions') return load('lib/composer-mentions.ts')
+      if (specifier === '@/lib/plugins') return load('lib/plugins.ts')
       if (specifier === '@/lib/identity') return { shortAddress: pub => pub }
       if (specifier === '@/lib/protocol') return { MAX_MESSAGE_LENGTH: 8000 }
       if (specifier === '@/lib/mention-display') return { formatMentionText: text => text }
@@ -132,6 +134,25 @@ test('Enter and the composer form both send text through the normal message path
   assert.deepEqual(h.textSends.map(args => args.slice(0, 2)), [['friend-key', 'First message'], ['friend-key', 'Second message']])
   assert.equal(h.cleared, 2)
   assert.equal(h.batches.length, 0)
+  h.unmount()
+})
+
+test('disabled summarize command never sends a message or queued attachments and preserves the draft', async () => {
+  const h = harness()
+  h.queue(1)
+  for (const command of ['/summarize', '  /SUMMARIZE  ', '/summarize this conversation']) {
+    h.type(command)
+    h.key(); h.form(); await tick()
+    assert.equal(h.content, command)
+    assert.match(h.text(), /Enable AI Summary/)
+  }
+  assert.deepEqual(h.textSends, [])
+  assert.deepEqual(h.batches, [])
+  assert.deepEqual(h.attachmentSends, [])
+  assert.equal(h.cleared, 0)
+  h.type('This is ordinary text about /summarize')
+  h.form(); await tick()
+  assert.equal(h.batches.length, 1, 'ordinary caption content is unaffected by the command reservation')
   h.unmount()
 })
 

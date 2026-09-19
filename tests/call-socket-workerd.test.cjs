@@ -19,7 +19,7 @@ test('workerd authenticates WSS through the self binding, pushes only peers and 
         : 'export default {async fetch(request,env){globalThis.__fixtureEnv=env; const {POST}=await import("./app/api/calls/route.ts"); return POST(request)}}' }))
     } }],
   })
-  const mf = new Miniflare({ name: 'socket-test', modules: true, script: build.outputFiles[0].text,
+  const mf = new Miniflare({ name: 'socket-test', modules: true, script: build.outputFiles[0].text, cf: false,
     compatibilityDate: '2026-05-06', compatibilityFlags: ['nodejs_compat'],
     serviceBindings: { WORKER_SELF_REFERENCE: 'socket-test' },
     bindings: { SEROTINE_STORAGE_VERSION: '2' }, r2Buckets: ['serotine_files'],

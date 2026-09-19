@@ -12,12 +12,13 @@ import { ATTACHMENT_CHUNK_BYTES, MAX_ATTACHMENT_CHUNKS, isAttachmentMeta } from 
 import { legacyMessageEvents, legacyStoredMessageId, legacyVisibleMessageIds } from "./legacy-messaging"
 import { notifyIncoming, requestMessagingNotifications } from "./message-notifications"
 import { isPrivateEventExpired, privateDestroyCutoffs } from "./private-messaging"
+import { PRIVATE_CHAT_PLUGIN_ID, PluginNegotiation, PluginRegistry, validPluginCapabilities, type PluginAvailability, type PluginCapabilities } from "./plugins"
 import type { AttachmentMeta, ConversationRecord, EventKind, EventPayload, GroupState, MessageRecord, MessagingEvent, MessagingModel, MessagingPreferences, NotificationMode, PrivateTtlSeconds, StoredEvent } from "./messaging-types"
 
 const MAX_MEMBERS = 20
 const VISIBLE_KINDS = new Set(["message", "poll", "attachment", "private-message"])
 const PRIVATE_KINDS = new Set(["private-settings", "private-message", "private-destroy"])
-const EVENT_KINDS = new Set(["community", "message", "edit", "pin", "poll", "vote", "receipt", "group", "leave", "attachment", "attachment-chunk", ...PRIVATE_KINDS])
+const EVENT_KINDS = new Set(["community", "message", "edit", "pin", "poll", "vote", "receipt", "group", "leave", "attachment", "attachment-chunk", "plugin-capabilities", ...PRIVATE_KINDS])
 const PRIVATE_DURATIONS = new Set([0, 300, 3600, 86400])
 const validGroupId = (value: string) => typeof value === "string" && value.startsWith("group:") && ID_PATTERN.test(value.slice(6))
 const sameSet = (left: string[], right: string[]) => left.length === right.length && left.every(x => right.includes(x))
@@ -46,15 +47,18 @@ export function validAttachment(value: AttachmentMeta | undefined): value is Att
 
 function validPayload(kind: EventKind, p: EventPayload) {
   if (!p || typeof p !== "object" || Array.isArray(p)) return false
+  if (p.capabilities !== undefined && kind !== "plugin-capabilities") return false
+  if (p.plugin !== undefined && (!PRIVATE_KINDS.has(kind) || p.plugin?.id !== PRIVATE_CHAT_PLUGIN_ID || p.plugin.version !== "1.0.0" || Object.keys(p.plugin).length !== 2)) return false
   if (!PRIVATE_KINDS.has(kind) && ["expiresAt", "secret", "ttlSeconds", "destroyBefore"].some(key => key in p)) return false
   if (p.replyTo !== undefined && !validId(p.replyTo)) return false
   if (p.mentions !== undefined && (!Array.isArray(p.mentions) || p.mentions.length > MAX_MEMBERS || !p.mentions.every(x => PUBLIC_KEY_PATTERN.test(x)))) return false
   switch (kind) {
     case "community": return Object.keys(p).length === 1 && !!p.community
     case "message": return validText(p.content)
-    case "private-message": return validText(p.content) && Number.isSafeInteger(p.expiresAt) && (p.secret === undefined || typeof p.secret === "boolean") && Object.keys(p).every(key => ["content", "expiresAt", "secret"].includes(key))
-    case "private-settings": return PRIVATE_DURATIONS.has(p.ttlSeconds!) && Object.keys(p).length === 1
-    case "private-destroy": return Number.isSafeInteger(p.destroyBefore) && p.destroyBefore! > 0 && Object.keys(p).length === 1
+    case "plugin-capabilities": return Object.keys(p).length === 1 && validPluginCapabilities(p.capabilities)
+    case "private-message": return validText(p.content) && Number.isSafeInteger(p.expiresAt) && (p.secret === undefined || typeof p.secret === "boolean") && Object.keys(p).every(key => ["content", "expiresAt", "secret", "plugin"].includes(key))
+    case "private-settings": return PRIVATE_DURATIONS.has(p.ttlSeconds!) && Object.keys(p).every(key => ["ttlSeconds", "plugin"].includes(key))
+    case "private-destroy": return Number.isSafeInteger(p.destroyBefore) && p.destroyBefore! > 0 && Object.keys(p).every(key => ["destroyBefore", "plugin"].includes(key))
     case "edit": return validId(p.targetId) && validText(p.content)
     case "pin": return validId(p.targetId) && typeof p.pinned === "boolean"
     case "poll": return validText(p.question, 300) && Array.isArray(p.options) && p.options.length >= 2 && p.options.length <= 10 && p.options.every(x => validText(x, 120)) && new Set(p.options.map(x => x.trim().toLowerCase())).size === p.options.length
@@ -80,7 +84,7 @@ export async function validateMessagingEvent(value: unknown, transport?: { sende
     if (e.kind === "community") return !e.group && await validateCommunityEvent(e) && await verifySignature(eventText(e), e.signature, e.author)
     // New event kinds make old clients reject temporary content instead of
     // silently retaining it as an ordinary message.
-    if (PRIVATE_KINDS.has(e.kind) && (e.group || !PUBLIC_KEY_PATTERN.test(e.conversationId) || e.author === e.conversationId)) return false
+    if ((PRIVATE_KINDS.has(e.kind) || e.kind === "plugin-capabilities") && (e.group || !PUBLIC_KEY_PATTERN.test(e.conversationId) || e.author === e.conversationId)) return false
     if (e.kind === "private-message" && (e.payload.expiresAt! <= e.timestamp || e.payload.expiresAt! - e.timestamp > 86400_000)) return false
     if (e.kind === "private-destroy" && e.payload.destroyBefore! > e.timestamp) return false
     if (validGroupId(e.conversationId)) {
@@ -136,7 +140,7 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
   const ordered = [...records, ...checkpoints].sort((a, b) => a.receivedAt - b.receivedAt || (a.sequence && b.sequence ? a.sequence - b.sequence : 0) || a.event.timestamp - b.event.timestamp || a.key.localeCompare(b.key))
   for (const record of ordered) {
     const e = record.event, cid = conversationForEvent(e, owner)
-    if (e.kind === "community") continue
+    if (e.kind === "community" || e.kind === "plugin-capabilities") continue
     if (isDeletedStoredEvent(record, owner, preferences)) continue
     if (e.author !== owner && preferences.blocked.includes(e.author)) continue
     if (PRIVATE_KINDS.has(e.kind) && (record.legacy || e.group || e.author === e.conversationId || (e.author !== owner && (e.conversationId !== owner || !e.recipients.includes(owner))))) continue
@@ -212,6 +216,9 @@ export function buildMessagingModel(records: StoredEvent[], owner: string, conta
 
 export class MessagingEngine {
   readonly identity: Identity
+  private readonly pluginRegistry: PluginRegistry
+  private readonly pluginNegotiation = new PluginNegotiation()
+  private readonly observedCapabilities = new Set<string>()
   contacts: Contact[] = []
   records: StoredEvent[] = []
   preferences = defaultMessagingPreferences()
@@ -237,6 +244,16 @@ export class MessagingEngine {
   private contactsText = ""
   private initializedAt = Date.now()
   private authorizedKeys = new Set<string>()
+  private pluginStorageListener = (event: StorageEvent) => {
+    if (this.disposed || (event.key !== null && event.key !== `serotine.plugins.v1:${this.identity.publicKey}`)) return
+    const privateEnabled = this.pluginRegistry.enabled(PRIVATE_CHAT_PLUGIN_ID)
+    this.pluginRegistry.reload()
+    this.emit()
+    if (privateEnabled !== this.pluginRegistry.enabled(PRIVATE_CHAT_PLUGIN_ID)) {
+      this.pluginNegotiation.revoke()
+      void this.broadcastPluginChange().catch(error => this.fail(error))
+    }
+  }
   private storeListener = () => {
     if (this.disposed) return
     this.refreshPending = true
@@ -251,6 +268,7 @@ export class MessagingEngine {
   readonly communities: CommunityService
   constructor(identity: Identity) {
     this.identity = identity
+    this.pluginRegistry = new PluginRegistry(identity.publicKey)
     this.storedEvents = createStoredEventReader(identity.publicKey)
     this.communities = new CommunityService({
       identity, records: () => this.records, preferences: () => this.preferences,
@@ -275,6 +293,87 @@ export class MessagingEngine {
         this.requestSync()
       },
     })
+  }
+  get plugins() { return this.pluginRegistry.states }
+  private trustedPluginPeer(cid: string, preferences = this.preferences) {
+    return PUBLIC_KEY_PATTERN.test(cid) && cid !== this.identity.publicKey && !preferences.blocked.includes(cid)
+      && (loadContacts(this.identity.publicKey).some(contact => contact.pub === cid) || preferences.accepted.includes(cid))
+  }
+  getPluginAvailability = (id: string, cid: string): PluginAvailability => {
+    if (this.disposed) return { available: false, peerStatus: "local", reason: "Your identity changed. Reopen this conversation before continuing." }
+    this.pluginRegistry.reload()
+    const state = this.plugins.find(plugin => plugin.manifest.id === id)
+    if (!state?.enabled) return { available: false, peerStatus: "local", reason: "Enable this plugin and approve its permissions in Settings → Plugins." }
+    if (!state.manifest.shared) return { available: true, peerStatus: "local", reason: "This plugin runs only when you request it." }
+    if (!this.trustedPluginPeer(cid)) return { available: false, peerStatus: "unavailable", reason: "Private Chat requires an unblocked contact or accepted direct conversation." }
+    return this.pluginNegotiation.availability(cid, state.manifest)
+  }
+  private async advertiseCapabilities(cid: string, extra: Pick<PluginCapabilities, "request" | "responseTo"> = {}) {
+    this.pluginRegistry.reload()
+    await this.sendEvent(cid, "plugin-capabilities", { capabilities: this.pluginNegotiation.advertise(this.pluginRegistry.advertised(), extra) })
+  }
+  refreshPeerCapabilities = async (cid: string) => {
+    this.assertActive()
+    await this.refresh()
+    if (!this.trustedPluginPeer(cid)) throw new Error("Add or accept this contact before checking plugin compatibility.")
+    const request = this.pluginNegotiation.challenge(cid)
+    if (request) { this.emit(); await this.advertiseCapabilities(cid, { request }) }
+    await this.sync()
+  }
+  private async broadcastPluginChange() {
+    this.pluginNegotiation.revoke()
+    this.emit()
+    const peers = [...new Set([...this.contacts.map(contact => contact.pub), ...this.preferences.accepted])].filter(cid => this.trustedPluginPeer(cid))
+    for (const cid of peers) {
+      this.assertActive()
+      const request = this.pluginRegistry.enabled(PRIVATE_CHAT_PLUGIN_ID) ? this.pluginNegotiation.challenge(cid) : undefined
+      await this.advertiseCapabilities(cid, request ? { request } : {})
+    }
+  }
+  setPluginEnabled = async (id: string, enabled: boolean, grantPermissions = false) => {
+    this.assertActive()
+    this.pluginRegistry.setEnabled(id, enabled, grantPermissions)
+    this.emit()
+    if (id === PRIVATE_CHAT_PLUGIN_ID) await this.broadcastPluginChange()
+  }
+  removePlugin = async (id: string) => {
+    this.assertActive()
+    this.pluginRegistry.remove(id)
+    this.emit()
+    if (id === PRIVATE_CHAT_PLUGIN_ID) await this.broadcastPluginChange()
+  }
+  private async observePluginCapabilities() {
+    for (const record of this.records) {
+      const event = record.event
+      if (event.kind !== "plugin-capabilities" || event.author === this.identity.publicKey || record.legacy
+        || event.conversationId !== this.identity.publicKey || !this.trustedPluginPeer(event.author)) continue
+      const key = `${record.key}:${event.signature}`
+      if (this.observedCapabilities.has(key)) continue
+      if (!await validateMessagingEvent(event)) continue
+      this.observedCapabilities.add(key)
+      this.pluginNegotiation.observe(event.author, event.payload.capabilities!, event.timestamp)
+    }
+  }
+  private async respondPluginCapabilities() {
+    for (const record of this.records) {
+      const event = record.event
+      if (event.kind !== "plugin-capabilities" || !this.observedCapabilities.has(`${record.key}:${event.signature}`)
+        || !this.trustedPluginPeer(event.author)) continue
+      const capabilities = event.payload.capabilities!
+      if (!this.pluginNegotiation.shouldRespond(event.author, capabilities, event.timestamp)) continue
+      await this.advertiseCapabilities(event.author, { responseTo: capabilities.request })
+      // The requester and responder each need their own fresh challenge.
+      if (this.pluginRegistry.enabled(PRIVATE_CHAT_PLUGIN_ID) && !this.getPluginAvailability(PRIVATE_CHAT_PLUGIN_ID, event.author).available) {
+        const request = this.pluginNegotiation.challenge(event.author)
+        if (request) await this.advertiseCapabilities(event.author, { request })
+      }
+    }
+  }
+  private assertPrivatePlugin(cid: string, kind: EventKind, payload: EventPayload, preferences = this.preferences) {
+    if (kind !== "private-message" && !(kind === "private-settings" && payload.ttlSeconds)) return
+    const availability = this.getPluginAvailability(PRIVATE_CHAT_PLUGIN_ID, cid)
+    if (!availability.available) throw new Error(availability.reason + " Your private message was not sent.")
+    if (!this.trustedPluginPeer(cid, preferences)) throw new Error("Private Chat requires an unblocked contact or accepted direct conversation. Your private message was not sent.")
   }
   markCommunityRead = async (cid: string, channelId: string) => {
     this.assertActive()
@@ -337,12 +436,13 @@ export class MessagingEngine {
     window.addEventListener("serotine:events", this.storeListener)
     window.addEventListener("serotine:contacts", this.storeListener)
     window.addEventListener("storage", this.storeListener)
+    window.addEventListener("storage", this.pluginStorageListener)
     window.addEventListener("online", this.sync)
     window.addEventListener("focus", this.sync)
     this.timer = setInterval(() => { void this.sync() }, 5000)
     void this.sync()
   }
-  dispose() { this.disposed = true; this.key = undefined; this.storedEvents.dispose(); clearInterval(this.timer); clearTimeout(this.refreshTimer); clearTimeout(this.expiryTimer); window.removeEventListener("serotine:events", this.storeListener); window.removeEventListener("serotine:contacts", this.storeListener); window.removeEventListener("storage", this.storeListener); window.removeEventListener("online", this.sync); window.removeEventListener("focus", this.sync); this.listeners.clear() }
+  dispose() { this.disposed = true; this.key = undefined; this.pluginNegotiation.revoke(); this.storedEvents.dispose(); clearInterval(this.timer); clearTimeout(this.refreshTimer); clearTimeout(this.expiryTimer); window.removeEventListener("serotine:events", this.storeListener); window.removeEventListener("serotine:contacts", this.storeListener); window.removeEventListener("storage", this.storeListener); window.removeEventListener("storage", this.pluginStorageListener); window.removeEventListener("online", this.sync); window.removeEventListener("focus", this.sync); this.listeners.clear() }
   refresh = async () => {
     this.assertActive()
     const generation = ++this.refreshGeneration
@@ -357,13 +457,17 @@ export class MessagingEngine {
         ? records.filter(record => !isPrivateEventExpired(record, this.identity.publicKey, cutoffs)) : records
       const contacts = loadContacts(this.identity.publicKey)
       const preferencesText = JSON.stringify(preferences), contactsText = JSON.stringify(contacts)
+      const pluginsChanged = this.pluginRegistry.reload()
       // The reader retains unchanged immutable event references. An idle poll
       // need not rebuild every conversation or re-render every retained file.
-      if (this.records === retained && this.preferencesText === preferencesText && this.contactsText === contactsText) return
+      if (this.records === retained && this.preferencesText === preferencesText && this.contactsText === contactsText && !pluginsChanged) return
       this.records = retained
       if (this.preferencesText !== preferencesText) this.preferences = preferences
       if (this.contactsText !== contactsText) this.contacts = contacts
       this.preferencesText = preferencesText; this.contactsText = contactsText
+      for (const peer of this.preferences.blocked) this.pluginNegotiation.revoke(peer)
+      await this.observePluginCapabilities()
+      this.assertActive()
       this.model = buildMessagingModel(this.records, this.identity.publicKey, this.contacts, this.preferences, this.authorizedKeys)
       this.scheduleExpiry()
       this.emit()
@@ -462,6 +566,7 @@ export class MessagingEngine {
     this.assertActive()
     if (kind === "community") throw new Error("Use community management to send community events.")
     if (kind === "group") throw new Error("Use group management to update a group.")
+    if (kind === "plugin-capabilities" && (!this.trustedPluginPeer(cid) || group || payload.capabilities?.session !== this.pluginNegotiation.session)) throw new Error("Plugin capabilities are exchanged only with accepted direct contacts.")
     if (PRIVATE_KINDS.has(kind) && (group || cid === owner)) throw new Error("Private messages are available only in direct conversations with another person.")
     const targetId = payload.replyTo ?? payload.targetId
     const target = targetId ? this.model.messages.find(message => message.conversationId === cid && message.id === targetId) : undefined
@@ -479,6 +584,10 @@ export class MessagingEngine {
       kind = "private-message"
       payload = { content: payload.content, expiresAt: timestamp + ttlSeconds * 1000 }
     }
+    this.assertPrivatePlugin(cid, kind, payload, preferences)
+    // Off/destruction retain the legacy wire shape so safety cleanup still
+    // reaches an older client that has not installed the plugin-aware release.
+    if (kind === "private-message" || (kind === "private-settings" && payload.ttlSeconds)) payload = { ...payload, plugin: { id: PRIVATE_CHAT_PLUGIN_ID, version: "1.0.0" } }
     const event = await signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: owner, conversationId: cid, recipients, timestamp, kind, payload, ...(group ? { group } : {}) }, this.identity)
     if (!await validateMessagingEvent(event)) throw new Error("This message is invalid or too large.")
     await this.queue(event)
@@ -486,6 +595,7 @@ export class MessagingEngine {
   }
   private async queue(event: MessagingEvent) {
     this.assertActive()
+    this.assertPrivatePlugin(event.conversationId, event.kind, event.payload)
     const saved = await saveStoredEvent(this.identity.publicKey, { key: eventStorageKey(event), event, local: true, delivered: [], receivedAt: Date.now() })
     if (saved === false) throw new Error(event.kind === "private-message" ? "This private message expired or was destroyed while being prepared. Send a new message." : "This chat was deleted while the message was being prepared. Send a new message to reopen it.")
     this.assertActive()
@@ -605,7 +715,7 @@ export class MessagingEngine {
     await this.refresh()
   }
   acceptRequest = async (cid: string) => { await this.updatePreferences(p => ({ ...p, accepted: [...new Set([...p.accepted, cid])] })) }
-  blockContact = async (pub: string, blocked = true) => { this.assertActive(); await validateAddress(pub); if (pub === this.identity.publicKey) throw new Error("You cannot block yourself."); await this.updatePreferences(p => ({ ...p, blocked: blocked ? [...new Set([...p.blocked, pub])] : p.blocked.filter(x => x !== pub) })) }
+  blockContact = async (pub: string, blocked = true) => { this.assertActive(); await validateAddress(pub); if (pub === this.identity.publicKey) throw new Error("You cannot block yourself."); this.pluginNegotiation.revoke(pub); await this.updatePreferences(p => ({ ...p, blocked: blocked ? [...new Set([...p.blocked, pub])] : p.blocked.filter(x => x !== pub) })) }
   setNotificationMode = async (cid: string, mode: NotificationMode) => { await this.updatePreferences(p => ({ ...p, notifications: { ...p.notifications, [cid]: mode } })) }
   setReadReceipts = async (enabled: boolean) => { await this.updatePreferences(p => ({ ...p, readReceipts: enabled })) }
   requestNotifications = () => { this.assertActive(); return requestMessagingNotifications() }
@@ -653,6 +763,9 @@ export class MessagingEngine {
         // Community sends must see retained membership updates before fanout.
         // Direct/group delivery retains its established retry behavior.
         await this.refresh()
+        // Apply incoming capability revocations before releasing private outbox
+        // content. Ordinary messages keep the established fast delivery path.
+        if (this.records.some(record => record.local && (record.event.kind === "private-message" || (record.event.kind === "private-settings" && record.event.payload.ttlSeconds)) && record.event.recipients.some(peer => canSendTo(record, peer)))) await this.readFeed()
         const hasCommunities = this.records.some(record => record.event.kind === "community")
         if (hasCommunities) {
           // Unrelated direct/group sends do not need to wait for the community
@@ -709,6 +822,7 @@ export class MessagingEngine {
           if (this.disposed || Date.now() < this.outboxRetryAt) return
           if (!canSendTo(record, recipientPubKey)) continue
           try {
+            this.assertPrivatePlugin(record.event.conversationId, record.event.kind, record.event.payload)
             if (record.event.kind === "community") {
               // The pass already refreshed local state. Recheck again after
               // encryption below, when a newer membership could have arrived.
@@ -725,7 +839,9 @@ export class MessagingEngine {
             const data = { id: record.event.id, recipientPubKey, encryptedData }
             const proof = await createRequestProof("event:send", data, this.identity.privateKey, owner)
             this.assertActive()
-            if (isDeletedStoredEvent(record, owner, await getMessagingPreferences(owner))) return
+            this.assertPrivatePlugin(record.event.conversationId, record.event.kind, record.event.payload)
+            const latestPreferences = await getMessagingPreferences(owner)
+            if (isDeletedStoredEvent(record, owner, latestPreferences)) return
             if (record.event.kind === "private-message") {
               const current = await this.storedEvents.read()
               if (!current.some(row => row.key === record.key) || isPrivateEventExpired(record, owner, privateDestroyCutoffs(current, owner))) return
@@ -740,6 +856,7 @@ export class MessagingEngine {
                 return
               }
             }
+            this.assertPrivatePlugin(record.event.conversationId, record.event.kind, record.event.payload, latestPreferences)
             const result = await storeEncryptedEvent(data, proof)
             this.assertActive()
             if (!result.success && result.retryAfterMs) {
@@ -812,6 +929,7 @@ export class MessagingEngine {
         if (!existing && event.author !== owner && (VISIBLE_KINDS.has(event.kind) || (event.kind === "community" && ["message", "attachment", "poll"].includes(event.payload.community?.type ?? ""))) && packet.createdAt >= this.initializedAt) notifications.push(event.id)
       }
       if (changed) await this.refresh()
+      await this.respondPluginCapabilities()
       this.assertActive()
       for (const id of notifications) {
         const message = this.model.messages.find(m => m.id === id)

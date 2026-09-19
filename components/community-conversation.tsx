@@ -1,8 +1,10 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { ArrowDown, AtSign, BarChart3, Bell, Check, CheckCheck, ChevronDown, ChevronUp, Copy, ExternalLink, Flag, Hash, Info, Loader2, Megaphone, MoreHorizontal, Pencil, Pin, PinOff, Plus, Reply, RotateCw, Search, Send, Shield, Trash2, X } from "lucide-react"
-import { type CommunityContextValue } from "@/components/messaging-provider"
+import { ArrowDown, AtSign, BarChart3, Bell, Check, CheckCheck, ChevronDown, ChevronUp, Copy, ExternalLink, Flag, Hash, Info, Loader2, Megaphone, MoreHorizontal, Pencil, Pin, PinOff, Plus, Reply, RotateCw, Search, Send, Shield, Sparkles, Trash2, X } from "lucide-react"
+import { useMessaging, type CommunityContextValue } from "@/components/messaging-provider"
+import { AiSummaryDialog } from "@/components/chat/ai-summary-dialog"
+import { AI_SUMMARY_PLUGIN_ID, resolvePluginCommand } from "@/lib/plugins"
 import { AttachmentComposer, type AttachmentComposerHandle, type AttachmentComposerState } from "@/components/chat/attachment-composer"
 import { AttachmentView } from "@/components/chat/attachment-view"
 import { VoiceChannelPanel } from "@/components/calling/voice-channel-panel"
@@ -56,6 +58,7 @@ export function CommunityConversation(props: CommunityConversationProps) {
 
 /** The hub keys this component by identity and channel so pending UI never leaks across channels. */
 function CommunityTextConversation({ api, community, channel, onReport, onHide }: CommunityConversationProps) {
+  const plugins = useMessaging()
   const myPub = api.identity?.publicKey || ""
   const key = communityChannelKey(community.id, channel.id)
   const nickname = useLocalNickname(myPub)
@@ -90,6 +93,7 @@ function CommunityTextConversation({ api, community, channel, onReport, onHide }
   const [toolsOpen, setToolsOpen] = useState(false)
   const [pollOpen, setPollOpen] = useState(false)
   const [infoOpen, setInfoOpen] = useState(false)
+  const [summaryOpen, setSummaryOpen] = useState(false)
   const [infoTab, setInfoTab] = useState<typeof detailTabs[number][0]>("settings")
   const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState("")
@@ -121,6 +125,11 @@ function CommunityTextConversation({ api, community, channel, onReport, onHide }
   const deleteMenu = useRef<HTMLButtonElement | null>(null)
   const pendingMentionEdit = useRef<{ before: string; start: number; end: number } | null>(null)
   const sending = busy || retrying !== null
+  const summaryAllowed = usable && !!api.identity && community.effectiveMembers.includes(myPub)
+    && plugins.getPluginAvailability(AI_SUMMARY_PLUGIN_ID, community.id).available
+  const summaryAccess = useRef(false)
+  summaryAccess.current = summaryAllowed
+  const summaryMessages = useMemo(() => messages.filter(message => !message.hidden), [messages])
   const mentionMembers = community.effectiveMembers.filter(pub => pub !== myPub)
   const mentions = [...new Set(validMentionSpans(content, mentionSpans).map(span => span.publicKey))].filter(pub => mentionMembers.includes(pub))
   const mentionCandidates = mentionMembers.filter(pub => !mentions.includes(pub) && (!mentionQuery?.query || displayName(pub).toLocaleLowerCase().includes(mentionQuery.query.toLocaleLowerCase()) || pub.includes(mentionQuery.query.toLowerCase())))
@@ -249,6 +258,12 @@ function CommunityTextConversation({ api, community, channel, onReport, onHide }
     finally { if (mounted.current) setActionBusy(false) }
   }
   const submit = async () => {
+    // Local commands never become a channel message or attachment caption.
+    if (resolvePluginCommand(content) === AI_SUMMARY_PLUGIN_ID) {
+      if (summaryAllowed && !sendLock.current) { setError(""); setSummaryOpen(true) }
+      else setError("Enable AI Summary in Inbox settings → Plugins to summarize this channel.")
+      return
+    }
     const attachments = attachmentComposer.current, pending = attachments?.getState()
     if ((!content.trim() && !pending?.count) || pending?.unavailable || sendLock.current || !canPost || !draftReady) return
     sendLock.current = true; setBusy(true); setError(""); jumpToLatest()
@@ -284,7 +299,7 @@ function CommunityTextConversation({ api, community, channel, onReport, onHide }
   }} /><Button type="submit" size="icon" className="size-9 shrink-0" aria-label="Send message" disabled={!canPost || !draftReady || (!content.trim() && !attachmentState.count) || sending || attachmentState.unavailable}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}</Button></div>
 
   return <div ref={chatRoot} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-    <header className="flex min-h-12 min-w-0 shrink-0 items-center gap-2 border-b border-border px-3 py-1 sm:px-5">{channel.posting === "moderators" ? <Megaphone className="size-4 shrink-0 text-primary" /> : <Hash className="size-4 shrink-0 text-muted-foreground" />}<h2 className="min-w-0 flex-1 truncate text-sm font-medium">{channel.name}</h2><span className="hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground sm:inline">{community.effectiveMembers.length}/20 MEMBERS</span><Button size="icon-sm" variant="ghost" aria-label="Search channel" aria-expanded={searchOpen} onClick={() => { setSearchOpen(value => !value); setQuery(""); setMatchIndex(0) }}><Search className="size-4" /></Button><Button size="icon-sm" variant="ghost" aria-label="Channel details, files and settings" onClick={() => { setInfoTab("settings"); setInfoOpen(true) }}><Info className="size-4" /></Button></header>
+    <header className="flex min-h-12 min-w-0 shrink-0 items-center gap-2 border-b border-border px-3 py-1 sm:px-5">{channel.posting === "moderators" ? <Megaphone className="size-4 shrink-0 text-primary" /> : <Hash className="size-4 shrink-0 text-muted-foreground" />}<h2 className="min-w-0 flex-1 truncate text-sm font-medium">{channel.name}</h2><span className="hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground sm:inline">{community.effectiveMembers.length}/20 MEMBERS</span>{summaryAllowed && <Button size="icon-sm" variant="ghost" aria-label="Summarize channel" title="Summarize channel" disabled={sending} onClick={() => { setError(""); setSummaryOpen(true) }}><Sparkles className="size-4" /></Button>}<Button size="icon-sm" variant="ghost" aria-label="Search channel" aria-expanded={searchOpen} onClick={() => { setSearchOpen(value => !value); setQuery(""); setMatchIndex(0) }}><Search className="size-4" /></Button><Button size="icon-sm" variant="ghost" aria-label="Channel details, files and settings" onClick={() => { setInfoTab("settings"); setInfoOpen(true) }}><Info className="size-4" /></Button></header>
     {searchOpen && <div role="search" className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border p-2"><Input ref={searchInput} aria-label="Search messages" placeholder="Search this channel…" className="min-w-24 flex-1" value={query} onChange={event => { setQuery(event.target.value); setMatchIndex(0) }} onKeyDown={event => { if (event.nativeEvent.isComposing) return; if (event.key === "Enter") { event.preventDefault(); moveMatch(event.shiftKey ? -1 : 1) } else if (event.key === "Escape") { setSearchOpen(false); setQuery(""); input.current?.focus() } }} /><span role="status" className="text-xs text-muted-foreground">{searchTerm ? matches.length ? `${selectedMatch + 1} of ${matches.length}` : "No matches" : ""}</span><Button size="icon-sm" variant="ghost" aria-label="Previous match" disabled={!matches.length} onClick={() => moveMatch(-1)}><ChevronUp className="size-4" /></Button><Button size="icon-sm" variant="ghost" aria-label="Next match" disabled={!matches.length} onClick={() => moveMatch(1)}><ChevronDown className="size-4" /></Button><Button size="icon-sm" variant="ghost" aria-label="Close search" onClick={() => { setSearchOpen(false); setQuery("") }}><X className="size-4" /></Button></div>}
     {error && <div className="flex shrink-0 items-start gap-2 border-b border-destructive/20 bg-destructive/5 px-3 py-2"><p role="alert" className="min-w-0 flex-1 break-words text-sm text-destructive">{error}</p><Button size="icon-sm" variant="ghost" aria-label="Dismiss channel error" onClick={() => setError("")}><X className="size-4" /></Button></div>}
     {pinned.length > 0 && <button type="button" className="flex shrink-0 items-center gap-2 border-b border-border bg-card/40 px-4 py-1.5 text-left text-xs text-primary" onClick={() => { setInfoTab("pins"); setInfoOpen(true) }}><Pin className="size-3.5 shrink-0" /><span className="shrink-0">{pinned.length} pinned</span><span className="truncate text-muted-foreground">{displaySummary(pinned.at(-1)!)}</span></button>}
@@ -358,6 +373,15 @@ function CommunityTextConversation({ api, community, channel, onReport, onHide }
       {mentions.length > 0 && <div className="mt-1 flex flex-wrap gap-1">{mentions.map(pub => <button key={pub} type="button" disabled={sending} aria-label={`Remove mention of ${displayName(pub)}`} className="inline-flex items-center gap-1 rounded-sm bg-primary/10 px-2 py-1 text-xs text-primary" onClick={() => removeMention(pub)}>@{displayName(pub)}<X className="size-3" /></button>)}</div>}
       <div className={toolsOpen || !draftSaved ? "mt-1 flex flex-wrap justify-between gap-1 text-[11px] text-muted-foreground" : "sr-only"}><span>Enter to send · Shift + Enter for a new line · Math and Code in message tools</span><span className={!draftSaved ? "text-destructive" : ""}>{!draftSaved ? draftIssue === "read" ? "Saved draft could not be loaded" : draftIssue === "clear" ? "Sent draft cleanup is pending" : "Draft is only in this tab · Do not close it" : content ? "Draft saved on this browser" : "History saved on this browser"}</span></div>{!draftSaved && <Button type="button" size="sm" variant="ghost" onClick={retryDraftSave}>{draftIssue === "read" ? "Try loading draft again" : draftIssue === "clear" ? "Retry draft cleanup" : "Try saving draft again"}</Button>}
     </footer> : <p className="shrink-0 border-t border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">{membershipPending ? "A member left. Messaging resumes when the owner opens Serotine and updates membership." : "Only owners and moderators can post in this announcement channel."}</p>}
+    {summaryOpen && summaryAllowed && api.identity && <AiSummaryDialog key={`summary:${myPub}:${key}`} identity={api.identity} conversationId={community.id} messages={summaryMessages}
+      isAllowed={() => mounted.current && summaryAccess.current && plugins.getPluginAvailability(AI_SUMMARY_PLUGIN_ID, community.id).available}
+      onClose={() => setSummaryOpen(false)} canSend={canPost}
+      onSend={async text => {
+        if (!mounted.current || !summaryAccess.current || !canPost || sendLock.current || !plugins.getPluginAvailability(AI_SUMMARY_PLUGIN_ID, community.id).available) throw new Error("This channel is no longer available for sharing the summary.")
+        sendLock.current = true
+        try { await api.sendMessage(community.id, channel.id, text); if (mounted.current) jumpToLatest() }
+        finally { sendLock.current = false }
+      }} />}
     <PollCreator open={pollOpen && canPost} onOpenChange={setPollOpen} onCreate={async (question, options) => { if (!canPost) throw new Error("You cannot post in this channel."); await api.createPoll(community.id, channel.id, question, options); if (mounted.current) jumpToLatest() }} />
     <EditMessageDialog message={canPost ? editing : null} onClose={() => setEditing(null)} onSave={(id, value) => api.editMessage(community.id, channel.id, id, value)} />
     <Dialog open={!!deleteTarget} onOpenChange={open => { if (!open && !deleting) setDeleteTarget(null) }}><DialogContent onOpenAutoFocus={event => { event.preventDefault(); cancelDelete.current?.focus() }} onCloseAutoFocus={event => { event.preventDefault(); if (deleteMenu.current?.isConnected) deleteMenu.current.focus(); else if (input.current && !input.current.disabled) input.current.focus(); else viewport.current?.focus() }}><DialogHeader><DialogTitle>Delete this message for you?</DialogTitle><DialogDescription>This removes the message and its attachment from saved history on this device. Other participants and linked devices keep their copies. This cannot be undone here.</DialogDescription></DialogHeader>{deleteTarget && <p className="line-clamp-3 break-words rounded-sm bg-muted p-3 text-sm text-muted-foreground">{displaySummary(deleteTarget)}</p>}{deleteError && <p role="alert" className="text-sm text-destructive">{deleteError}</p>}<DialogFooter><Button ref={cancelDelete} variant="outline" disabled={deleting} onClick={() => setDeleteTarget(null)}>Cancel</Button><Button variant="destructive" disabled={deleting} onClick={async () => {

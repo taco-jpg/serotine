@@ -1,0 +1,13 @@
+# Synthetic browser integration only: no account ID, AI, service, or remote bindings.
+name = "serotine-browser-test"
+compatibility_date = "2026-05-06"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "serotine_db"
+database_name = "serotine-browser-test"
+database_id = "00000000-0000-0000-0000-000000000001"
+
+[vars]
+SEROTINE_STORAGE_VERSION = "1"
+SUMMARY_AI_ENABLED = "false"

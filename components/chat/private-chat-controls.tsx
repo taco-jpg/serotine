@@ -14,14 +14,19 @@ const durationOptions = <><option value="300">5 minutes</option><option value="3
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : "That action could not be completed. Try again."
 
 function PrivateModeDetails() {
-  return <details className="text-xs leading-relaxed text-muted-foreground"><summary className="cursor-pointer">How private messages work</summary><div className="mt-2 space-y-2"><p>Both people need an updated Serotine. Timers start when a message is sent. Private messages are excluded from backups, search, and pins.</p><p>A recipient can keep a copy or screenshot. Expiration does not revoke an access key; revoke it with the service that issued it when needed.</p><p>Encrypted relay copies age out under the relay’s retention policy; destroying history does not immediately erase them.</p></div></details>
+  return <details className="text-xs leading-relaxed text-muted-foreground"><summary className="cursor-pointer">How private messages work</summary><div className="mt-2 space-y-2"><p>Both people must enable a compatible Private Chat plugin before new private messages can be sent. Timers start when a message is sent. Private messages are excluded from backups, search, and pins.</p><p>A recipient can keep a copy or screenshot. Expiration does not revoke an access key; revoke it with the service that issued it when needed.</p><p>Encrypted relay copies age out under the relay’s retention policy; destroying history does not immediately erase them. Existing timers keep running if the plugin is disabled or removed.</p></div></details>
 }
 
-export function PrivateChatControls({ open, onOpenChange, ttlSeconds, disabled, onSetMode, onDestroy }: {
+export function PrivateChatControls({ open, onOpenChange, ttlSeconds, disabled, pluginEnabled, available, availabilityReason, onCheckPeer, onManagePlugins, onSetMode, onDestroy }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   ttlSeconds: PrivateTtlSeconds
   disabled: boolean
+  pluginEnabled: boolean
+  available: boolean
+  availabilityReason: string
+  onCheckPeer: () => Promise<void>
+  onManagePlugins: () => void
   onSetMode: (seconds: PrivateTtlSeconds) => Promise<void>
   onDestroy: () => Promise<void>
 }) {
@@ -29,6 +34,7 @@ export function PrivateChatControls({ open, onOpenChange, ttlSeconds, disabled, 
   const [busy, setBusy] = useState(false)
   const [confirmDestroy, setConfirmDestroy] = useState(false)
   const [error, setError] = useState("")
+  const [checking, setChecking] = useState(false)
   const cancelDestroy = useRef<HTMLButtonElement>(null)
   useEffect(() => { if (open) { setSelected(ttlSeconds); setConfirmDestroy(false); setError("") } }, [open, ttlSeconds])
   useEffect(() => { if (confirmDestroy) cancelDestroy.current?.focus() }, [confirmDestroy])
@@ -39,10 +45,11 @@ export function PrivateChatControls({ open, onOpenChange, ttlSeconds, disabled, 
   }
   return <Dialog open={open} onOpenChange={value => { if (!busy) onOpenChange(value) }}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>{confirmDestroy ? "Destroy private history?" : "Private chat"}</DialogTitle><DialogDescription>{confirmDestroy ? "Remove all private messages and access keys sent so far in this conversation. This cannot be undone." : "Set a shared timer for new text messages in this direct conversation."}</DialogDescription></DialogHeader>
     {confirmDestroy ? <><p className="text-sm leading-relaxed text-muted-foreground">They disappear here immediately. The other person’s updated Serotine removes them when it receives the request. Ordinary messages remain. Copies or screenshots they saved cannot be removed.</p>{error && <p role="alert" className="text-sm text-destructive">{error}</p>}<DialogFooter><Button ref={cancelDestroy} variant="outline" disabled={busy} onClick={() => setConfirmDestroy(false)}>Cancel</Button><Button variant="destructive" disabled={busy || disabled} onClick={() => void act(onDestroy)}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}Destroy private history</Button></DialogFooter></> : <div className="space-y-4">
-      <div className="space-y-2"><Label htmlFor="private-chat-duration">New messages disappear after</Label><select id="private-chat-duration" value={selected} disabled={busy || disabled} onChange={event => setSelected(Number(event.target.value) as PrivateTtlSeconds)} className="h-10 w-full rounded-lg border border-border bg-card px-3 text-sm"><option value="0">Off — keep new messages</option>{durationOptions}</select><p className="text-xs leading-relaxed text-muted-foreground">Changing this setting applies to both people’s new messages. Existing timers keep running. Private mode supports plain text and access keys.</p></div>
+      <div className="space-y-2 rounded-lg border border-border p-3"><p role="status" className="text-sm leading-relaxed">{available ? "Both people have compatible Private Chat enabled." : availabilityReason}</p><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={disabled || busy || checking || !pluginEnabled} onClick={async () => { setChecking(true); setError(""); try { await onCheckPeer() } catch (cause) { setError(errorText(cause)) } finally { setChecking(false) } }}>{checking && <Loader2 className="size-4 animate-spin" />}Check peer support</Button><Button size="sm" variant="ghost" disabled={busy} onClick={onManagePlugins}>Manage plugins</Button></div>{!available && ttlSeconds > 0 && <p className="text-xs text-muted-foreground">Sending private messages is paused. You can turn the timer off to resume ordinary messaging. Existing timers continue.</p>}</div>
+      <div className="space-y-2"><Label htmlFor="private-chat-duration">New messages disappear after</Label><select id="private-chat-duration" value={selected} disabled={busy || disabled} onChange={event => setSelected(Number(event.target.value) as PrivateTtlSeconds)} className="h-10 w-full rounded-lg border border-border bg-card px-3 text-sm"><option value="0">Off — keep new messages</option><optgroup label="Private timers" disabled={!available}>{durationOptions}</optgroup></select><p className="text-xs leading-relaxed text-muted-foreground">Changing this setting applies to both people’s new messages. Existing timers keep running. Private mode supports plain text and access keys.</p></div>
       <PrivateModeDetails />
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-      <DialogFooter><Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button><Button disabled={busy || disabled || selected === ttlSeconds} onClick={() => void act(() => onSetMode(selected))}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Timer className="size-4" />}Save timer</Button></DialogFooter>
+      <DialogFooter><Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button><Button disabled={busy || disabled || selected === ttlSeconds || (selected > 0 && !available)} onClick={() => void act(() => onSetMode(selected))}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Timer className="size-4" />}Save timer</Button></DialogFooter>
       <div className="border-t border-border pt-4"><Button variant="outline" className="text-destructive" disabled={busy || disabled} onClick={() => setConfirmDestroy(true)}><Trash2 className="size-4" />Destroy private history</Button></div>
     </div>}
   </DialogContent></Dialog>

@@ -96,7 +96,7 @@ test('community envelopes accept remote file metadata and reject malformed authe
   }
 })
 
-test('channels support replies, mentions, own edits, pins, polls, changed votes and receipts', async () => {
+test('channels support replies, mentions, own edits, pins, polls and votes while ignoring historical receipts', async () => {
   const f = await fixture(), owner = f.client(alice).service, peer = f.client(bob).service
   const original = await peer.sendMessage(f.id, f.channel, 'Initial message')
   const reply = await owner.sendMessage(f.id, f.channel, 'Reply', original, [bob.publicKey, charlie.publicKey])
@@ -107,7 +107,7 @@ test('channels support replies, mentions, own edits, pins, polls, changed votes 
   await peer.vote(f.id, f.channel, poll, 1)
   const receipt = f.event(bob, f.data('receipt', f.channel, { targetId: reply, receipt: 'read' }))
   receipt.timestamp = f.events.find(event => event.id === reply).timestamp - 250
-  f.inject(receipt) // A peer clock behind the sender must not suppress receipts.
+  f.inject(receipt) // Historical receipts parse but do not restore reader tracking.
   const rows = owner.model.messages
   assert.equal(rows.find(message => message.id === original).content, 'Corrected message')
   assert.equal(rows.find(message => message.id === original).pinned, true)
@@ -115,8 +115,8 @@ test('channels support replies, mentions, own edits, pins, polls, changed votes 
   assert.equal(rows.find(message => message.id === reply).replyTo, original)
   assert.deepEqual(rows.find(message => message.id === reply).mentions, [bob.publicKey, charlie.publicKey])
   assert.equal(rows.find(message => message.id === poll).poll.votes[bob.publicKey], 1)
-  assert.equal(rows.find(message => message.id === reply).delivery, 'read')
-  assert.deepEqual(rows.find(message => message.id === reply).readBy, [bob.publicKey])
+  assert.equal(rows.find(message => message.id === reply).delivery, 'sent')
+  assert.deepEqual(rows.find(message => message.id === reply).readBy, [])
   await assert.rejects(owner.editMessage(f.id, f.channel, original, 'Forged'), /your own/)
   await assert.rejects(owner.sendMessage(f.id, f.other, 'Wrong channel', original), /replying/)
   await assert.rejects(peer.vote(f.id, f.other, poll, 0), /channel/)
@@ -158,7 +158,7 @@ test('announcement restrictions and original audiences also cover new feature ev
   const poll = await owner.createPoll(f.id, f.announcements, 'Readiness?', ['Ready', 'Later'])
   const plain = await owner.sendMessage(f.id, f.channel, 'Before the next member joins')
   await peer.vote(f.id, f.announcements, poll, 0)
-  await peer.receipt(f.id, f.announcements, poll, 'read')
+  await assert.rejects(peer.receipt(f.id, f.announcements, poll, 'read'), /receipts are not sent/)
   await assert.rejects(peer.createPoll(f.id, f.announcements, 'Unauthorized?', ['Yes', 'No']), /moderators/)
   await assert.rejects(peer.pinMessage(f.id, f.announcements, poll, true), /moderators/)
   const forbidden = f.event(bob, f.data('poll', f.announcements, { question: 'Forged announcement', options: ['Yes', 'No'] }))

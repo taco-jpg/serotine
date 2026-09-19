@@ -23,7 +23,12 @@ export interface InboxCursor { createdAt: number; id: string }
 export interface InboxRequest { senderPubKey: string; after?: InboxCursor }
 export interface LegacyInboxCursor extends InboxCursor { senderPubKey: string }
 export interface LegacyInboxRequest { after?: LegacyInboxCursor }
-export interface EventFeedRequest { after?: number }
+export interface EventFeedRequest { after?: number; retentionScopes?: string[] }
+export interface RetentionSyncState { closedScopes?: string[]; relationshipBoundaries?: Array<{ scopeId: string; boundaryAt: number }> }
+export function validRetentionScopes(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= 100 && new Set(value).size === value.length
+    && value.every(item => typeof item === "string" && /^[0-9a-f]{64}$/.test(item))
+}
 
 export interface RequestProof {
   publicKey: string

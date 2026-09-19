@@ -47,11 +47,19 @@ function load(filename) {
   function sourceRequire(name) {
     if (name === './messaging-store') return store
     if (name === './relay-client') return relay
+    if (name === './retention-client') return { requestRetention: async (identity, action, scope) => {
+      assert.ok(['retention:accept', 'retention:close'].includes(action))
+      assert.equal(scope.kind, 'direct')
+      assert.ok([scope.first, scope.second].includes(identity.publicKey))
+      assert.ok(JSON.stringify(scope).length < 1000)
+      assert.equal(await load(path.join(root, 'lib/retention-protocol.ts')).validRetentionDescriptor(scope), true)
+      return { pending: false }
+    } }
     if (name === './storage') return { exportAllMessagesFromStorage: async () => [], migrateLegacyHistory: async () => {}, deleteConversationHistoryFromStorage: async () => {} }
     if (name === './message-notifications') return { notifyIncoming: message => notices.push(message), requestMessagingNotifications: async () => 'denied' }
     return name.startsWith('.') ? load(path.resolve(path.dirname(filename), name)) : require(name)
   }
-  new Function('require', 'module', 'exports', 'navigator', 'window', 'localStorage', output)(sourceRequire, module, module.exports, {}, new EventTarget(), { getItem: key => pluginStorage.get(key) || null, setItem: (key, value) => pluginStorage.set(key, value) })
+  new Function('require', 'module', 'exports', 'navigator', 'window', 'localStorage', output)(sourceRequire, module, module.exports, {}, new EventTarget(), { getItem: key => pluginStorage.get(key) || null, setItem: (key, value) => pluginStorage.set(key, value), removeItem: key => pluginStorage.delete(key) })
   return module.exports
 }
 const cryptography = load(path.join(root, 'lib/crypto.ts'))
@@ -59,6 +67,7 @@ const authentication = load(path.join(root, 'lib/request-auth.ts'))
 const privacy = load(path.join(root, 'lib/private-messaging.ts'))
 const messaging = load(path.join(root, 'lib/messaging.ts'))
 const plugins = load(path.join(root, 'lib/plugins.ts'))
+const sharing = load(path.join(root, 'lib/shared-messages.ts'))
 let alice, bob, charlie
 before(async () => {
   async function identity() { const pair = await cryptography.generateEncryptionKeyPair(); return { version: 2, publicKey: await cryptography.exportPublicKeyToHex(pair.publicKey), privateKey: await cryptography.exportKey(pair.privateKey) } }
@@ -442,4 +451,98 @@ test('disabling private chat during the last storage check prevents the prepared
   new plugins.PluginRegistry(alice.publicKey).setEnabled(plugins.PRIVATE_CHAT_PLUGIN_ID, false)
   release.resolve(); await sync
   assert.equal(packets.some(packet => packet.id === id), false)
+})
+
+test('shared copies are signed, bounded, immutable and preserve readable fallback', async t => {
+  const sender = await engine(alice, t)
+  await sender.instance.sendText(bob.publicKey, 'Selected ordinary text')
+  await sender.sync()
+  await sender.instance.sendText(charlie.publicKey, 'Destination exists')
+  await sender.sync()
+  const source = { conversationId: bob.publicKey }
+  const selected = sender.instance.model.messages.filter(message => message.conversationId === bob.publicKey)
+  const preview = sharing.sharedMessagesFromSelection(selected, source, selected.map(message => message.id))
+  const id = await sender.instance.shareMessages(source, selected.map(message => message.id), { conversationId: charlie.publicKey }, preview)
+  const signed = sender.instance.records.find(row => row.event.id === id).event
+  assert.equal(await messaging.validateMessagingEvent(signed), true)
+  assert.equal(signed.payload.content, sharing.sharedMessagesFallback(preview))
+  assert.deepEqual(signed.payload.shared, preview)
+  assert.equal(await messaging.validateMessagingEvent({ ...signed, payload: { ...signed.payload, shared: { ...preview, items: [{ ...preview.items[0], text: 'tampered' }] } } }), false)
+  await assert.rejects(sender.instance.editMessage(charlie.publicKey, id, 'replace copy'), /ordinary text/)
+  await sender.instance.editMessage(bob.publicKey, selected[0].id, 'Source later changed')
+  await assert.rejects(sender.instance.shareMessages(source, selected.map(message => message.id), { conversationId: charlie.publicKey }, preview), /selected messages changed/)
+  assert.deepEqual(sender.instance.model.messages.find(message => message.id === id).shared, preview)
+})
+
+test('shared copies reject private destinations and secret source material', async t => {
+  const sender = await engine(alice, t)
+  await sender.instance.sendText(bob.publicKey, 'Ordinary source')
+  await sender.sync()
+  await sender.instance.setPrivateMode(charlie.publicKey, 300)
+  const source = { conversationId: bob.publicKey }
+  const selected = sender.instance.model.messages.filter(message => message.conversationId === bob.publicKey)
+  const preview = sharing.sharedMessagesFromSelection(selected, source, selected.map(message => message.id))
+  await assert.rejects(sender.instance.shareMessages(source, selected.map(message => message.id), { conversationId: charlie.publicKey }, preview), /private mode/)
+  const secretId = await sender.instance.sendSecret(bob.publicKey, 'Never copied')
+  await sender.sync()
+  await assert.rejects(sender.instance.shareMessages(source, [secretId], { conversationId: charlie.publicKey }, preview), /no longer available/)
+})
+
+test('Force P2P route is signature-bound and cannot enter relay on retry, reload, or mode switch', async t => {
+  const sender = await engine(alice, t, false)
+  await sender.instance.acceptRequest(bob.publicKey)
+  await sender.instance.setDeliveryMode(bob.publicKey, 'direct-only')
+  await assert.rejects(sender.instance.sendText(bob.publicKey, 'Draft remains local'), /Connect directly/)
+  assert.equal(sender.instance.model.messages.length, 0)
+  t.mock.method(sender.instance.direct, 'status', () => ({ state: 'connected', reason: 'Connected directly' }))
+  let directEvent
+  t.mock.method(sender.instance.direct, 'send', async (_peer, event) => { directEvent = event })
+  const id = await sender.instance.sendText(bob.publicKey, 'Never a relay payload')
+  assert.equal(directEvent.route, 'direct-only')
+  assert.equal(await messaging.validateMessagingEvent(directEvent), true)
+  assert.equal(await messaging.validateMessagingEvent({ ...directEvent, route: undefined }), false)
+  assert.equal(sender.instance.model.messages.find(message => message.id === id).delivery, 'delivered')
+  await sender.instance.setDeliveryMode(bob.publicKey, 'relay')
+  await sender.sync(); await sender.instance.retry(id); await sender.sync()
+  const reloaded = await engine(alice, t, false); await reloaded.sync()
+  assert.equal(packets.some(packet => packet.id === id), false)
+})
+
+test('Force P2P activation while relay encryption is waiting fences the pending relay request', async t => {
+  const sender = await engine(alice, t, false)
+  await sender.instance.acceptRequest(bob.publicKey)
+  const id = await sender.instance.sendText(bob.publicKey, 'Prepared before activation')
+  const entered = deferred(), release = deferred(), encrypt = cryptography.encryptForPeer
+  t.mock.method(cryptography, 'encryptForPeer', async (...args) => { entered.resolve(); await release.promise; return encrypt(...args) })
+  const syncing = sender.sync(); await entered.promise
+  await sender.instance.setDeliveryMode(bob.publicKey, 'direct-only')
+  release.resolve(); await syncing
+  assert.equal(packets.some(packet => packet.id === id), false)
+})
+
+test('direct file receipt is bounded and only complete verified files enter local history', async t => {
+  const receiver = await engine(bob, t, false)
+  await receiver.instance.acceptRequest(alice.publicKey)
+  await receiver.instance.setDeliveryMode(alice.publicKey, 'direct-only')
+  const attachments = load(path.join(root, 'lib/attachments.ts'))
+  const prepared = await attachments.prepareAttachment(new File(['verified direct bytes'], 'small.txt'))
+  const make = async (kind, payload) => {
+    const base = await event(alice, bob, kind, payload)
+    return messaging.signMessagingEvent({ ...base, route: 'direct-only' }, alice)
+  }
+  for (const chunk of prepared.chunks) await receiver.instance.receiveDirectEvent(await make('attachment-chunk', { attachmentId: prepared.metadata.id, ...chunk }))
+  assert.equal(receiver.instance.model.messages.length, 0)
+  const metadata = await make('attachment', { attachment: prepared.metadata })
+  await receiver.instance.receiveDirectEvent(metadata)
+  assert.equal(receiver.instance.model.messages.find(message => message.id === metadata.id).attachment.name, 'small.txt')
+  assert.equal(packets.length, 0)
+  // Lost final ACK causes all the same signed chunks and metadata to retry.
+  const replay = [...rows(bob.publicKey).values()].filter(row => row.event.payload.attachmentId === prepared.metadata.id).map(row => row.event)
+  for (const piece of replay) await receiver.instance.receiveDirectEvent(piece)
+  await receiver.instance.receiveDirectEvent(metadata)
+  assert.equal(receiver.instance.directFiles.has(alice.publicKey), false, 'duplicate final metadata releases retry assembly')
+  const corrupt = await attachments.prepareAttachment(new File(['corrupt'], 'bad.txt'))
+  await receiver.instance.receiveDirectEvent(await make('attachment-chunk', { attachmentId: corrupt.metadata.id, index: 0, data: btoa('changed') }))
+  await assert.rejects(receiver.instance.receiveDirectEvent(await make('attachment', { attachment: corrupt.metadata })), /integrity|invalid|size|match/)
+  assert.equal(receiver.instance.model.messages.length, 1)
 })

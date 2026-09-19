@@ -6,7 +6,10 @@ import { requestProofFailureMessage, verifyRequestProofResult } from "@/lib/requ
 import { relayFailureKind } from "@/lib/relay-diagnostics"
 import { ensureEventRelaySchema } from "@/lib/event-relay-schema"
 import { ensureIdentityRetirementSchema } from "@/lib/identity-retirement-schema"
-import { AUTH_WINDOW_MS, EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_EVENT_SENDS_PER_MINUTE, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, MESSAGE_PAGE_SIZE, PUBLIC_KEY_PATTERN, type RequestProof, type InboxRequest, type InboxCursor, type EventFeedRequest, type LegacyInboxCursor, type LegacyInboxRequest } from "@/lib/protocol"
+import { ensureRetentionSchema } from "@/lib/retention-schema"
+import { registerRetention, assertRetentionOpen, RetentionError } from "@/lib/retention-server"
+import { retentionDescriptor, retentionScopeId, type RetentionDescriptor } from "@/lib/retention-protocol"
+import { AUTH_WINDOW_MS, EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_EVENT_SENDS_PER_MINUTE, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, MESSAGE_PAGE_SIZE, PUBLIC_KEY_PATTERN, type RequestProof, type InboxRequest, type InboxCursor, type EventFeedRequest, type LegacyInboxCursor, type LegacyInboxRequest, type RetentionSyncState, validRetentionScopes } from "@/lib/protocol"
 
 class RequestError extends Error {}
 class RateLimitError extends RequestError {}
@@ -26,6 +29,7 @@ export interface RelayEvent extends RelayMessage { sequence: number }
 function failure(error: unknown): Failure {
   if (error instanceof RateLimitError) return { success: false, error: error.message, retryAfterMs: AUTH_WINDOW_MS + 1000 }
   if (error instanceof RequestError) return { success: false, error: error.message }
+  if (error instanceof RetentionError) return { success: false, error: error.message }
   if (error instanceof RelayConfigurationError) {
     console.error("Relay configuration: missing serotine_db binding")
     return { success: false, error: "Messaging is not configured on this server. The site owner needs to connect its relay database. Your saved messages are still on this browser." }
@@ -175,7 +179,7 @@ export async function getLegacyInbox(data: LegacyInboxRequest, proof: RequestPro
 }
 
 /** Append-only encrypted history, retained seven days for every linked device. */
-export async function storeEncryptedEvent(data: { id: string; recipientPubKey: string; encryptedData: string }, proof: RequestProof): Promise<{ success: true } | Failure> {
+export async function storeEncryptedEvent(data: { id: string; recipientPubKey: string; encryptedData: string; retention?: RetentionDescriptor }, proof: RequestProof): Promise<{ success: true } | Failure> {
   try {
     checkPeer(data.recipientPubKey)
     if (typeof data.id !== "string" || !ID_PATTERN.test(data.id)) throw new RequestError("Invalid message.")
@@ -189,21 +193,32 @@ export async function storeEncryptedEvent(data: { id: string; recipientPubKey: s
     // Larger group transfers pause and resume when this rolling window resets.
     await limitWrites(db, proof, "event:send", MAX_EVENT_SENDS_PER_MINUTE)
     await ensureEventRelaySchema(db)
+    await ensureRetentionSchema(db)
     const now = Date.now()
+    let retentionScope: string | null = null
+    if (data.retention) {
+      retentionScope = await registerRetention(db, data.retention, proof.publicKey, data.recipientPubKey)
+      await assertRetentionOpen(db, retentionScope, data.retention.timestamp)
+    } else {
+      // An old client cannot reopen a severed direct pair by dropping metadata.
+      const pair = await retentionScopeId(retentionDescriptor(data.recipientPubKey, proof.publicKey, now))
+      if (await db.prepare("SELECT 1 FROM RetentionScope WHERE scopeId = ? AND (closedAt > 0 OR boundaryAt > 0)").bind(pair).first())
+        throw new RetentionError("This relationship changed. Update Serotine and accept the contact again.", 409)
+    }
     await db.prepare("DELETE FROM RelayEvent WHERE expiresAt <= ?").bind(now).run()
     const existing = await db.prepare("SELECT id FROM RelayEvent WHERE recipientPubKey = ? AND senderPubKey = ? AND id = ?")
       .bind(data.recipientPubKey, proof.publicKey, data.id).first()
     if (existing) return { success: true }
-    const storedPayload = await storeRelayPayload(data.encryptedData)
+    const storedPayload = await storeRelayPayload(data.encryptedData, retentionScope ? { id: retentionScope, timestamp: data.retention!.timestamp, db } : undefined)
     // Admission and insertion are one statement, preventing concurrent requests
     // from overshooting the per-identity row/byte budget. Triggers maintain usage.
-    const result = await db.prepare(`INSERT INTO RelayEvent (id, senderPubKey, recipientPubKey, encryptedData, payloadBytes, createdAt, expiresAt)
-      SELECT ?, ?, ?, ?, ?, ?, ?
+    const result = await db.prepare(`INSERT INTO RelayEvent (id, senderPubKey, recipientPubKey, encryptedData, payloadBytes, createdAt, expiresAt, retentionScope, retentionTimestamp)
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
       WHERE COALESCE((SELECT eventCount FROM RelayEventUsage WHERE senderPubKey = ?), 0) < ?
         AND COALESCE((SELECT payloadBytes FROM RelayEventUsage WHERE senderPubKey = ?), 0) + ? <= ?
         AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey IN (?, ?))
       ON CONFLICT(recipientPubKey, senderPubKey, id) DO NOTHING`)
-      .bind(data.id, proof.publicKey, data.recipientPubKey, storedPayload, payloadBytes, now, now + 7 * 86400_000,
+      .bind(data.id, proof.publicKey, data.recipientPubKey, storedPayload, payloadBytes, now, now + 7 * 86400_000, retentionScope, data.retention?.timestamp ?? null,
         proof.publicKey, MAX_RETAINED_EVENT_COUNT, proof.publicKey, payloadBytes, MAX_RETAINED_EVENT_BYTES, proof.publicKey, data.recipientPubKey).run()
     if (result.meta.changes === 0) {
       await requireActiveParticipants(db, proof.publicKey, data.recipientPubKey)
@@ -215,20 +230,36 @@ export async function storeEncryptedEvent(data: { id: string; recipientPubKey: s
   } catch (error) { return failure(error) }
 }
 
-export async function getEventFeed(data: EventFeedRequest, proof: RequestProof): Promise<{ success: true; messages: RelayEvent[]; nextCursor: number; hasMore: boolean } | Failure> {
+export async function getEventFeed(data: EventFeedRequest, proof: RequestProof): Promise<({ success: true; messages: RelayEvent[]; nextCursor: number; hasMore: boolean } & RetentionSyncState) | Failure> {
   try {
     if (data.after !== undefined && (!Number.isSafeInteger(data.after) || data.after < 0)) throw new RequestError("Invalid sync position. Reopen the app.")
+    if (data.retentionScopes !== undefined && !validRetentionScopes(data.retentionScopes)) throw new RequestError("Invalid conversation status request.")
     const db = await authorize("event:sync", data, proof)
     await ensureEventRelaySchema(db)
+    await ensureRetentionSchema(db)
     const after = data.after ?? 0
     const { results } = await db.prepare(`SELECT sequence, id, senderPubKey, recipientPubKey, encryptedData, createdAt FROM RelayEvent
       WHERE (recipientPubKey = ? OR senderPubKey = ?) AND sequence > ? AND expiresAt > ?
+        AND (retentionScope IS NULL OR NOT EXISTS(SELECT 1 FROM RetentionScope s WHERE s.scopeId = RelayEvent.retentionScope AND (s.closedAt > 0 OR RelayEvent.retentionTimestamp <= s.boundaryAt
+          OR (s.kind = 'group' AND EXISTS(SELECT 1 FROM GroupAuthority g WHERE g.groupId = 'group:' || s.namespaceKey AND g.admin = s.owner AND g.terminalAt > 0)))))
         AND NOT EXISTS (SELECT 1 FROM RetiredIdentity WHERE publicKey = ?)
       ORDER BY sequence ASC LIMIT ${EVENT_FEED_PAGE_SIZE + 1}`)
       .bind(proof.publicKey, proof.publicKey, after, Date.now(), proof.publicKey).all<RelayEvent>()
     if (results.length === 0) await requireActiveIdentity(db, proof.publicKey)
     const messages = results.slice(0, EVENT_FEED_PAGE_SIZE)
-    return { success: true, messages: await hydrateRelayPayloads(messages), nextCursor: messages.at(-1)?.sequence ?? after, hasMore: results.length > EVENT_FEED_PAGE_SIZE }
+    const retention: RetentionSyncState = {}
+    if (data.retentionScopes?.length) {
+      const placeholders = data.retentionScopes.map(() => "?").join(",")
+      const closed = await db.prepare(`SELECT scopeId FROM RetentionScope s WHERE scopeId IN (${placeholders}) AND kind IN ('group','community')
+        AND (closedAt > 0 OR (kind = 'group' AND EXISTS(SELECT 1 FROM GroupAuthority g WHERE g.groupId = 'group:' || s.namespaceKey AND g.admin = s.owner AND g.terminalAt > 0)))`)
+        .bind(...data.retentionScopes).all<{ scopeId: string }>()
+      const relationships = await db.prepare(`SELECT scopeId, owner, peer, MAX(closedAt,boundaryAt) AS boundaryAt FROM RetentionScope
+        WHERE scopeId IN (${placeholders}) AND kind = 'direct' AND (closedAt > 0 OR boundaryAt > 0)`)
+        .bind(...data.retentionScopes).all<{ scopeId: string; owner: string; peer: string; boundaryAt: number }>()
+      retention.closedScopes = closed.results.map(row => row.scopeId)
+      retention.relationshipBoundaries = relationships.results.filter(row => row.owner === proof.publicKey || row.peer === proof.publicKey).map(({ scopeId, boundaryAt }) => ({ scopeId, boundaryAt }))
+    }
+    return { success: true, messages: await hydrateRelayPayloads(messages), nextCursor: messages.at(-1)?.sequence ?? after, hasMore: results.length > EVENT_FEED_PAGE_SIZE, ...retention }
   } catch (error) { return failure(error) }
 }
 

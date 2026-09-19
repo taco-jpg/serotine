@@ -2,7 +2,7 @@ import { FileUploadError, fileUploadConfiguration, handleFileUploadChunk, handle
 import { isFileUploadObject } from "@/lib/file-upload-protocol"
 import type { RequestProof } from "@/lib/protocol"
 
-const MAX_CONTROL_BYTES = 8 * 1024
+const MAX_CONTROL_BYTES = 32 * 1024
 const json = (value: unknown, status = 200) => Response.json(value, { status,
   headers: { "Cache-Control": "no-store, max-age=0", "X-Content-Type-Options": "nosniff" } })
 function sameOrigin(request: Request) {

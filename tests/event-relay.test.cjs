@@ -191,7 +191,7 @@ test('legacy inline files coexist with smaller event and signal packet allowance
   const request = { version: 2, action: 'message:send', data, proof: await h.proof('message:send', data, alice) }
   const response = await h.POST(new Request(`${origin}/api/relay`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-serotine-events': '1' }, body: JSON.stringify(request) }))
   assert.equal(response.status, 400, 'event transport header cannot open legacy actions')
-  const huge = await h.POST(new Request(`${origin}/api/relay`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-serotine-events': '1' }, body: 'x'.repeat(148000) }))
+  const huge = await h.POST(new Request(`${origin}/api/relay`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-serotine-events': '1' }, body: 'x'.repeat(164000) }))
   assert.equal(huge.status, 413)
 })
 
@@ -308,6 +308,8 @@ test('browser refuses corrupt feed cursors, ordering and identities before advan
   const variants = [
     { ...valid, nextCursor: valid.nextCursor + 1 },
     { ...valid, hasMore: true },
+    { ...valid, closedScopes: ["a".repeat(64)] },
+    { ...valid, relationshipBoundaries: [{ scopeId: "a".repeat(64), boundaryAt: Date.now() }] },
     { ...valid, messages: [...valid.messages, ...valid.messages] },
     { ...valid, messages: valid.messages.map(x => ({ ...x, recipientPubKey: mallory.publicKey })) },
     { ...valid, messages: valid.messages.map(x => ({ ...x, sequence: 0 })) },

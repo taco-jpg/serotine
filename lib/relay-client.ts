@@ -1,5 +1,5 @@
 import type * as Actions from "@/app/actions"
-import { EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, MESSAGE_PAGE_SIZE, PUBLIC_KEY_PATTERN, type RequestProof } from "./protocol"
+import { EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, MESSAGE_PAGE_SIZE, PUBLIC_KEY_PATTERN, type RequestProof, validRetentionScopes } from "./protocol"
 
 type RelayAction = "message:send" | "message:list" | "message:inbox" | "message:ack" | "signal:send" | "signal:read" | "event:send" | "event:sync" | "identity:retire"
 type JsonObject = Record<string, unknown>
@@ -35,6 +35,12 @@ function validResult(action: RelayAction, value: unknown, data: unknown, proof: 
     if (!Array.isArray(value.messages) || value.messages.length > EVENT_FEED_PAGE_SIZE
       || typeof value.nextCursor !== "number" || !Number.isSafeInteger(value.nextCursor) || value.nextCursor < after
       || typeof value.hasMore !== "boolean" || (value.hasMore && value.messages.length !== EVENT_FEED_PAGE_SIZE)) return false
+    const requested = object(data) && Array.isArray(data.retentionScopes) ? data.retentionScopes : []
+    if (value.closedScopes !== undefined && (!validRetentionScopes(value.closedScopes) || !value.closedScopes.every(scope => requested.includes(scope)))) return false
+    if (value.relationshipBoundaries !== undefined && (!Array.isArray(value.relationshipBoundaries) || value.relationshipBoundaries.length > 100
+      || new Set(value.relationshipBoundaries.map(row => object(row) && row.scopeId)).size !== value.relationshipBoundaries.length
+      || !value.relationshipBoundaries.every(row => object(row) && Object.keys(row).length === 2 && requested.includes(row.scopeId)
+        && typeof row.scopeId === "string" && /^[0-9a-f]{64}$/.test(row.scopeId) && typeof row.boundaryAt === "number" && Number.isSafeInteger(row.boundaryAt) && row.boundaryAt > 0))) return false
     let previous = after
     for (const message of value.messages) {
       if (!object(message) || typeof message.id !== "string" || !ID_PATTERN.test(message.id)

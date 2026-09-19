@@ -1,6 +1,7 @@
 import type { Identity } from "./identity"
+import { assertRelayFileRoute } from "./direct-policy"
 import type { AttachmentMeta, GroupState, MessagingContextValue } from "./messaging-types"
-import { MAX_EVENT_PACKET_LENGTH, MAX_MESSAGE_LENGTH, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT, PUBLIC_KEY_PATTERN } from "./protocol"
+import { ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_MESSAGE_LENGTH, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT, PUBLIC_KEY_PATTERN } from "./protocol"
 
 export const MAX_FILE_BYTES = 1024 * 1024 * 1024
 export const LEGACY_MAX_FILE_BYTES = 50 * 1024 * 1024
@@ -178,6 +179,7 @@ function isRemoteAttachmentMeta(meta: AttachmentMeta): boolean {
     && typeof remote.capability === "string" && /^[a-f0-9]{64}$/.test(remote.capability)
     && typeof remote.key === "string" && /^[a-f0-9]{64}$/.test(remote.key)
     && typeof remote.ivPrefix === "string" && /^[a-f0-9]{16}$/.test(remote.ivPrefix)
+    && (remote.messageId === undefined || (typeof remote.messageId === "string" && ID_PATTERN.test(remote.messageId)))
     && (remote.expiresAt === undefined || (Number.isSafeInteger(remote.expiresAt) && remote.expiresAt > 0 && remote.expiresAt <= 8_640_000_000_000_000))
     && Array.isArray(remote.hashes) && remote.hashes.length === meta.chunks
     && remote.hashes.every(hash => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
@@ -196,11 +198,15 @@ export async function stageAttachment(
   sendEvent: MessagingContextValue["sendEvent"], conversationId: string, file: File, identity: Identity,
   kind: AttachmentKind = "file", onProgress?: AttachmentProgress, signal?: AbortSignal, group?: GroupState,
 ): Promise<PreparedAttachment> {
+  assertRelayFileRoute(identity.publicKey, conversationId)
   validateAttachmentFile(file)
   if (conversationId.startsWith("group:") && group?.id !== conversationId) throw new Error("Group details are unavailable. Reopen this conversation before attaching a file.")
   signal?.throwIfAborted()
   const { fileStorageAvailable, stageUpload } = await import("./file-upload-client")
-  if (file.size > 0 && await fileStorageAvailable(signal)) return stageUpload(file, identity, kind, onProgress, signal)
+  if (file.size > 0 && await fileStorageAvailable(signal)) {
+    assertRelayFileRoute(identity.publicKey, conversationId)
+    return stageUpload(file, identity, kind, onProgress, signal, () => assertRelayFileRoute(identity.publicKey, conversationId))
+  }
   const legacyLimit = legacyAttachmentFileLimit(group)
   if (file.size > legacyLimit) throw new Error(`This server needs file storage configured for files up to 1 GB. Its current limit for this conversation is ${formatFileSize(legacyLimit)}.`)
   // Keeping eight prepared base64 arrays could retain hundreds of MiB. The
@@ -213,6 +219,7 @@ export async function stageAttachment(
   onProgress?.(100)
   return { metadata, storage: "local",
     async publish() {
+      assertRelayFileRoute(identity.publicKey, conversationId)
       if (discarded || !original) throw new Error("This file draft was removed. Attach it again.")
       publishRequested = true
       if (!hashed) {

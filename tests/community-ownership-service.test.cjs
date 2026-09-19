@@ -1,10 +1,10 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const { test, before } = require('node:test')
+const { test, before, beforeEach } = require('node:test')
 const ts = require('typescript')
 
-const root = path.join(__dirname, '..'), modules = new Map(), locks = []
+const root = path.join(__dirname, '..'), modules = new Map(), locks = [], retentionRequests = []
 const runtimeNavigator = { locks: { request: async (key, callback) => { locks.push(key); return callback() } } }
 function load(filename) {
   if (!path.extname(filename)) filename += '.ts'
@@ -12,11 +12,26 @@ function load(filename) {
   const module = { exports: {} }; modules.set(filename, module)
   const output = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
   const requireSource = specifier => specifier.startsWith('.') ? load(path.resolve(path.dirname(filename), specifier)) : require(specifier)
-  new Function('require', 'module', 'exports', 'navigator', 'window', output)(requireSource, module, module.exports, runtimeNavigator, { location: { origin: 'https://example.test' } })
+  new Function('require', 'module', 'exports', 'navigator', 'window', 'fetch', output)(requireSource, module, module.exports, runtimeNavigator, { location: { origin: 'https://example.test' } }, async (url, options) => {
+    assert.equal(url, '/api/retention')
+    assert.equal(options.method, 'POST')
+    const { version, action, data, proof } = JSON.parse(options.body)
+    assert.equal(version, 1)
+    assert.equal(action, 'retention:close')
+    assert.equal(await authentication.verifyRequestProof(action, data, proof), true)
+    assert.equal(await retention.validRetentionDescriptor(data.scope), true)
+    assert.equal(data.scope.kind, 'community')
+    assert.equal(data.scope.transfers.at(-1)?.to ?? data.scope.founder, proof.publicKey)
+    retentionRequests.push(data.scope)
+    return Response.json({ success: true, pending: false })
+  })
   return module.exports
 }
 const cryptoHelpers = load(path.join(root, 'lib/crypto.ts'))
 const { CommunityService } = load(path.join(root, 'lib/community-service.ts'))
+const authentication = load(path.join(root, 'lib/request-auth.ts'))
+const retention = load(path.join(root, 'lib/retention-protocol.ts'))
+beforeEach(() => { retentionRequests.length = 0 })
 let alice, bob, charlie
 before(async () => {
   const identity = async () => {
@@ -143,6 +158,8 @@ test('deletion rejects outstanding applicants and future users of still-signed o
   const invite = await owner.service.createInvite(id), applicant = h.client(bob), later = h.client(charlie)
   await applicant.service.joinCommunity(invite)
   await owner.service.deleteCommunity(id)
+  assert.equal(retentionRequests.length, 1)
+  assert.equal(retentionRequests[0].key, id.slice(141))
   assert.equal(applicant.service.model.requests[0].status, 'rejected')
   assert.match(applicant.service.model.requests[0].reason, /deleted/)
   await later.service.joinCommunity(invite)

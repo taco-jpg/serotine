@@ -5,6 +5,7 @@ import { ConnectionDetails } from "./connection-details"
 import { useEffect, useRef, useState } from "react"
 import { Camera, Expand, Loader2, Mic, MicOff, Phone, PhoneOff, RotateCw, Settings2, Shield, Video, VideoOff, Volume2, X } from "lucide-react"
 import { useCalling } from "@/components/calling-provider"
+import { useMessaging } from "@/components/messaging-provider"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
@@ -72,6 +73,8 @@ function CallSettingsDialog() {
 
 export function CallingSurface() {
   const { engine, snapshot, roomSnapshot, error: sharedError, clearError, run, setSettingsOpen } = useCalling()
+  const profiles = useMessaging()
+  const peerLabel = profiles.contacts.find(contact => contact.pub === snapshot?.peer)?.alias || profiles.getProfile(snapshot?.peer || "").displayName || snapshot?.peerLabel || "Contact"
   const error = roomSnapshot && roomSnapshot.phase !== "idle" ? null : sharedError
   const [expanded, setExpanded] = useState(false)
   const [now, setNow] = useState(0)
@@ -131,7 +134,7 @@ export function CallingSurface() {
     {(hasCall || error) && <section aria-label="Current call" className="border-b border-border bg-card px-2 py-1.5 text-card-foreground shadow-sm sm:px-4">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-3 gap-y-1">
         {hasCall && <div className="min-w-0 flex-1 basis-36">
-          <p className="flex min-w-0 items-center gap-2 text-sm font-medium">{snapshot.mode === "video" ? <Video className="size-4 shrink-0" /> : <Phone className="size-4 shrink-0" />}<Link className="truncate hover:underline" href={`/chat/${snapshot.peer}`}>{snapshot.peerLabel}</Link></p>
+          <p className="flex min-w-0 items-center gap-2 text-sm font-medium">{snapshot.mode === "video" ? <Video className="size-4 shrink-0" /> : <Phone className="size-4 shrink-0" />}<Link className="truncate hover:underline" href={`/chat/${snapshot.peer}`}>{peerLabel}</Link></p>
           <p role="status" aria-live={snapshot.phase === "incoming" ? "assertive" : "polite"} className="text-xs text-muted-foreground">{labels[snapshot.phase]}{snapshot.phase === "incoming" ? ` · ${snapshot.mode === "video" ? "Video" : "Voice"}` : snapshot.connectedAt ? ` · ${duration}` : ""}</p>
         </div>}
         <div className="flex max-w-full flex-wrap items-center gap-1">
@@ -151,7 +154,7 @@ export function CallingSurface() {
           {finished && <Button type="button" variant="ghost" size="icon" className="size-11" aria-label="Dismiss call status" onClick={() => { engine.dismiss(); clearError() }}><X /></Button>}
         </div>
         {snapshot.phase === "incoming" && <p className="w-full text-xs text-muted-foreground">Answer to review your devices. Your microphone and camera are off until you choose to answer.</p>}
-        {snapshot.phase === "ringing" && <p className="w-full text-xs text-muted-foreground">Waiting for {snapshot.peerLabel} to answer in Serotine. Calls need both pages open.</p>}
+        {snapshot.phase === "ringing" && <p className="w-full text-xs text-muted-foreground">Waiting for {peerLabel} to answer in Serotine. Calls need both pages open.</p>}
         {["incoming", "ringing"].includes(snapshot.phase) && soundStatus !== "ready" && <div className="flex w-full flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{soundStatus === "blocked" ? "Your browser has paused call sounds." : "Call sounds are unavailable in this browser. The call controls still work."}</span>{soundStatus === "blocked" && <Button type="button" variant="outline" className="min-h-11" onClick={() => ringer.current?.unlock()}><Volume2 />Enable call sounds</Button>}</div>}
         {(snapshot.error || error) && <p role="alert" className="w-full break-words text-xs text-destructive">{error || snapshot.error}</p>}
         <ConnectionDetails connection={snapshot.connection} />
@@ -162,7 +165,7 @@ export function CallingSurface() {
 
     <Dialog open={preflight} onOpenChange={open => { if (!open) void run(() => engine.end()) }}>
       <DialogContent className="max-h-[90dvh] overflow-y-auto">
-        <DialogHeader><DialogTitle>{snapshot.direction === "incoming" ? "Answer" : "Call"} {snapshot.peerLabel}</DialogTitle><DialogDescription>Review your devices before connecting. No media is sent until the call is accepted.</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>{snapshot.direction === "incoming" ? "Answer" : "Call"} {peerLabel}</DialogTitle><DialogDescription>Review your devices before connecting. No media is sent until the call is accepted.</DialogDescription></DialogHeader>
         {busy ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Checking the calling connection and preparing your {snapshot.mode === "video" ? "microphone and camera" : "microphone"}. Allow device access if your browser asks.</p> : <>
           {snapshot.cameraEnabled ? <StreamVideo stream={snapshot.localStream} label="Your camera preview · Only you can see this" mirror /> : <p className="flex min-h-24 items-center justify-center gap-2 rounded-md border border-border bg-muted text-sm text-muted-foreground"><VideoOff className="size-5" />Camera off</p>}
           <DeviceControls />
@@ -177,12 +180,12 @@ export function CallingSurface() {
 
     <Dialog open={expanded && active} onOpenChange={setExpanded}>
       <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl">
-        <DialogHeader><DialogTitle>Call with {snapshot.peerLabel}</DialogTitle><DialogDescription>{labels[snapshot.phase]} · {duration}. Collapse this view to keep chatting.</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>Call with {peerLabel}</DialogTitle><DialogDescription>{labels[snapshot.phase]} · {duration}. Collapse this view to keep chatting.</DialogDescription></DialogHeader>
         <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-          {snapshot.remoteCameraEnabled ? <StreamVideo stream={snapshot.remoteStream} label={snapshot.peerLabel} /> : <div className="flex min-h-28 items-center justify-center gap-2 rounded-md border border-border bg-muted p-4 text-sm text-muted-foreground"><VideoOff className="size-5 shrink-0" /><span>{snapshot.peerLabel} · Camera off</span></div>}
+          {snapshot.remoteCameraEnabled ? <StreamVideo stream={snapshot.remoteStream} label={peerLabel} /> : <div className="flex min-h-28 items-center justify-center gap-2 rounded-md border border-border bg-muted p-4 text-sm text-muted-foreground"><VideoOff className="size-5 shrink-0" /><span>{peerLabel} · Camera off</span></div>}
           {snapshot.cameraEnabled ? <StreamVideo stream={snapshot.localStream} label="You" mirror /> : <div className="flex min-h-28 items-center justify-center gap-2 rounded-md border border-border bg-muted p-4 text-sm text-muted-foreground"><VideoOff className="size-5" />Your camera is off</div>}
         </div>
-        <p className="text-xs text-muted-foreground">{snapshot.peerLabel}: {snapshot.remoteMicrophoneMuted ? "Microphone muted" : "Microphone on"}</p>
+        <p className="text-xs text-muted-foreground">{peerLabel}: {snapshot.remoteMicrophoneMuted ? "Microphone muted" : "Microphone on"}</p>
         <DeviceControls />
         {(error || snapshot.error) && <p role="alert" className="text-sm text-destructive">{error || snapshot.error}</p>}
         {snapshot.notice && <p role="status" className="text-sm text-muted-foreground">{snapshot.notice}</p>}

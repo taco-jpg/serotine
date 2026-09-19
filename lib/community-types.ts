@@ -1,3 +1,4 @@
+import type { SharedMessages } from "./shared-messages"
 import type { AttachmentMeta, MessageRecord, NotificationMode } from "./messaging-types"
 
 export type CommunityAdmission = "direct" | "approval"
@@ -31,7 +32,7 @@ export type CommunityEventData =
   | { type: "decision"; requestId: string; applicant: string; status: "rejected"; reason?: string; commandId?: string; stateRef?: string; transfers?: CommunityTransfer[] }
   | { type: "command"; epoch: number; action: CommunityCommandAction; target: string; requestId?: string; changes?: CommunitySettingsChanges; stateRef?: string }
   | { type: "leave"; epoch: number; stateRef?: string }
-  | { type: "message"; epoch: number; channelId: string; content: string; replyTo?: string; mentions?: string[]; stateRef?: string }
+  | { type: "message"; epoch: number; channelId: string; content: string; shared?: SharedMessages; replyTo?: string; mentions?: string[]; stateRef?: string }
   | { type: "attachment"; epoch: number; channelId: string; attachment: AttachmentMeta; content?: string; replyTo?: string; mentions?: string[]; stateRef?: string }
   | { type: "attachment-chunk"; epoch: number; channelId: string; attachmentId: string; index: number; data: string; stateRef?: string }
   | { type: "edit"; epoch: number; channelId: string; targetId: string; content: string; stateRef?: string }
@@ -44,7 +45,7 @@ export type CommunityEventData =
 
 export interface CommunityMessage extends MessageRecord { channelId: string; hidden: boolean }
 export interface CommunityRecord extends CommunityState {
-  joined: boolean; effectiveMembers: string[]; unreadCount: number; updatedAt: number; lastMessage?: CommunityMessage
+  joined: boolean; effectiveMembers: string[]; unreadCount: number; updatedAt: number; activityAt?: number; lastMessage?: CommunityMessage
   notificationMode: NotificationMode; channelUnread: Record<string, number>
 }
 export interface CommunityJoinRequest {

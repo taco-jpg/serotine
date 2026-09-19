@@ -2,7 +2,7 @@ import type { D1DatabaseBinding, D1Result, D1Statement } from './db'
 
 /** The existing SQL arbitration stays intact; only these tables move to the DO. */
 export const REALTIME_TABLES = ['RequestNonce', 'RelaySignal', 'CallPresence', 'CallSession', 'CallSignal',
-  'CallRoomAuthority', 'CallRoomMember', 'CallRoomSignal'] as const
+  'CallRoomAuthority', 'CallRoomMember', 'CallRoomSignal', 'DirectSignal'] as const
 const realtime = new RegExp(`\\b(${REALTIME_TABLES.join('|')})\\b`, 'i')
 export interface RealtimeNamespace {
   idFromName(name: string): unknown

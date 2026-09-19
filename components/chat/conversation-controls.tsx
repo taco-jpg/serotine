@@ -89,7 +89,7 @@ export function EditMessageDialog({ message, onClose, onSave }: {
 }
 
 export interface MemberLabel { pub: string; label: string }
-export function GroupSettings({ groupName, members, candidates, canManage, left, ownerPub, myPub, onRename, onAdd, onRemove, onLeave }: {
+export function GroupSettings({ groupName, members, candidates, canManage, left, ownerPub, myPub, onRename, onAdd, onRemove, onLeave, onDissolve, pendingInvitations, onRevoke }: {
   groupName: string
   members: MemberLabel[]
   candidates: MemberLabel[]
@@ -101,6 +101,9 @@ export function GroupSettings({ groupName, members, candidates, canManage, left,
   onAdd: (pub: string) => Promise<void>
   onRemove: (pub: string) => Promise<void>
   onLeave: () => Promise<void>
+  onDissolve: () => Promise<void>
+  pendingInvitations: Array<{ id: string; label: string }>
+  onRevoke: (id: string) => Promise<void>
 }) {
   const [name, setName] = useState(groupName)
   const [newPub, setNewPub] = useState("")
@@ -121,9 +124,10 @@ export function GroupSettings({ groupName, members, candidates, canManage, left,
         if (members.some(member => member.pub === address)) throw new Error("This person is already in the group.")
         setNewPub(address); setError("")
       }} />
-      <Input id="group-add-member" list="group-contact-candidates" required disabled={busy} value={newPub} onChange={event => setNewPub(event.target.value)} placeholder="Scan a QR code or paste an address or link" maxLength={2048} spellCheck={false} autoComplete="off" /><datalist id="group-contact-candidates">{candidates.map(contact => <option key={contact.pub} value={contact.pub}>{contact.label}</option>)}</datalist><p className="text-xs text-muted-foreground">Review the address, then choose Add to group.</p><Button type="submit" variant="outline" disabled={busy || !newPub.trim()}><Plus className="size-4" />Add to group</Button></form>}
+      <Input id="group-add-member" list="group-contact-candidates" required disabled={busy} value={newPub} onChange={event => setNewPub(event.target.value)} placeholder="Scan a QR code or paste an address or link" maxLength={2048} spellCheck={false} autoComplete="off" /><datalist id="group-contact-candidates">{candidates.map(contact => <option key={contact.pub} value={contact.pub}>{contact.label}</option>)}</datalist><p className="text-xs text-muted-foreground">They must accept before becoming a member or receiving group messages. Invitations expire after seven days.</p><Button type="submit" variant="outline" disabled={busy || !newPub.trim()}><Plus className="size-4" />Send invitation</Button></form>}
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-    {left ? <p className="text-sm text-muted-foreground">{members.length === 0 ? "This group is closed. Saved messages are still available here." : "You left this group. Saved messages are still available here."}</p> : <div className="border-t border-border pt-4">{confirmLeave ? <div className="space-y-3"><p className="text-sm text-foreground">{canManage ? "Close this group for everyone? All members will stop receiving group messages. Saved history remains on each device." : "Leave this group? Your saved messages will remain on this device."}</p><div className="flex gap-2"><Button variant="outline" disabled={busy} onClick={() => setConfirmLeave(false)}>Stay</Button><Button variant="destructive" disabled={busy} onClick={() => void act(onLeave)}>{busy && <Loader2 className="size-4 animate-spin" />}{canManage ? "Close group" : "Leave group"}</Button></div></div> : <Button variant="outline" className="text-destructive" onClick={() => setConfirmLeave(true)}>{canManage ? "Close group" : "Leave group"}</Button>}</div>}
+    {canManage && pendingInvitations.length > 0 && <div><h3 className="mb-3 text-sm font-medium">Pending invitations · {pendingInvitations.length}</h3><ul className="space-y-2">{pendingInvitations.map(invitation => <li key={invitation.id} className="flex items-center justify-between gap-2 rounded-lg border border-border p-3 text-sm"><span>{invitation.label}</span><Button size="sm" variant="outline" disabled={busy} onClick={() => void act(() => onRevoke(invitation.id))}>Revoke</Button></li>)}</ul></div>}
+    {left ? <p className="text-sm text-muted-foreground">{members.length === 0 ? "This group is closed. Saved messages are still available here." : "You left this group. Saved messages are still available here."}</p> : <div className="border-t border-border pt-4">{confirmLeave ? <div className="space-y-3"><p className="text-sm text-foreground">{canManage ? "Permanently dissolve this group? All invitations become invalid and no one can send more messages under this group address. Saved copies on other devices cannot be recalled." : "Leave this group? Your saved messages will remain on this device."}</p><div className="flex gap-2"><Button variant="outline" disabled={busy} onClick={() => setConfirmLeave(false)}>Stay</Button><Button variant="destructive" disabled={busy} onClick={() => void act(canManage ? onDissolve : onLeave)}>{busy && <Loader2 className="size-4 animate-spin" />}{canManage ? "Dissolve group" : "Leave group"}</Button></div></div> : <Button variant="outline" className="text-destructive" onClick={() => setConfirmLeave(true)}>{canManage ? "Dissolve group" : "Leave group"}</Button>}</div>}
     <Dialog open={!!remove} onOpenChange={open => { if (!open && !busy) setRemove(null) }}><DialogContent><DialogHeader><DialogTitle>Remove group member?</DialogTitle><DialogDescription>{remove?.label} will no longer receive new group messages.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setRemove(null)}>Cancel</Button><Button variant="destructive" disabled={busy} onClick={() => void act(async () => { if (remove) { await onRemove(remove.pub); setRemove(null) } })}>Remove member</Button></DialogFooter></DialogContent></Dialog>
   </div>
 }

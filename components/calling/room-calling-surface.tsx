@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { Camera, Expand, Loader2, Mic, MicOff, Phone, PhoneOff, RotateCw, Settings2, Shield, Users, Video, VideoOff, Volume2, X } from "lucide-react"
 import { useCalling } from "@/components/calling-provider"
 import { roomCallActive } from "@/components/calling/room-call-actions"
+import { useMessaging } from "@/components/messaging-provider"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
@@ -84,6 +85,8 @@ function RoomDeviceControls() {
 }
 
 export function RoomCallingSurface() {
+  const profiles = useMessaging()
+  const profileLabel = (pub: string, fallback: string) => profiles.contacts.find(contact => contact.pub === pub)?.alias || profiles.getProfile(pub).displayName || fallback
   const { roomEngine: engine, roomSnapshot: snapshot, error, clearError, run, setSettingsOpen } = useCalling()
   const [expanded, setExpanded] = useState(false)
   const [now, setNow] = useState(0)
@@ -128,7 +131,7 @@ export function RoomCallingSurface() {
         {snapshot.notice && <p role="status" className="basis-full break-words text-xs text-muted-foreground">{snapshot.notice}</p>}
         {(error || snapshot.error) && <p role="alert" className="basis-full break-words text-xs text-destructive">{error || snapshot.error}</p>}
       </div>
-      {snapshot.participants.map(participant => <RoomAudio key={`${participant.publicKey}:${participant.sessionId}`} participantId={`${participant.publicKey}:${participant.sessionId}`} stream={participant.stream} label={participant.label} elements={audioElements.current} onBlocked={reportAudioBlocked} />)}
+      {snapshot.participants.map(participant => <RoomAudio key={`${participant.publicKey}:${participant.sessionId}`} participantId={`${participant.publicKey}:${participant.sessionId}`} stream={participant.stream} label={profileLabel(participant.publicKey, participant.label)} elements={audioElements.current} onBlocked={reportAudioBlocked} />)}
     </section>
 
     <Dialog open={preflight} onOpenChange={open => { if (!open) void run(() => engine.leave()) }}>
@@ -151,7 +154,7 @@ export function RoomCallingSurface() {
         <DialogHeader><DialogTitle>{snapshot.targetLabel}</DialogTitle><DialogDescription>{count}/8 participants · {duration}. Collapse this view to keep chatting.</DialogDescription></DialogHeader>
         <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <ParticipantTile stream={snapshot.localStream} label="You" microphoneMuted={snapshot.microphoneMuted} cameraEnabled={snapshot.cameraEnabled} status={snapshot.phase === "joining" ? "Joining call" : "In call"} local voiceOnly={voiceOnly} />
-          {snapshot.participants.map(participant => <ParticipantTile key={`${participant.publicKey}:${participant.sessionId}`} stream={participant.stream} label={participant.label} microphoneMuted={participant.microphoneMuted} cameraEnabled={participant.cameraEnabled} connection={participant.connection} status={participantLabels[participant.phase]} error={participant.error} voiceOnly={voiceOnly} />)}
+          {snapshot.participants.map(participant => <ParticipantTile key={`${participant.publicKey}:${participant.sessionId}`} stream={participant.stream} label={profileLabel(participant.publicKey, participant.label)} microphoneMuted={participant.microphoneMuted} cameraEnabled={participant.cameraEnabled} connection={participant.connection} status={participantLabels[participant.phase]} error={participant.error} voiceOnly={voiceOnly} />)}
         </div>
         {snapshot.participants.length === 0 && snapshot.phase === "joined" && <p role="status" className="text-sm text-muted-foreground">You are the first here. Other members can join from the {target?.kind === "channel" ? "voice channel" : "group’s call menu"}.</p>}
         <RoomDeviceControls />

@@ -197,7 +197,7 @@ test('event streaming caps stay small with absent or false Content-Length and re
     const response = await h.POST(new Request(`${origin}/api/relay`, { method: 'POST', headers, body: stream, duplex: 'half' }))
     assert.equal(response.status, 413)
     assert.equal(cancelled, true)
-    assert.ok(pulls <= 6, 'the event stream must stop near 144 KiB, before the legacy file allowance')
+    assert.ok(pulls <= 6, 'the event stream must stop near 160 KiB, before the legacy file allowance')
   }
   assert.equal(h.calls.length, 0)
   const [alice, bob] = await Promise.all([h.identity(), h.identity()])
@@ -224,7 +224,7 @@ test('event and signal bodies cannot borrow the legacy file allowance by omittin
   const [alice, bob] = await Promise.all([h.identity(), h.identity()])
   const packet = { recipientPubKey: bob.publicKey, encryptedData: 'a'.repeat(100) }
   for (const [action, data, limit] of [
-    ['event:send', { ...packet, id: crypto.randomUUID() }, 144 * 1024],
+    ['event:send', { ...packet, id: crypto.randomUUID() }, 160 * 1024],
     ['signal:send', packet, 80 * 1024],
   ]) {
     const serialized = JSON.stringify(await h.signed(action, data, alice))

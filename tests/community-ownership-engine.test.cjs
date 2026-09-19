@@ -7,6 +7,7 @@ const ts = require('typescript')
 const root = path.join(__dirname, '..')
 const modules = new Map(), stores = new Map(), prefs = new Map(), cursors = new Map()
 const packets = [], attempts = [], engines = []
+const closedScopes = new Set()
 const runtimeWindow = new EventTarget()
 runtimeWindow.location = { origin: 'https://serotine.chat' }
 let rejectRecipient, failNextUpgrade = false
@@ -47,6 +48,7 @@ const relay = {
   storeEncryptedEvent: async (data, proof) => {
     assert.equal(await authentication.verifyRequestProof('event:send', data, proof), true)
     attempts.push({ owner: proof.publicKey, ...data })
+    if (data.retention && closedScopes.has(await retention.retentionScopeId(data.retention))) return { success: false, error: 'Conversation retention has ended' }
     if (data.recipientPubKey === rejectRecipient) return { success: false, error: 'Recipient relay unavailable' }
     if (!packets.some(packet => packet.senderPubKey === proof.publicKey && packet.recipientPubKey === data.recipientPubKey && packet.id === data.id)) {
       packets.push({ ...data, senderPubKey: proof.publicKey, sequence: packets.length + 1, createdAt: Date.now() })
@@ -55,8 +57,9 @@ const relay = {
   },
   getEventFeed: async (data, proof) => {
     assert.equal(await authentication.verifyRequestProof('event:sync', data, proof), true)
-    const messages = packets.filter(packet => packet.sequence > (data.after || 0) && (packet.senderPubKey === proof.publicKey || packet.recipientPubKey === proof.publicKey))
-    return { success: true, messages, nextCursor: messages.at(-1)?.sequence || data.after || 0, hasMore: false }
+    const live = []; for (const packet of packets) if (!packet.retention || !closedScopes.has(await retention.retentionScopeId(packet.retention))) live.push(packet)
+    const messages = live.filter(packet => packet.sequence > (data.after || 0) && (packet.senderPubKey === proof.publicKey || packet.recipientPubKey === proof.publicKey))
+    return { success: true, messages, nextCursor: messages.at(-1)?.sequence || data.after || 0, hasMore: false, closedScopes: (data.retentionScopes ?? []).filter(scope => closedScopes.has(scope)) }
   },
   getLegacyInbox: async () => ({ success: true, messages: [], nextCursor: null }),
   deleteMessage: async () => ({ success: true }),
@@ -71,6 +74,7 @@ function load(filename) {
   function sourceRequire(specifier) {
     if (specifier === './messaging-store') return store
     if (specifier === './relay-client') return relay
+    if (specifier === './retention-client') return { requestRetention: async (_identity, action, scope) => { assert.equal(action, 'retention:close'); closedScopes.add(await retention.retentionScopeId(scope)); return { pending: false } } }
     if (specifier === './storage') return { exportAllMessagesFromStorage: async () => [], migrateLegacyHistory: async () => {}, deleteConversationHistoryFromStorage: async () => {} }
     if (specifier === './message-notifications') return { notifyIncoming() {}, requestMessagingNotifications: async () => 'denied' }
     if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
@@ -83,6 +87,7 @@ const cryptography = load(path.join(root, 'lib/crypto.ts'))
 const authentication = load(path.join(root, 'lib/request-auth.ts'))
 const messaging = load(path.join(root, 'lib/messaging.ts'))
 const protocol = load(path.join(root, 'lib/community-protocol.ts'))
+const retention = load(path.join(root, 'lib/retention-protocol.ts'))
 let alice, bob, charlie
 before(async () => {
   async function identity() {
@@ -91,7 +96,7 @@ before(async () => {
   }
   ;[alice, bob, charlie] = await Promise.all([identity(), identity(), identity()])
 })
-beforeEach(() => { stores.clear(); prefs.clear(); cursors.clear(); packets.length = attempts.length = 0; rejectRecipient = undefined; failNextUpgrade = false })
+beforeEach(() => { closedScopes.clear(); stores.clear(); prefs.clear(); cursors.clear(); packets.length = attempts.length = 0; rejectRecipient = undefined; failNextUpgrade = false })
 afterEach(() => { for (const engine of engines.splice(0)) engine.dispose() })
 async function engine(identity) {
   const instance = new messaging.MessagingEngine(identity)
@@ -230,10 +235,12 @@ test('deletion propagates, cancels queued messages, and survives replay and back
     local: false, receivedAt: Date.now(), delivered: [] })
   await member.instance.refresh()
   assert.equal(community(member, id).deleted, true)
-  assert.notEqual(community(member, id).name, 'Must not resurrect')
+  assert.equal(community(member, id).joined, false)
+  assert.ok(member.instance.preferences.closedRetention.includes(id), 'terminal sync is persisted even without a relayed deletion event')
+  assert.equal([...recordsFor(bob.publicKey).values()].some(row => row.event.payload.community?.state?.deleted), false, 'offline member learned deletion solely through authenticated status')
 
   const actualStore = load(path.join(root, 'lib/messaging-store.ts'))
-  const snapshot = { version: 3, owner: bob.publicKey, preferences: defaults(), events: [...recordsFor(bob.publicKey).values()].reverse() }
+  const snapshot = { version: 3, owner: bob.publicKey, preferences: structuredClone(member.instance.preferences), events: [...recordsFor(bob.publicKey).values()].reverse() }
   const validated = await actualStore.validateMessagingSnapshot(structuredClone(snapshot), bob.publicKey)
   const restored = protocol.buildCommunityModel(validated.events, bob.publicKey, validated.preferences)
   assert.equal(restored.communities.find(value => value.id === id)?.deleted, true)
@@ -281,4 +288,22 @@ test('a revoked co-owner cannot apply a command that was sent before revocation'
   assert.equal(community(coOwner, id).name, 'Study hall')
   assert.deepEqual(community(coOwner, id).coOwners, [])
   await assert.rejects(coOwner.service.updateCommunity(id, { name: 'No permission remains' }), /owner/i)
+})
+
+
+test('authenticated relationship boundaries reach persistent preferences for profile revocation', async t => {
+  const owner = await engine(alice)
+  await owner.instance.sendText(bob.publicKey, 'Known relationship')
+  await sync(owner)
+  const hash = await retention.retentionScopeId(retention.retentionDescriptor(bob.publicKey, alice.publicKey, Date.now()))
+  const original = relay.getEventFeed
+  t.mock.method(relay, 'getEventFeed', async (data, proof) => {
+    const result = await original(data, proof)
+    assert.ok(data.retentionScopes.includes(hash))
+    return { ...result, relationshipBoundaries: [{ scopeId: hash, boundaryAt: 12345 }] }
+  })
+  await sync(owner)
+  assert.equal(owner.instance.preferences.relationshipBoundaries[bob.publicKey], 12345)
+  const reload = await engine(alice)
+  assert.equal(reload.instance.preferences.relationshipBoundaries[bob.publicKey], 12345)
 })

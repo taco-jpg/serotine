@@ -3,6 +3,7 @@
 import { useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Archive, ArchiveRestore, Loader2, MoreHorizontal, Trash2 } from "lucide-react"
+import { ProfileSharingDialog, ProfileViewDialog } from "@/components/profile/profile-settings"
 import { useMessaging } from "@/components/messaging-provider"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -21,6 +22,8 @@ export function ConversationActions({ conversation, disabled = false, children, 
 }) {
   const messaging = useMessaging()
   const router = useRouter()
+  const [sharingOpen, setSharingOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleteError, setDeleteError] = useState("")
@@ -65,11 +68,14 @@ export function ConversationActions({ conversation, disabled = false, children, 
         openDeleteAfterMenu.current = false
         setDeleteError(""); setDeleteOpen(true)
       }}>
+        {conversation.kind === "direct" && <><DropdownMenuItem onSelect={() => setProfileOpen(true)}>View profile</DropdownMenuItem>{!conversation.request && !conversation.blocked && <DropdownMenuItem onSelect={() => setSharingOpen(true)}>Profile sharing</DropdownMenuItem>}</>}
         <DropdownMenuItem disabled={busy} onSelect={() => void archive()}>{conversation.archived ? <ArchiveRestore /> : <Archive />}{conversation.archived ? restoreLabel : "Archive chat"}</DropdownMenuItem>
         <DropdownMenuItem disabled={busy} variant="destructive" onSelect={() => { openDeleteAfterMenu.current = true }}><Trash2 />Delete chat…</DropdownMenuItem>
         {children && <><DropdownMenuSeparator />{children}</>}
       </DropdownMenuContent>
     </DropdownMenu>
+    {sharingOpen && <ProfileSharingDialog peer={conversation.id} onClose={() => setSharingOpen(false)} />}
+    {profileOpen && <ProfileViewDialog peer={conversation.id} onClose={() => setProfileOpen(false)} />}
     <Dialog open={deleteOpen} onOpenChange={open => { if (!actionLock.current) setDeleteOpen(open) }}>
       <DialogContent showCloseButton={!busy} onOpenAutoFocus={event => { event.preventDefault(); cancelDelete.current?.focus() }}>
         <DialogHeader><DialogTitle>Delete this chat?</DialogTitle><DialogDescription className="break-words">Delete the saved messages and files for {conversation.name} from this device. This cannot be undone.</DialogDescription></DialogHeader>

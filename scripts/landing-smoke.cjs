@@ -40,7 +40,7 @@ async function main() {
       })
       for (const key of ['context', 'message', 'composer']) assert.ok(firstView[key] <= firstView.viewport, `${width}×${height}: ${key} not in first viewport: ${JSON.stringify(firstView)}`)
       const background = await page.locator('#serotine-landing').evaluate(n => getComputedStyle(n).backgroundColor)
-      assert.equal(background, theme === 'light' ? 'rgb(246, 244, 239)' : 'rgb(32, 30, 35)')
+      assert.equal(background, await page.locator('body').evaluate(node => getComputedStyle(node).backgroundColor), 'landing shares the active product canvas')
       if (screenshots && [390, 1440].includes(width)) await page.screenshot({ path: path.join(screenshots, `${theme}-${width}-first.png`) })
       await page.locator('[data-identity] > summary').click()
       await page.getByText('Display-only identity, not a contact you can message.', { exact: true }).waitFor({ state: 'visible' })

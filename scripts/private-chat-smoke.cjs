@@ -97,7 +97,9 @@ async function main() {
 
     await ui.getByRole('button', { name: 'Private chat settings', exact: true }).click()
     await ui.getByRole('button', { name: 'Check peer support', exact: true }).click()
-    await settle(() => ui.locator('#private-chat-duration').isEnabled(), 'private UI capability negotiation')
+    // Off remains available before negotiation, so the select itself is enabled.
+    // Wait for the authenticated timer choices rather than the safety escape hatch.
+    await settle(() => ui.locator('#private-chat-duration option[value="300"]').evaluate(option => !option.matches(':disabled')), 'private UI capability negotiation')
     await ui.locator('#private-chat-duration').selectOption('300')
     await ui.getByRole('button', { name: 'Save timer', exact: true }).click()
     await ui.getByRole('dialog').waitFor({ state: 'hidden' })

@@ -1,3 +1,5 @@
+import { retentionDescriptor } from "./retention-protocol"
+import { requestRetention } from "./retention-client"
 import type { Identity } from "./identity"
 import type { EventKind, EventPayload, MessagingEvent, MessagingPreferences, StoredEvent } from "./messaging-types"
 import { ATTACHMENT_CHUNK_BYTES } from "./attachments"
@@ -121,8 +123,16 @@ export class CommunityService {
     return peers.length ? peers : [this.address]
   }
   private async prepare(id: string, data: CommunityEventData, recipients: string[]): Promise<MessagingEvent> {
-    const event = await this.host.sign({ version: 3, id: crypto.randomUUID(), author: this.address,
-      conversationId: id, recipients: [...new Set(recipients)], timestamp: Date.now(), kind: "community", payload: { community: data } })
+    const eventId = data.type === "attachment" ? data.attachment.remote?.messageId ?? crypto.randomUUID() : crypto.randomUUID()
+    const timestamp = Date.now()
+    if (data.type === "attachment" && data.attachment.remote) {
+      const { registerAttachmentDelivery } = await import("./file-upload-client")
+      data = { ...data, attachment: await registerAttachmentDelivery(this.host.identity, data.attachment, eventId, [...new Set(recipients)],
+        retentionDescriptor(id, this.address, timestamp, undefined, this.community(id).transfers)) }
+      this.assertActive()
+    }
+    const event = await this.host.sign({ version: 3, id: eventId, author: this.address,
+      conversationId: id, recipients: [...new Set(recipients)], timestamp, kind: "community", payload: { community: data } })
     if (!await validateCommunityEvent(event)) throw new Error("This community update is invalid or too large.")
     return event
   }
@@ -315,6 +325,8 @@ export class CommunityService {
     await this.rejectPending(prior, "This community has been deleted.")
     prior = this.owner(id)
     const next = this.nextState(prior)
+    await requestRetention(this.host.identity, "retention:close", retentionDescriptor(id, this.address, Date.now(), undefined, prior.transfers))
+    this.assertActive()
     next.deleted = true
     next.coOwners = []
     next.moderators = []
@@ -413,12 +425,13 @@ export class CommunityService {
     if (!target) throw new Error("This message is no longer available in this channel.")
     const original = index.originals.get(key)
     if (!original || (original.author !== this.address && !original.recipients.includes(this.address))) throw new Error("This message is not part of your community history.")
-    if (kind === "edit" && (target.senderPubKey !== this.address || target.attachment || target.poll)) throw new Error("You can edit your own ordinary text messages.")
+    if (kind === "edit" && (target.senderPubKey !== this.address || target.attachment || target.poll || target.shared)) throw new Error("You can edit your own ordinary text messages.")
     if (kind === "vote" && (!target.poll || !Number.isInteger(payload.option) || payload.option! < 0 || payload.option! >= target.poll.options.length)) throw new Error("Choose an available poll option.")
     if (kind === "receipt" && target.senderPubKey === this.address) throw new Error("You cannot acknowledge your own message.")
     return target
   }
   sendEvent = async (id: string, channelId: string, kind: EventKind, payload: EventPayload): Promise<string> => this.locked(id, async () => {
+    if (kind === "receipt") throw new Error("Channel reads remain on this device; receipts are not sent.")
     const community = this.community(id)
     if (!["message", "attachment", "attachment-chunk", "edit", "pin", "poll", "vote", "receipt"].includes(kind)) throw new Error("This feature is not available in community channels.")
     if (!payload || typeof payload !== "object" || Array.isArray(payload) || ["type", "epoch", "channelId", "stateRef"].some(key => key in payload)) throw new Error("This community message is invalid.")

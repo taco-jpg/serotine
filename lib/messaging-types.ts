@@ -1,29 +1,37 @@
+import type { ProfileField, ProfileState, ProfileValues, ProfileWire } from "./profiles"
+import type { GroupAcceptance, GroupInvitation, GroupInvitationPreview } from "./group-admission"
 import type { CommunityEventData } from "./community-types"
 import type { Identity, Contact } from "./identity"
 import type { CallHistorySnapshot } from "./call-history"
 import type { PluginAvailability, PluginCapabilities, PluginCapability, PluginState } from "./plugins"
+import type { SharedMessages, ShareSource, ShareDestination } from "./shared-messages"
+import type { DeliveryMode, DirectStatus } from "./direct-protocol"
 
 export type NotificationMode = "all" | "mentions" | "muted"
 export type DeliveryStatus = "pending" | "sent" | "delivered" | "read" | "failed" | "received"
 export type PrivateTtlSeconds = 0 | 300 | 3600 | 86400
-export interface GroupState { id: string; name: string; admin: string; members: string[]; epoch: number; updatedAt: number; signature: string }
+export interface GroupState { id: string; name: string; admin: string; members: string[]; epoch: number; updatedAt: number; signature: string; protocol?: 2; admissions?: GroupAcceptance[]; legacyMembers?: string[]; consumedInvitations?: string[]; deleted?: boolean }
 /** This descriptor is only carried inside an encrypted, signed messaging event. */
 export interface RemoteAttachment {
   version: 1; chunkBytes: number; capability: string; key: string; ivPrefix: string; hashes: string[]; expiresAt?: number
+  messageId?: string
 }
 export interface AttachmentMeta { id: string; name: string; mime: string; size: number; chunks: number; sha256: string; kind: "file" | "voice"; duration?: number; remote?: RemoteAttachment }
 export interface PollState { question: string; options: string[]; votes: Record<string, number> }
 export interface MessageRecord {
+  route?: "direct-only"
   id: string; conversationId: string; senderPubKey: string; content: string; timestamp: number
   delivery: DeliveryStatus; replyTo?: string; editedAt?: number; pinned: boolean
-  attachment?: AttachmentMeta; poll?: PollState; mentions?: string[]; error?: string
+  attachment?: AttachmentMeta; poll?: PollState; mentions?: string[]; error?: string; shared?: SharedMessages
   deliveredTo: string[]; readBy: string[]
   private?: boolean; expiresAt?: number; secret?: boolean
 }
 export interface ConversationRecord {
   id: string; kind: "direct" | "group" | "self"; name: string; members: string[]
-  unreadCount: number; lastMessage?: MessageRecord; updatedAt: number; notificationMode: NotificationMode
+  unreadCount: number; lastMessage?: MessageRecord; updatedAt: number; activityAt?: number; notificationMode: NotificationMode
   blocked: boolean; request: boolean; archived: boolean; group?: GroupState; sendError?: string
+  invitation?: GroupInvitationPreview
+  invitationStatus?: "pending" | "joining"
   privateTtlSeconds?: PrivateTtlSeconds
 }
 export interface ConversationDeletion {
@@ -34,11 +42,20 @@ export interface MessageDeletion extends ConversationDeletion {
   groupEvents?: Array<{ key: string; group: GroupState; receivedAt: number; timestamp: number; sequence?: number }>
 }
 export interface MessagingPreferences {
+  directOnly?: string[]
+  terminatedGroups?: string[]
+  closedRetention?: string[]
+  relationshipBoundaries?: Record<string, number>
   accepted: string[]; blocked: string[]; notifications: Record<string, NotificationMode>; readAt: Record<string, number>; readReceipts: boolean
   archived: string[]; deleted: Record<string, ConversationDeletion>; deletedMessages: Record<string, MessageDeletion>
 }
-export type EventKind = "community" | "message" | "edit" | "pin" | "poll" | "vote" | "receipt" | "group" | "leave" | "attachment" | "attachment-chunk" | "private-settings" | "private-message" | "private-destroy" | "plugin-capabilities"
+export type EventKind = "community" | "message" | "edit" | "pin" | "poll" | "vote" | "receipt" | "group" | "leave" | "attachment" | "attachment-chunk" | "private-settings" | "private-message" | "private-destroy" | "plugin-capabilities" | "profile" | "group-invite" | "group-accept" | "group-decline" | "group-revoke" | "group-dissolve"
 export interface EventPayload {
+  shared?: SharedMessages
+  profile?: ProfileWire
+  groupInvitation?: GroupInvitationPreview
+  groupAcceptance?: GroupAcceptance
+  invitation?: GroupInvitation
   community?: CommunityEventData
   capabilities?: PluginCapabilities
   plugin?: PluginCapability
@@ -48,6 +65,7 @@ export interface EventPayload {
   ttlSeconds?: PrivateTtlSeconds; expiresAt?: number; secret?: boolean; destroyBefore?: number
 }
 export interface MessagingEvent {
+  route?: "direct-only"
   version: 3; id: string; author: string; conversationId: string; recipients: string[]; timestamp: number
   kind: EventKind; payload: EventPayload; group?: GroupState; signature: string
 }
@@ -58,6 +76,17 @@ export interface StoredEvent {
 export interface MessagingSnapshot { version: 3; owner: string; events: StoredEvent[]; preferences: MessagingPreferences; callHistory?: CallHistorySnapshot }
 export interface MessagingModel { conversations: ConversationRecord[]; messages: MessageRecord[]; groups: GroupState[]; requests: ConversationRecord[] }
 export interface MessagingContextValue extends MessagingModel {
+  profile: ProfileState
+  getProfile: (peer: string) => ProfileValues
+  getProfileSharing: (peer: string) => ProfileField[]
+  saveProfile: (values: ProfileValues) => Promise<void>
+  setProfileSharing: (peer: string, fields: ProfileField[]) => Promise<void>
+  removeFriend: (peer: string) => Promise<void>
+  getDeliveryMode: (conversationId: string) => DeliveryMode
+  setDeliveryMode: (conversationId: string, mode: DeliveryMode) => Promise<void>
+  getDirectStatus: (conversationId: string) => DirectStatus
+  connectDirect: (conversationId: string) => Promise<void>
+  sendDirectFile: (conversationId: string, file: File, signal?: AbortSignal, onProgress?: (percent: number) => void) => Promise<string>
   plugins: PluginState[]
   setPluginEnabled: (id: string, enabled: boolean, grantPermissions?: boolean) => Promise<void>
   removePlugin: (id: string) => Promise<void>
@@ -65,6 +94,7 @@ export interface MessagingContextValue extends MessagingModel {
   refreshPeerCapabilities: (conversationId: string) => Promise<void>
   identity: Identity | null; contacts: Contact[]; ready: boolean; error: string | null; status: "connecting" | "online" | "offline"; preferences: MessagingPreferences
   sendText: (conversationId: string, text: string, replyTo?: string, mentions?: string[], expectedPrivateTtlSeconds?: PrivateTtlSeconds) => Promise<string>
+  shareMessages: (source: ShareSource, ids: string[], destination: ShareDestination, preview: SharedMessages) => Promise<string>
   getPrivateMode: (conversationId: string) => PrivateTtlSeconds
   setPrivateMode: (conversationId: string, ttlSeconds: PrivateTtlSeconds) => Promise<void>
   destroyPrivateHistory: (conversationId: string) => Promise<void>
@@ -76,6 +106,11 @@ export interface MessagingContextValue extends MessagingModel {
   vote: (conversationId: string, messageId: string, option: number) => Promise<void>
   createGroup: (name: string, members: string[]) => Promise<string>
   updateGroup: (conversationId: string, changes: { name?: string; members?: string[] }) => Promise<void>
+  inviteGroupMember: (conversationId: string, publicKey: string) => Promise<void>
+  revokeGroupInvitation: (conversationId: string, invitationId: string) => Promise<void>
+  declineGroupInvitation: (conversationId: string) => Promise<void>
+  dissolveGroup: (conversationId: string) => Promise<void>
+  getPendingGroupInvitations: (conversationId: string) => GroupInvitationPreview[]
   leaveGroup: (conversationId: string) => Promise<void>
   archiveConversation: (conversationId: string, archived?: boolean) => Promise<void>
   deleteConversation: (conversationId: string) => Promise<void>

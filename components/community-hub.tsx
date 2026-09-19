@@ -312,7 +312,7 @@ export function CommunityHub() {
   const key = community && channel ? communityChannelKey(community.id, channel.id) : ""
   const ownRequests = useMemo(() => latestRequests(api.model.requests.filter(item => item.author === api.identity?.publicKey), item => item.communityId).filter(item => item.status !== "approved" && !communities.some(community => community.id === item.communityId)), [api.model.requests, api.identity?.publicKey, communities])
   const deliveryIssues = (api.deliveryIssues ?? []).filter(issue => issue.kind !== "message" && (issue.communityId === community?.id || ownRequests.some(request => request.communityId === issue.communityId) || !communities.some(item => item.id === issue.communityId)))
-  const displayName = (pub: string) => pub === api.identity?.publicKey ? "You" : messaging.contacts.find(item => item.pub === pub)?.alias || shortAddress(pub)
+  const displayName = (pub: string) => pub === api.identity?.publicKey ? "You" : messaging.contacts.find(item => item.pub === pub)?.alias || messaging.getProfile(pub).displayName || shortAddress(pub)
   const run = useCallback(async (action: () => Promise<unknown>, success = "") => {
     if (busy) return
     setBusy(true); setError(""); setNotice("")

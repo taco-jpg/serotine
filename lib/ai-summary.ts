@@ -19,7 +19,7 @@ export interface SummaryRange {
 }
 
 function ordinary(message: MessageRecord): boolean {
-  return !message.private && !message.secret && message.expiresAt === undefined
+  return message.route !== "direct-only" && !message.private && !message.secret && message.expiresAt === undefined
     && !message.attachment && !message.poll && message.delivery !== "pending" && message.delivery !== "failed"
     && typeof message.content === "string" && message.content.trim().length > 0
 }

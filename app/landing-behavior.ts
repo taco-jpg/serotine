@@ -87,8 +87,8 @@ export function enhanceLanding(root: HTMLElement): () => void {
       "--p": state.p, "--gather": state.gather, "--seal": state.seal,
       "--arrive": active || !moving() ? 1 : state.arrive, "--leave": state.leave,
       "--intro-fade": moving() && !active ? 1 - state.leave * .72 : 1,
-      "--camera-y": `${moving() && !active ? -state.leave * 12 : 0}px`,
-      "--camera-scale": moving() && !active ? 1 + state.gather * .18 : 1,
+      "--camera-y": `${moving() && !active ? -state.leave * 3 : 0}px`,
+      "--camera-scale": moving() && !active ? 1 + state.gather * .02 : 1,
       "--px": `${px}px`, "--py": `${py}px`,
     }
     for (const [key, value] of Object.entries(values)) story!.style.setProperty(key, String(value))

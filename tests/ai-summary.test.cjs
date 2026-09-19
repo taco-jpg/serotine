@@ -71,6 +71,13 @@ function message(id, content, overrides = {}) {
   return { id, conversationId: 'chat', senderPubKey: 'peer', content, timestamp: 1000 + Number(id), delivery: 'received', pinned: false, deliveredTo: [], readBy: [], ...overrides }
 }
 
+test('direct-only history never becomes AI input after switching delivery mode', t => {
+  const h = harness(t)
+  const range = h.summary.selectSummaryRange([message('1', 'ordinary relay history'), message('2', 'direct restricted content', { route: 'direct-only' })], 'chat', 'self', 2000)
+  assert.deepEqual(range.messages, [{ speaker: 'Participant 1', text: 'ordinary relay history' }])
+  assert.equal(range.excludedCount, 1)
+})
+
 test('range starts after the last meaningful sent reply and never falls back after the last reply', t => {
   const h = harness(t)
   const messages = [message('1', 'old'), message('2', 'Last reply', { senderPubKey: 'self', delivery: 'sent' }), message('3', 'new'),

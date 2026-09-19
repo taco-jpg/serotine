@@ -12,7 +12,10 @@ interface MessagingDB extends DBSchema {
   events: { key: string; value: StoredEvent; indexes: { "by-kind": string } }
   metadata: { key: string; value: unknown }
 }
-export const defaultMessagingPreferences = (): MessagingPreferences => ({ accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true, archived: [], deleted: {}, deletedMessages: {} })
+export const defaultMessagingPreferences = (): MessagingPreferences => ({ terminatedGroups: [], accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true, archived: [], deleted: {}, deletedMessages: {} })
+function mergeRelationshipBoundaries(left: Record<string, number> = {}, right: Record<string, number> = {}) {
+  return Object.fromEntries([...new Set([...Object.keys(left), ...Object.keys(right)])].map(peer => [peer, Math.max(left[peer] ?? 0, right[peer] ?? 0)]))
+}
 function withDefaults(value?: Partial<MessagingPreferences>): MessagingPreferences {
   return { ...defaultMessagingPreferences(), ...value, archived: value?.archived ?? [], deleted: value?.deleted ?? {}, deletedMessages: value?.deletedMessages ?? {} }
 }
@@ -314,7 +317,7 @@ export async function saveMessagingPreferences(owner: string, preferences: Messa
   try {
     const tx = db.transaction("metadata", "readwrite")
     const old = withDefaults(await tx.store.get("preferences") as Partial<MessagingPreferences> | undefined)
-    await tx.store.put({ ...withDefaults(preferences), deleted: mergeConversationDeletions(preferences.deleted, old.deleted), deletedMessages: mergeMessageDeletions(preferences.deletedMessages, old.deletedMessages) }, "preferences")
+    await tx.store.put({ ...withDefaults(preferences), terminatedGroups: [...new Set([...(preferences.terminatedGroups ?? []), ...(old.terminatedGroups ?? [])])], closedRetention: [...new Set([...(preferences.closedRetention ?? []), ...(old.closedRetention ?? [])])], relationshipBoundaries: mergeRelationshipBoundaries(preferences.relationshipBoundaries, old.relationshipBoundaries), deleted: mergeConversationDeletions(preferences.deleted, old.deleted), deletedMessages: mergeMessageDeletions(preferences.deletedMessages, old.deletedMessages) }, "preferences")
     await tx.done
   } finally { db.close() }
   changed(owner)
@@ -332,7 +335,7 @@ export async function exportMessagingSnapshot(owner: string): Promise<MessagingS
   // Excluding orphan edits also prevents a late private edit from being copied
   // into a backup after its original private message has already disappeared.
   const publicTargets = new Set(events.filter(record => record.event.kind === "message").map(record => privateMessageTarget(record, owner)))
-  return { version: 3, owner, events: events.filter(record => record.event.kind !== "private-message" && record.event.kind !== "plugin-capabilities" && !isDeletedStoredEvent(record, owner, preferences)
+  return { version: 3, owner, events: events.filter(record => record.event.kind !== "private-message" && record.event.kind !== "plugin-capabilities" && record.event.kind !== "profile" && !isDeletedStoredEvent(record, owner, preferences)
     && (record.event.kind !== "edit" || !!record.event.payload.targetId && publicTargets.has(privateMessageTarget(record, owner, record.event.payload.targetId)))), preferences,
     ...(callHistory.records.length || callHistory.deleted.length ? { callHistory: mergeCallHistory(emptyCallHistory(), callHistory, preferences.deleted) } : {}) }
 }
@@ -349,7 +352,7 @@ export async function deleteStoredConversation(owner: string, cid: string) {
       const conversation = model.conversations.find(c => c.id === cid)
       const group = model.groups.find(g => g.id === cid)
       const prior = preferences.deleted[cid]
-      const removed = records.filter(record => storedConversationId(record, owner) === cid && record.event.kind !== "private-destroy" && record.event.kind !== "private-settings" && !((record.event.kind === "group" || record.event.kind === "leave") && record.local && record.event.recipients.some(peer => !record.delivered.includes(peer))))
+      const removed = records.filter(record => storedConversationId(record, owner) === cid && record.event.kind !== "private-destroy" && record.event.kind !== "private-settings" && record.event.kind !== "profile" && !((record.event.kind === "group" || record.event.kind === "leave") && record.local && record.event.recipients.some(peer => !record.delivered.includes(peer))))
       const attachmentIds = [...new Set([...(prior?.attachmentIds ?? []), ...removed.flatMap(record => { const id = record.event.payload.attachmentId ?? record.event.payload.attachment?.id; return id ? [id] : [] })])]
       const deletion = { deletedAt: Math.max(Date.now(), prior?.deletedAt ?? 0), eventKeys: [...new Set([...(prior?.eventKeys ?? []), ...removed.map(record => record.key)])], attachmentIds, ...(group ? { group, leftMembers: conversation ? group.members.filter(member => !conversation.members.includes(member)) : prior?.leftMembers ?? [] } : {}) }
       for (const record of removed) await tx.objectStore("events").delete(record.key)
@@ -442,9 +445,14 @@ export async function validateMessagingSnapshot(value: unknown, owner: string): 
   const snapshot = value as MessagingSnapshot
   if (snapshot.version !== 3 || snapshot.owner !== owner || !Array.isArray(snapshot.events) || snapshot.events.length > 250000) throw new Error("The messaging backup belongs to a different identity or is invalid.")
   const p = snapshot.preferences
+  if (p?.closedRetention !== undefined && (!stringArray(p.closedRetention) || !p.closedRetention.every(id => isCommunityId(id) || (id.startsWith("group:") && ID_PATTERN.test(id.slice(6)))))) throw new Error("The saved terminal conversation state is invalid.")
+  if (p?.relationshipBoundaries !== undefined && (!p.relationshipBoundaries || typeof p.relationshipBoundaries !== "object" || Array.isArray(p.relationshipBoundaries)
+    || !Object.entries(p.relationshipBoundaries).every(([peer, time]) => PUBLIC_KEY_PATTERN.test(peer) && Number.isSafeInteger(time) && time > 0))) throw new Error("The saved relationship boundaries are invalid.")
   if (!p || !stringArray(p.accepted) || !p.accepted.every(validConversation) || !stringArray(p.blocked) || !p.blocked.every(x => PUBLIC_KEY_PATTERN.test(x)) || !p.notifications || !p.readAt || typeof p.readReceipts !== "boolean") throw new Error("The saved chat preferences are invalid.")
   if (!Object.entries(p.notifications).every(([key, mode]) => validPreferenceKey(key) && ["all", "mentions", "muted"].includes(mode)) || !Object.entries(p.readAt).every(([key, time]) => validPreferenceKey(key) && Number.isSafeInteger(time) && time >= 0)) throw new Error("The saved chat preferences are invalid.")
+  if (p.terminatedGroups !== undefined && (!stringArray(p.terminatedGroups) || !p.terminatedGroups.every(id => id.startsWith("group:") && ID_PATTERN.test(id.slice(6))))) throw new Error("The saved terminal group states are invalid.")
   if (p.archived !== undefined && (!stringArray(p.archived) || !p.archived.every(validConversation))) throw new Error("The saved archived chats are invalid.")
+  if (p.directOnly !== undefined && (!stringArray(p.directOnly) || !p.directOnly.every(peer => PUBLIC_KEY_PATTERN.test(peer) && peer !== owner))) throw new Error("The saved direct-only policy is invalid.")
   if (p.deleted !== undefined && (!p.deleted || typeof p.deleted !== "object" || Array.isArray(p.deleted))) throw new Error("The saved deleted chats are invalid.")
   if (p.deletedMessages !== undefined && (!p.deletedMessages || typeof p.deletedMessages !== "object" || Array.isArray(p.deletedMessages))) throw new Error("The saved deleted messages are invalid.")
   const { validateMessagingEvent, validLegacyMessagingEvent, validateGroup } = await import("./messaging")
@@ -492,7 +500,7 @@ export async function importMessagingSnapshot(owner: string, value: MessagingSna
     try {
     const savedPreferences = await tx.objectStore("metadata").get("preferences") as Partial<MessagingPreferences> | undefined
     const old = withDefaults(savedPreferences)
-    const preferences = savedPreferences ? { ...snapshot.preferences, ...old, accepted: [...new Set([...snapshot.preferences.accepted, ...old.accepted])], blocked: [...new Set([...snapshot.preferences.blocked, ...old.blocked])], notifications: { ...snapshot.preferences.notifications, ...old.notifications }, readAt: { ...snapshot.preferences.readAt, ...old.readAt }, archived: [...new Set([...snapshot.preferences.archived, ...old.archived])], deleted: mergeConversationDeletions(snapshot.preferences.deleted, old.deleted), deletedMessages: mergeMessageDeletions(snapshot.preferences.deletedMessages, old.deletedMessages) } : snapshot.preferences
+    const preferences = savedPreferences ? { ...snapshot.preferences, ...old, closedRetention: [...new Set([...(snapshot.preferences.closedRetention ?? []), ...(old.closedRetention ?? [])])], relationshipBoundaries: mergeRelationshipBoundaries(snapshot.preferences.relationshipBoundaries, old.relationshipBoundaries), terminatedGroups: [...new Set([...(snapshot.preferences.terminatedGroups ?? []), ...(old.terminatedGroups ?? [])])], accepted: [...new Set([...snapshot.preferences.accepted, ...old.accepted])], blocked: [...new Set([...snapshot.preferences.blocked, ...old.blocked])], directOnly: [...new Set([...(snapshot.preferences.directOnly ?? []), ...(old.directOnly ?? [])])], notifications: { ...snapshot.preferences.notifications, ...old.notifications }, readAt: { ...snapshot.preferences.readAt, ...old.readAt }, archived: [...new Set([...snapshot.preferences.archived, ...old.archived])], deleted: mergeConversationDeletions(snapshot.preferences.deleted, old.deleted), deletedMessages: mergeMessageDeletions(snapshot.preferences.deletedMessages, old.deletedMessages) } : snapshot.preferences
     const savedCalls = validateCallHistory(await tx.objectStore("metadata").get("call-history"), owner)
     const calls = mergeCallHistory(snapshot.callHistory ?? emptyCallHistory(), savedCalls, preferences.deleted)
     if (snapshot.callHistory || savedCalls.records.length || savedCalls.deleted.length) await tx.objectStore("metadata").put(calls, "call-history")
@@ -502,7 +510,7 @@ export async function importMessagingSnapshot(owner: string, value: MessagingSna
     // Imports cannot extend private lifetimes or bring private edit text back.
     for (const record of await tx.objectStore("events").getAll()) if (isDeletedStoredEvent(record, owner, preferences) || isPrivateEventExpired(record, owner, state.cutoffs) || privateEdit(record, owner, state.targets)) await tx.objectStore("events").delete(record.key)
     for (const record of snapshot.events) {
-      if (record.event.kind === "private-message" || record.event.kind === "plugin-capabilities" || isDeletedStoredEvent(record, owner, preferences) || privateEdit(record, owner, state.targets)) continue
+      if (record.event.kind === "private-message" || record.event.kind === "plugin-capabilities" || record.event.kind === "profile" || isDeletedStoredEvent(record, owner, preferences) || privateEdit(record, owner, state.targets)) continue
       const existing = await tx.objectStore("events").get(record.key)
       if (existing && JSON.stringify(existing.event) !== JSON.stringify(record.event)) throw new Error("The backup conflicts with a saved message.")
       await tx.objectStore("events").put(existing ? { ...record, local: existing.local || record.local, delivered: [...new Set([...existing.delivered, ...record.delivered])] } : record)

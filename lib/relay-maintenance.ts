@@ -1,12 +1,14 @@
 import { migrateRelayPayloads, type PayloadBucket } from './relay-payloads'
 import { cleanupFileUploads, type FileUploadBucket } from './file-upload-relay'
 import { recordD1Result, type StorageEnvironment } from './storage-routing'
+import { maintainRetentionStorage } from './retention-server'
 
 /** Cloudflare Cron only. Bounded migration/retention work is separate from
  * presence, call heartbeats and inbox polls. No user or request proofs needed. */
 export async function maintainRelayStorage(env: StorageEnvironment & { serotine_files?: PayloadBucket & FileUploadBucket }) {
   if (env.SEROTINE_STORAGE_VERSION !== '2' || !env.serotine_files) throw new Error('Storage v2 bindings are required')
   const db = env.serotine_db
+  await maintainRetentionStorage(db, env.serotine_files)
   // Legacy inline bodies remain readable until their verified copy completes.
   const migrated = await migrateRelayPayloads(db, env.serotine_files, 16)
   for (const table of ['RelayEvent', 'RelayMessage']) {

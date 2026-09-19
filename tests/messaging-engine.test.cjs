@@ -4,9 +4,13 @@ const path = require('node:path')
 const { test, before, beforeEach } = require('node:test')
 const ts = require('typescript')
 const remoteAttachment = require('./fixtures/remote-attachment.cjs')
+const groupDatabase = require("./support/group-admission-fixture.cjs")
+let groupFixture = groupDatabase()
 const root = path.join(__dirname, '..')
 const modules = new Map(), stores = new Map(), prefs = new Map(), cursors = new Map()
-const packets = [], attempts = []
+const packets = [], attempts = [], retentionAttempts = []
+const localValues = new Map()
+const runtimeStorage = { getItem: key => localValues.get(key) ?? null, setItem: (key, value) => localValues.set(key, value), removeItem: key => localValues.delete(key) }
 const runtimeWindow = new EventTarget()
 let rejectRecipient, rateLimitRecipient, rejectError, failPersistence = false, historyReads = 0
 const retiredRecipient = "This contact's address has been permanently retired. Ask them for their new address."
@@ -66,6 +70,10 @@ function load(filename) {
   const module = { exports: {} }; modules.set(filename, module)
   const output = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText
   function sourceRequire(specifier) {
+    if (specifier === 'server-only') return {}
+    if (specifier === '@opennextjs/cloudflare') return { getCloudflareContext: async () => ({ env: groupFixture.env }) }
+    if (specifier === './db') return { getDB: async () => groupFixture.db }
+    if (specifier === './group-admission-client') return { groupAdmissionRequest: async (identity, action, data) => admissionServer.handleGroupAdmission(action, data, await authentication.createRequestProof('group:' + action, data, identity.privateKey, identity.publicKey)) }
     if (specifier === './messaging-store') return store
     if (specifier === './relay-client') return relay
     if (specifier === './storage') return { exportAllMessagesFromStorage: async () => [], migrateLegacyHistory: async () => {}, deleteConversationHistoryFromStorage: async () => {} }
@@ -73,7 +81,18 @@ function load(filename) {
     if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
     return require(specifier)
   }
-  new Function('require', 'module', 'exports', 'navigator', 'window', 'localStorage', output)(sourceRequire, module, module.exports, {}, runtimeWindow, { getItem: () => null })
+  new Function('require', 'module', 'exports', 'navigator', 'window', 'localStorage', 'fetch', output)(sourceRequire, module, module.exports, {}, runtimeWindow, runtimeStorage, async (url, options) => {
+    const { action, data, proof } = JSON.parse(options.body)
+    if (url === '/api/retention') {
+      retentionAttempts.push({ action, data, publicKey: proof.publicKey })
+      try { return Response.json(await retentionServer.handleRetention(action, data, proof)) }
+      catch (error) { return Response.json({ success: false, error: error.message }, { status: error.status || 503 }) }
+    }
+    assert.equal(url, '/api/files')
+    assert.equal(action, 'file:delivery')
+    assert.equal(await authentication.verifyRequestProof(action, data, proof), true)
+    return Response.json({ success: true, uploadId: data.uploadId, status: 'published', expiresAt: Date.now() + 7 * 86400_000 })
+  })
   return module.exports
 }
 const cryptography = load(path.join(root, 'lib/crypto.ts'))
@@ -81,12 +100,16 @@ const authentication = load(path.join(root, 'lib/request-auth.ts'))
 const messaging = load(path.join(root, 'lib/messaging.ts'))
 const { MessagingEngine } = messaging
 const history = load(path.join(root, 'lib/messaging-history.ts'))
+const admissionServer = load(path.join(root, 'lib/group-admission-server.ts'))
+const admissions = load(path.join(root, 'lib/group-admission.ts'))
+const retentionServer = load(path.join(root, 'lib/retention-server.ts'))
+const retentionProtocol = load(path.join(root, 'lib/retention-protocol.ts'))
 let alice, bob, charlie, dave
 before(async () => {
   async function identity() { const keys = await cryptography.generateEncryptionKeyPair(); return { version: 2, publicKey: await cryptography.exportPublicKeyToHex(keys.publicKey), privateKey: await cryptography.exportKey(keys.privateKey) } }
   ;[alice, bob, charlie, dave] = await Promise.all([identity(), identity(), identity(), identity()])
 })
-beforeEach(() => { stores.clear(); prefs.clear(); cursors.clear(); packets.length = attempts.length = 0; rejectRecipient = rateLimitRecipient = undefined; rejectError = 'Recipient relay unavailable'; failPersistence = false; historyReads = 0 })
+beforeEach(() => { groupFixture.sqlite.close(); groupFixture = groupDatabase(); stores.clear(); prefs.clear(); cursors.clear(); localValues.clear(); packets.length = attempts.length = retentionAttempts.length = 0; rejectRecipient = rateLimitRecipient = undefined; rejectError = 'Recipient relay unavailable'; failPersistence = false; historyReads = 0 })
 async function engine(identity) {
   const instance = new MessagingEngine(identity)
   instance.key = await cryptography.importKey(identity.privateKey, 'encryption', 'private')
@@ -94,6 +117,27 @@ async function engine(identity) {
   instance.sync = async () => {}
   await instance.refresh()
   return { instance, synchronize }
+}
+async function createAcceptedGroup(sender, name, members) {
+  const cid = await sender.instance.createGroup(name, members)
+  await sender.synchronize()
+  const guests = []
+  for (const pub of members) {
+    const guest = await engine([alice,bob,charlie,dave].find(identity => identity.publicKey === pub))
+    await guest.synchronize()
+    await guest.instance.acceptRequest(cid)
+    await guest.synchronize(); await sender.synchronize(); await sender.synchronize()
+    assert.ok(sender.instance.model.groups.find(group => group.id === cid)?.members.includes(pub),
+      JSON.stringify({ senderError: sender.instance.error, guestError: guest.instance.error, outboxErrors: [...sender.instance.records, ...guest.instance.records].filter(row => row.error).map(row => ({ kind: row.event.kind, error: row.error })) }))
+    guests.push(guest)
+  }
+  for (const guest of guests) {
+    await guest.synchronize()
+    assert.ok(guest.instance.model.groups.find(group => group.id === cid)?.members.includes(guest.instance.identity.publicKey),
+      JSON.stringify({ error: guest.instance.error, states: guest.instance.model.groups.map(group => ({ epoch: group.epoch, members: group.members.length })), outboxErrors: sender.instance.records.filter(row => row.error).map(row => ({ kind: row.event.kind, error: row.error })) }))
+    guest.instance.dispose()
+  }
+  return cid
 }
 function deferred() {
   let resolve
@@ -285,7 +329,7 @@ test('a storage failure stops the sync cursor until the incoming message can be 
 
 test('failed fanout retains recipient acknowledgements and retries only its missing destinations', async () => {
   const sender = await engine(alice)
-  const cid = await sender.instance.createGroup('Team', [bob.publicKey, charlie.publicKey])
+  const cid = await createAcceptedGroup(sender, 'Team', [bob.publicKey, charlie.publicKey])
   await sender.synchronize()
   const id = await sender.instance.sendText(cid, 'To the group')
   rejectRecipient = charlie.publicKey
@@ -397,7 +441,7 @@ test('an origin refusal fails self text and contact files; a fresh client reconn
 
 test('a retired first group member does not block later members or later outbox batches', async () => {
   const sender = await engine(alice)
-  const cid = await sender.instance.createGroup('Team', [bob.publicKey, charlie.publicKey])
+  const cid = await createAcceptedGroup(sender, 'Team', [bob.publicKey, charlie.publicKey])
   await sender.synchronize()
   const groupMessage = await sender.instance.sendText(cid, 'Reach the active members')
   const unrelated = []
@@ -440,27 +484,26 @@ for (const kind of ['receipt', 'group']) test(`failed ${kind} events expose thei
   assert.equal(sender.instance.error, null)
 })
 
-test('a failed group departure stays visible on its conversation after local membership ends', async () => {
-  const sender = await engine(alice)
-  const cid = await sender.instance.createGroup('Departing group', [bob.publicKey])
+test('a failed member departure stays visible after leaving, while administrator dissolution is separate', async () => {
+  const admin = await engine(alice)
+  const cid = await createAcceptedGroup(admin, 'Departing group', [bob.publicKey])
+  const sender = await engine(bob)
   await sender.synchronize()
+  await assert.rejects(admin.instance.leaveGroup(cid), /Dissolve group/)
   await sender.instance.leaveGroup(cid)
-  rejectRecipient = bob.publicKey
-  rejectError = retiredRecipient
+  rejectRecipient = alice.publicKey; rejectError = retiredRecipient
   await sender.synchronize()
-  const departure = [...recordsFor(alice.publicKey).values()].find(r => r.event.kind === 'leave')
+  const departure = [...recordsFor(bob.publicKey).values()].find(r => r.event.kind === 'leave')
   const conversation = sender.instance.model.conversations.find(c => c.id === cid)
   assert.ok(departure.error.endsWith(retiredRecipient))
   assert.equal(conversation.sendError, departure.error)
-  assert.equal(conversation.members.includes(alice.publicKey), false)
+  assert.equal(conversation.members.includes(bob.publicKey), false)
   assert.equal(sender.instance.model.messages.length, 0)
-  assert.equal(sender.instance.status, 'online')
-  assert.equal(sender.instance.error, null)
 })
 
 test('a group resumes rate-limited members after recreation while retired recipients still wait for explicit retry', async () => {
   const sender = await engine(alice)
-  const cid = await sender.instance.createGroup('Mixed delivery', [bob.publicKey, charlie.publicKey, dave.publicKey])
+  const cid = await createAcceptedGroup(sender, 'Mixed delivery', [bob.publicKey, charlie.publicKey, dave.publicKey])
   await sender.synchronize()
   const id = await sender.instance.sendText(cid, 'Every active member should receive this')
   rejectRecipient = bob.publicKey
@@ -560,7 +603,7 @@ test('attachment pieces persist without reloading history for each piece and a s
 
 test('rate-limited group sends resume automatically without resending confirmed recipients', async () => {
   const sender = await engine(alice)
-  const cid = await sender.instance.createGroup('Team', [bob.publicKey, charlie.publicKey])
+  const cid = await createAcceptedGroup(sender, 'Team', [bob.publicKey, charlie.publicKey])
   await sender.synchronize()
   const id = await sender.instance.sendText(cid, 'Continue the transfer')
   rateLimitRecipient = charlie.publicKey
@@ -732,7 +775,7 @@ test('deletion during encryption prevents the prepared request from reaching the
 
 test('deleting a departed group retains membership authority across reload and relay replay', async () => {
   const admin = await engine(alice), member = await engine(bob)
-  const cid = await admin.instance.createGroup('Leave then delete', [bob.publicKey, charlie.publicKey])
+  const cid = await createAcceptedGroup(admin, 'Leave then delete', [bob.publicKey, charlie.publicKey])
   await admin.instance.sendText(cid, 'Old group history')
   await admin.synchronize(); await member.synchronize()
   await member.instance.leaveGroup(cid); await member.synchronize()
@@ -753,7 +796,7 @@ test('deleting a departed group retains membership authority across reload and r
 
 test('a hidden administrator chat still reconciles departures so remaining members can send', async () => {
   const admin = await engine(alice), departing = await engine(bob), remaining = await engine(charlie)
-  const cid = await admin.instance.createGroup('Deleted by admin', [bob.publicKey, charlie.publicKey])
+  const cid = await createAcceptedGroup(admin, 'Deleted by admin', [bob.publicKey, charlie.publicKey])
   await admin.instance.sendText(cid, 'Prior history')
   await admin.synchronize(); await departing.synchronize(); await remaining.synchronize()
   await admin.instance.deleteConversation(cid)
@@ -768,7 +811,7 @@ test('a hidden administrator chat still reconciles departures so remaining membe
 
 test('offline leave followed by delete still delivers the pending departure after reconnecting', async () => {
   const admin = await engine(alice), member = await engine(bob)
-  const cid = await admin.instance.createGroup('Offline departure', [bob.publicKey, charlie.publicKey])
+  const cid = await createAcceptedGroup(admin, 'Offline departure', [bob.publicKey, charlie.publicKey])
   await admin.synchronize(); await member.synchronize()
   await member.instance.leaveGroup(cid)
   await member.instance.deleteConversation(cid)
@@ -793,4 +836,176 @@ test('deleting a chat during file preparation cancels later chunks and metadata 
   assert.equal(prefs.get(alice.publicKey).deleted[bob.publicKey].attachmentIds.length, 1)
   const fresh = await files.sendAttachment(sender.instance.sendEvent, bob.publicKey, new File(['Fresh transfer'], 'new.txt'))
   assert.equal(sender.instance.model.messages[0].id, fresh)
+})
+
+test('a friend invitation stays pending and receives no ordinary group traffic until signed acceptance', async t => {
+  const identityModule = load(path.join(root, 'lib/identity.ts'))
+  t.mock.method(identityModule, 'loadContacts', owner => owner === bob.publicKey ? [{ pub: alice.publicKey, alias: 'Friend' }] : [])
+  const admin = await engine(alice), guest = await engine(bob)
+  await guest.instance.acceptRequest(alice.publicKey)
+  const cid = await admin.instance.createGroup('Explicit consent', [bob.publicKey])
+  const before = await admin.instance.sendText(cid, 'Only the administrator receives this')
+  await admin.synchronize(); await guest.synchronize()
+  assert.deepEqual(admin.instance.model.groups.find(group => group.id === cid).members, [alice.publicKey])
+  const request = guest.instance.model.requests.find(request => request.id === cid)
+  assert.ok(request?.invitation)
+  assert.equal(request.invitation.memberCount, 1)
+  assert.equal(guest.instance.model.messages.some(message => message.id === before), false)
+  assert.equal(packets.some(packet => packet.id === before && packet.recipientPubKey === bob.publicKey), false)
+  await assert.rejects(guest.instance.sendText(cid, 'Not a member yet'), /no longer a member/)
+  await guest.instance.acceptRequest(cid)
+  await guest.synchronize(); await admin.synchronize(); await admin.synchronize(); await guest.synchronize()
+  assert.ok(admin.instance.model.groups.find(group => group.id === cid).members.includes(bob.publicKey))
+  assert.equal(guest.instance.model.requests.some(request => request.id === cid), false)
+  const after = await admin.instance.sendText(cid, 'After your explicit acceptance')
+  await admin.synchronize(); await guest.synchronize()
+  assert.equal(guest.instance.model.messages.find(message => message.id === after)?.content, 'After your explicit acceptance')
+  assert.equal(guest.instance.model.messages.some(message => message.id === before), false)
+})
+
+test('administrator cannot forge consent, repeated invitation delivery is idempotent, decline does not block friendship', async () => {
+  const admin = await engine(alice), guest = await engine(bob)
+  const cid = await admin.instance.createGroup('No forged consent', [bob.publicKey])
+  await admin.synchronize(); await guest.synchronize()
+  const invitation = guest.instance.model.requests.find(request => request.id === cid).invitation.invitation
+  await assert.rejects(admissions.signGroupAcceptance(invitation, alice), /invalid/)
+  const forged = await messaging.signGroup({ ...admin.instance.model.groups.find(group => group.id === cid), members: [alice.publicKey,bob.publicKey], epoch: 2 }, alice)
+  assert.equal(await messaging.validateGroup(forged), false)
+  cursors.set(bob.publicKey, 0); await guest.synchronize()
+  assert.equal(guest.instance.model.requests.filter(request => request.id === cid).length, 1)
+  await guest.instance.declineGroupInvitation(cid)
+  assert.equal(guest.instance.preferences.blocked.includes(alice.publicKey), false)
+  await guest.synchronize(); await admin.synchronize()
+  assert.equal(guest.instance.model.requests.some(request => request.id === cid), false)
+  assert.equal(admin.instance.getPendingGroupInvitations(cid).length, 0)
+  const acceptance = await admissions.signGroupAcceptance(invitation, bob)
+  const data = { groupId: cid, admin: alice.publicKey, acceptance }
+  await assert.rejects(admissionServer.handleGroupAdmission('accept', data, await authentication.createRequestProof('group:accept', data, bob.privateKey,bob.publicKey)), /declined|revoked/)
+})
+
+test('revoked invitations and a terminally dissolved group cannot be restored or accepted from old history', async () => {
+  const admin = await engine(alice), guest = await engine(bob)
+  const cid = await admin.instance.createGroup('Terminal', [bob.publicKey])
+  await admin.synchronize(); await guest.synchronize()
+  const invitation = guest.instance.model.requests.find(request => request.id === cid).invitation.invitation
+  const oldRows = structuredClone([...recordsFor(bob.publicKey).values()])
+  await admin.instance.revokeGroupInvitation(cid, invitation.id)
+  await assert.rejects(guest.instance.acceptRequest(cid), /revoked/)
+  await admin.synchronize(); await guest.synchronize()
+  assert.equal(guest.instance.model.requests.some(request => request.id === cid), false)
+  await admin.instance.inviteGroupMember(cid, bob.publicKey)
+  await admin.synchronize(); await guest.synchronize()
+  await admin.instance.dissolveGroup(cid)
+  await assert.rejects(guest.instance.acceptRequest(cid), /no longer exists/)
+  recordsFor(bob.publicKey).clear()
+  for (const row of oldRows) recordsFor(bob.publicKey).set(row.key,row)
+  prefs.delete(bob.publicKey); cursors.set(bob.publicKey, 0)
+  const restored = await engine(bob)
+  await restored.synchronize()
+  assert.equal(restored.instance.model.requests.some(request => request.id === cid), false)
+  assert.ok(restored.instance.preferences.terminatedGroups.includes(cid))
+  const data = { groupId: cid, admin: alice.publicKey }
+  await assert.rejects(admissionServer.handleGroupAdmission('create',data,await authentication.createRequestProof('group:create',data,alice.privateKey,alice.publicKey)), /no longer exists/)
+  await assert.rejects(admin.instance.sendText(cid,'Cannot resurrect'), /no longer exists/)
+})
+
+test('group reads generate zero receipts and historical outgoing receipts never replay', async () => {
+  const admin = await engine(alice)
+  const cid = await createAcceptedGroup(admin, 'No tracking', [bob.publicKey])
+  const guest = await engine(bob)
+  const id = await admin.instance.sendText(cid, 'Reading stays local')
+  await admin.synchronize(); await guest.synchronize()
+  await guest.instance.markRead(cid); await guest.synchronize(); await admin.synchronize()
+  assert.equal(guest.instance.preferences.readAt[cid] > 0,true)
+  assert.equal([...recordsFor(bob.publicKey).values()].some(record => record.event.kind === 'receipt' && record.event.conversationId === cid),false)
+  await assert.rejects(guest.instance.sendEvent(cid,'receipt',{targetId:id,receipt:'read'}), /receipts are not sent/)
+  const group = guest.instance.model.groups.find(group => group.id === cid)
+  const receipt = await messaging.signMessagingEvent({version:3,id:crypto.randomUUID(),author:bob.publicKey,conversationId:cid,recipients:[alice.publicKey],timestamp:Date.now(),kind:'receipt',payload:{targetId:id,receipt:'read'},group},bob)
+  assert.equal(await messaging.validateMessagingEvent(receipt),true,'historical signed receipts remain parseable')
+  await store.saveStoredEvent(alice.publicKey,{key:store.eventStorageKey(receipt),event:receipt,local:false,delivered:[],receivedAt:Date.now()})
+  await store.saveStoredEvent(bob.publicKey,{key:store.eventStorageKey(receipt),event:receipt,local:true,delivered:[],receivedAt:Date.now()})
+  await guest.synchronize(); await admin.synchronize()
+  const message = admin.instance.model.messages.find(message => message.id === id)
+  assert.deepEqual(message.readBy,[]); assert.deepEqual(message.deliveredTo,[]); assert.equal(message.delivery,'sent')
+  assert.equal(attempts.some(attempt => attempt.id === receipt.id),false)
+})
+
+test('legacy migration preserves locally proven consent and never auto-accepts a friend or grandfather allowlist', async t => {
+  const identityModule = load(path.join(root, 'lib/identity.ts'))
+  t.mock.method(identityModule, 'loadContacts', owner => owner === bob.publicKey ? [{ pub: alice.publicKey, alias: 'Friend' }] : [])
+  const cid = 'group:' + crypto.randomUUID()
+  const legacy = await messaging.signGroup({id:cid,name:'Legacy membership',admin:alice.publicKey,members:[alice.publicKey,bob.publicKey,charlie.publicKey],epoch:1,updatedAt:Date.now()},alice)
+  const initial = await messaging.signMessagingEvent({version:3,id:crypto.randomUUID(),author:alice.publicKey,conversationId:cid,recipients:[bob.publicKey,charlie.publicKey],timestamp:Date.now(),kind:'group',payload:{},group:legacy},alice)
+  for (const who of [alice,bob,charlie]) await store.saveStoredEvent(who.publicKey,{key:store.eventStorageKey(initial),event:initial,local:who===alice,delivered:[bob.publicKey,charlie.publicKey],receivedAt:Date.now()})
+  prefs.set(charlie.publicKey,{...defaults(),accepted:[cid]})
+  const admin=await engine(alice),unproven=await engine(bob),proven=await engine(charlie)
+  const withheld=await admin.instance.sendText(cid,'Migration cannot leak to an unaccepted invitee')
+  await admin.synchronize();await unproven.synchronize();await proven.synchronize();await admin.synchronize();await admin.synchronize();await proven.synchronize();await admin.synchronize();await admin.synchronize();await proven.synchronize()
+  const current=admin.instance.model.groups.find(group=>group.id===cid)
+  assert.equal(current.protocol,2)
+  assert.equal(current.members.includes(bob.publicKey),false)
+  assert.equal(current.members.includes(charlie.publicKey),true)
+  assert.equal(unproven.instance.model.requests.find(request=>request.id===cid)?.invitationStatus,'pending')
+  assert.equal(packets.some(packet=>packet.id===withheld&&packet.recipientPubKey===bob.publicKey),false)
+  const forged=await messaging.signGroup({...current,members:[alice.publicKey,bob.publicKey],admissions:[],legacyMembers:[bob.publicKey]},alice)
+  assert.equal(await messaging.validateGroup(forged),false)
+})
+
+test('friend removal preserves local contact and grant on cleanup failure, then retries closure and revokes sharing', async t => {
+  const identities = load(path.join(root, 'lib/identity.ts'))
+  identities.saveContacts(alice.publicKey, [{ pub: bob.publicKey, alias: 'Bob' }])
+  const sender = await engine(alice)
+  t.after(() => sender.instance.dispose())
+  await sender.instance.acceptRequest(bob.publicKey)
+  await sender.instance.profiles.saveProfile({ bio: 'Only this friend' })
+  await sender.instance.profiles.setSharing(bob.publicKey, ['bio'])
+  const scopeId = await retentionProtocol.retentionScopeId(retentionProtocol.retentionDescriptor(bob.publicKey, alice.publicKey, Date.now()))
+  const prepare = groupFixture.db.prepare
+  let cleanupUnavailable = true
+  t.mock.method(groupFixture.db, 'prepare', function (sql) {
+    if (cleanupUnavailable && sql.startsWith('DELETE FROM RelayEvent WHERE sequence IN')) throw new Error('Cleanup storage unavailable')
+    return prepare.call(this, sql)
+  })
+  await assert.rejects(sender.instance.removeFriend(bob.publicKey), /Cleanup storage unavailable/)
+  assert.equal(identities.loadContacts(alice.publicKey).some(contact => contact.pub === bob.publicKey), true)
+  assert.equal(sender.instance.preferences.accepted.includes(bob.publicKey), true)
+  assert.deepEqual(sender.instance.profiles.getSharing(bob.publicKey), ['bio'])
+  assert.ok(groupFixture.sqlite.prepare('SELECT closedAt FROM RetentionScope WHERE scopeId=?').get(scopeId).closedAt > 0)
+  cleanupUnavailable = false
+  await sender.instance.removeFriend(bob.publicKey)
+  assert.equal(identities.loadContacts(alice.publicKey).some(contact => contact.pub === bob.publicKey), false)
+  assert.equal(sender.instance.preferences.accepted.includes(bob.publicKey), false)
+  assert.deepEqual(sender.instance.profiles.getSharing(bob.publicKey), [])
+  assert.equal(retentionAttempts.filter(attempt => attempt.action === 'retention:close').length, 2)
+})
+
+test('closed relay friendship reopens only after both participants explicitly accept again', async t => {
+  const identities = load(path.join(root, 'lib/identity.ts'))
+  identities.saveContacts(alice.publicKey, [{ pub: bob.publicKey, alias: 'Bob' }])
+  const a = await engine(alice), b = await engine(bob)
+  t.after(() => { a.instance.dispose(); b.instance.dispose() })
+  await a.instance.acceptRequest(bob.publicKey); await b.instance.acceptRequest(alice.publicKey)
+  await a.instance.removeFriend(bob.publicKey)
+  const scopeId = await retentionProtocol.retentionScopeId(retentionProtocol.retentionDescriptor(bob.publicKey, alice.publicKey, Date.now()))
+  const state = () => groupFixture.sqlite.prepare('SELECT closedAt,boundaryAt FROM RetentionScope WHERE scopeId=?').get(scopeId)
+  assert.ok(state().closedAt > 0)
+  await a.instance.acceptRequest(bob.publicKey)
+  assert.ok(state().closedAt > 0, 'one participant cannot reopen retained delivery')
+  await b.instance.acceptRequest(alice.publicKey)
+  assert.equal(state().closedAt, 0)
+  assert.ok(state().boundaryAt > 0, 'reopening fences every packet from the prior relationship')
+})
+
+test('Force P2P acceptance skips relay registration while explicit removal still closes server retention', async t => {
+  const identities = load(path.join(root, 'lib/identity.ts'))
+  identities.saveContacts(alice.publicKey, [{ pub: bob.publicKey, alias: 'Bob' }])
+  prefs.set(alice.publicKey, { ...defaults(), directOnly: [bob.publicKey] })
+  const sender = await engine(alice)
+  t.after(() => sender.instance.dispose())
+  await sender.instance.acceptRequest(bob.publicKey)
+  assert.equal(retentionAttempts.length, 0)
+  await sender.instance.removeFriend(bob.publicKey)
+  assert.deepEqual(retentionAttempts.map(attempt => attempt.action), ['retention:close'])
+  assert.equal(attempts.length, 0, 'removal sends only cleanup metadata, without encrypted chat content')
+  assert.equal(identities.loadContacts(alice.publicKey).some(contact => contact.pub === bob.publicKey), false)
 })

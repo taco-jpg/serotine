@@ -1,3 +1,4 @@
+import { validSharedMessages, sharedMessagesFallback } from "./shared-messages"
 import { arrayBufferToHex, verifySignature } from "./crypto"
 import { ATTACHMENT_CHUNK_BYTES, MAX_ATTACHMENT_CHUNKS, isAttachmentMeta } from "./attachments"
 import { ID_PATTERN, MAX_MESSAGE_LENGTH, PUBLIC_KEY_PATTERN } from "./protocol"
@@ -258,7 +259,7 @@ export async function validateCommunityEvent(e: MessagingEvent): Promise<boolean
         && (d.stateRef !== undefined || (d.target !== owner && sameSet(e.recipients, [owner]) && !["promote", "demote", "update", "revoke-invites"].includes(d.action)))
         && (d.action === "update" ? validChanges(d.changes) : d.changes === undefined)
       case "leave": return exact(d, ["type", "epoch", "stateRef"]) && positive(d.epoch)
-      case "message": return exact(d, ["type", "epoch", "channelId", "content", "replyTo", "mentions", "stateRef"]) && positive(d.epoch) && ID_PATTERN.test(d.channelId) && text(d.content, MAX_MESSAGE_LENGTH)
+      case "message": return (d.shared === undefined || (validSharedMessages(d.shared) && d.content === sharedMessagesFallback(d.shared) && !d.replyTo && !d.mentions)) && exact(d, ["type", "epoch", "channelId", "content", "replyTo", "mentions", "stateRef", "shared"]) && positive(d.epoch) && ID_PATTERN.test(d.channelId) && text(d.content, MAX_MESSAGE_LENGTH)
         && (d.replyTo === undefined || ID_PATTERN.test(d.replyTo)) && (d.mentions === undefined || uniqueKeys(d.mentions, MAX_COMMUNITY_MEMBERS))
       case "attachment": return exact(d, ["type", "epoch", "channelId", "attachment", "content", "replyTo", "mentions", "stateRef"])
         && positive(d.epoch) && validId(d.channelId) && isAttachmentMeta(d.attachment) && exact(d.attachment, ["id", "name", "mime", "size", "chunks", "sha256", "kind", "duration", "remote"])
@@ -289,6 +290,7 @@ export async function validateCommunityEvent(e: MessagingEvent): Promise<boolean
 export function communityOutboxError(e: MessagingEvent, model: CommunityModel, owner: string): string | undefined {
   const d = e.payload.community
   if (!d || e.kind !== "community" || e.author !== owner) return "The outgoing community event is invalid."
+  if (d.type === "receipt") return "Historical channel receipts are not sent."
   const state = model.communities.find(c => c.id === e.conversationId)
   const controller = state?.owner ?? communityOwner(e.conversationId)
   if (d.type === "state") {
@@ -330,9 +332,8 @@ export function communityOutboxError(e: MessagingEvent, model: CommunityModel, o
     if ("targetId" in d) {
       const target = model.messages.find(message => message.conversationId === e.conversationId && message.channelId === d.channelId && message.id === d.targetId && !message.hidden)
       if (!target) return "This message is no longer available."
-      if (d.type === "edit" && (target.senderPubKey !== owner || target.attachment || target.poll)) return "You can edit only your own text messages."
+      if (d.type === "edit" && (target.senderPubKey !== owner || target.attachment || target.poll || target.shared)) return "You can edit only your own text messages."
       if (d.type === "vote" && (!target.poll || d.option >= target.poll.options.length)) return "Choose an available poll option."
-      if (d.type === "receipt" && target.senderPubKey === owner) return "You cannot acknowledge your own message."
     }
     return undefined
   }
@@ -344,6 +345,7 @@ export function canSendCommunityEvent(e: MessagingEvent, model: CommunityModel, 
 export function buildCommunityModel(records: StoredEvent[], owner: string, preferences: MessagingPreferences): CommunityModel {
   const model: CommunityModel = { communities: [], messages: [], requests: [], reports: [], commands: [], processedIds: [], acceptedKeys: [] }
   const states = new Map<string, CommunityState>()
+  const createdAt = new Map<string, number>()
   const departed = new Map<string, Set<string>>()
   const messages = new Map<string, CommunityMessage>()
   const messageEvents = new Map<string, MessagingEvent>()
@@ -397,7 +399,10 @@ export function buildCommunityModel(records: StoredEvent[], owner: string, prefe
       }
       if (d.commandId) processed.add(d.commandId)
       if (prior && (!authorityExtends(d.state, prior) || (comparable && !d.state.deleted && d.state.epoch < prior.epoch))) continue
-      if (!prior || !comparable || d.state.deleted || d.state.epoch > prior.epoch) { states.set(cid, d.state); departed.set(cid, new Set()) }
+      if (!prior || !comparable || d.state.deleted || d.state.epoch > prior.epoch) {
+        if (!createdAt.has(cid)) createdAt.set(cid, d.state.updatedAt)
+        states.set(cid, d.state); departed.set(cid, new Set())
+      }
       const waiting = deferred.get(cid)
       if (waiting) {
         const ready: StoredEvent[] = []
@@ -459,7 +464,7 @@ export function buildCommunityModel(records: StoredEvent[], owner: string, prefe
       messages.set(key, { id: e.id, conversationId: cid, channelId: d.channelId, senderPubKey: e.author, content: d.type === "poll" ? "" : d.content ?? "", timestamp: e.timestamp,
         delivery: record.local ? e.recipients.every(x => record.delivered.includes(x)) ? "sent" : record.error ? "failed" : "pending" : "received",
         pinned: false, hidden: false, replyTo: "replyTo" in d ? d.replyTo : undefined, mentions: "mentions" in d ? d.mentions?.filter(address => prior.members.includes(address)) : undefined,
-        attachment: d.type === "attachment" ? d.attachment : undefined, poll: d.type === "poll" ? { question: d.question, options: [...d.options], votes: {} } : undefined,
+        shared: d.type === "message" ? d.shared : undefined, attachment: d.type === "attachment" ? d.attachment : undefined, poll: d.type === "poll" ? { question: d.question, options: [...d.options], votes: {} } : undefined,
         error: record.error, deliveredTo: [], readBy: [] })
       messageEvents.set(key, e)
       accepted.add(record.key)
@@ -475,16 +480,14 @@ export function buildCommunityModel(records: StoredEvent[], owner: string, prefe
     if (!target || target.channelId !== d.channelId || hidden.has(`${target.conversationId}:${target.channelId}:${target.id}`)) continue
     const original = messageEvents.get(`${e.conversationId}:${d.targetId}`)!
     if (original.author !== e.author && !original.recipients.includes(e.author)) continue
-    if (d.type === "edit" && target.senderPubKey === e.author && !target.attachment && !target.poll) { target.content = d.content; target.editedAt = e.timestamp }
+    if (d.type === "edit" && target.senderPubKey === e.author && !target.attachment && !target.poll && !target.shared) { target.content = d.content; target.editedAt = e.timestamp }
     else if (d.type === "pin") target.pinned = d.pinned
     else if (d.type === "vote" && target.poll && d.option < target.poll.options.length) target.poll.votes[e.author] = d.option
-    else if (d.type === "receipt" && target.senderPubKey !== e.author) {
-      if (!target.deliveredTo.includes(e.author)) target.deliveredTo.push(e.author)
-      if (d.receipt === "read" && !target.readBy.includes(e.author)) target.readBy.push(e.author)
-      if (target.senderPubKey === owner) target.delivery = target.readBy.length ? "read" : "delivered"
-    } else continue
+    else continue
     accepted.add(key)
   }
+  // Overlay authoritative terminal status without rewriting signed history.
+  for (const id of preferences.closedRetention ?? []) { const state = states.get(id); if (state) states.set(id, { ...state, deleted: true }) }
   model.messages = [...messages.values()].filter(m => !states.get(m.conversationId)?.deleted && !preferences.deletedMessages?.[m.conversationId]?.messageIds.includes(m.id))
     .map(m => {
       const replied = m.replyTo ? messages.get(`${m.conversationId}:${m.replyTo}`) : undefined
@@ -494,6 +497,7 @@ export function buildCommunityModel(records: StoredEvent[], owner: string, prefe
       return { ...m, replyTo: visibleReply ? m.replyTo : undefined, hidden: hidden.has(`${m.conversationId}:${m.channelId}:${m.id}`) }
     }).sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id))
   model.requests = [...requests.values()].map(request => {
+    if (preferences.closedRetention?.includes(request.communityId)) return { ...request, status: "rejected", reason: "This community has been deleted." }
     const decision = decisions.get(request.id)
     if (decision?.communityId === request.communityId && decision.applicant === request.author && decision.author === request.invite.owner) return { ...request, status: "rejected", reason: decision.reason }
     const approval = approvals.get(request.id)
@@ -516,8 +520,9 @@ export function buildCommunityModel(records: StoredEvent[], owner: string, prefe
       channelUnread[c.id] = rows.filter(m => m.channelId === c.id && m.senderPubKey !== owner && m.timestamp > (preferences.readAt[key] ?? 0)).length
     }
     model.communities.push({ ...state, joined, effectiveMembers, channelUnread, unreadCount: joined ? Object.values(channelUnread).reduce((a, b) => a + b, 0) : 0,
-      lastMessage: rows.at(-1), notificationMode: preferences.notifications[state.id] ?? "all" })
+      lastMessage: rows.at(-1), activityAt: rows.at(-1)?.timestamp ?? createdAt.get(state.id) ?? 0,
+      notificationMode: preferences.notifications[state.id] ?? "all" })
   }
-  model.communities.sort((a, b) => (b.lastMessage?.timestamp ?? b.updatedAt) - (a.lastMessage?.timestamp ?? a.updatedAt))
+  model.communities.sort((a, b) => b.activityAt! - a.activityAt! || a.id.localeCompare(b.id))
   return model
 }

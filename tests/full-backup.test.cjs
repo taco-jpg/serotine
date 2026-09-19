@@ -824,3 +824,21 @@ test('late call privacy corrections purge existing history and stale backups whi
   await events.saveCallHistory(alice.publicKey, call)
   assert.deepEqual(await events.getCallHistory(alice.publicKey), { version: 1, records: [], deleted: [call.id] })
 })
+
+
+test('terminal spaces and relationship boundaries survive stale writes and old backup imports', async () => {
+  const cid = `community:${alice.publicKey}:${crypto.randomUUID()}`
+  const groupId = `group:${crypto.randomUUID()}`
+  const prior = { ...events.defaultMessagingPreferences(), terminatedGroups: [groupId], closedRetention: [cid], relationshipBoundaries: { [bob.publicKey]: 200 } }
+  await events.saveMessagingPreferences(alice.publicKey, prior)
+  await events.saveMessagingPreferences(alice.publicKey, { ...events.defaultMessagingPreferences(), relationshipBoundaries: { [bob.publicKey]: 100 } })
+  await events.importMessagingSnapshot(alice.publicKey, structuredClone(expectedMessaging))
+  const saved = await events.getMessagingPreferences(alice.publicKey)
+  assert.deepEqual(saved.closedRetention, [cid])
+  assert.deepEqual(saved.terminatedGroups, [groupId])
+  assert.equal(saved.relationshipBoundaries[bob.publicKey], 200)
+  const snapshot = await events.exportMessagingSnapshot(alice.publicKey)
+  await events.validateMessagingSnapshot(snapshot, alice.publicKey)
+  const invalid = structuredClone(snapshot); invalid.preferences.closedRetention = [bob.publicKey]
+  await assert.rejects(events.validateMessagingSnapshot(invalid, alice.publicKey), /terminal conversation/)
+})

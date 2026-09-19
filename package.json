@@ -26,8 +26,12 @@
     "test:large-history": "node scripts/large-history-smoke.cjs",
     "test:nicknames": "node scripts/nickname-smoke.cjs",
     "test:giphy-runtime": "node scripts/giphy-runtime-smoke.cjs",
+    "test:profiles": "node scripts/profiles-smoke.cjs",
     "test:private": "node scripts/private-chat-smoke.cjs",
     "test:plugins": "node scripts/plugins-smoke.cjs",
+    "test:sharing": "node scripts/sharing-smoke.cjs",
+    "test:design": "node scripts/design-smoke.cjs",
+    "test:groups": "node scripts/group-invitations-smoke.cjs",
     "test:qr": "node scripts/qr-smoke.cjs",
     "test:cleanup": "node scripts/chat-cleanup-smoke.cjs",
     "test:recovery": "node scripts/recovery-smoke.cjs",
@@ -35,7 +39,8 @@
     "test:backpack": "node scripts/backpack-storage-smoke.cjs",
     "test:uploads": "node scripts/staged-uploads-smoke.cjs",
     "test:d1": "node --test tests/d1-storage.test.cjs tests/relay-payload-migration.test.cjs",
-    "measure:d1": "node tests/support/d1-workload.cjs --optimized"
+    "measure:d1": "node tests/support/d1-workload.cjs --optimized",
+    "test:direct": "node scripts/direct-smoke.cjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

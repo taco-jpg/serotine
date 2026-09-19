@@ -307,3 +307,20 @@ test('blocking a member never suppresses authenticated leave and blocking owner 
   const blockedOwner = defaultMessagingPreferences(); blockedOwner.blocked = [alice.publicKey]
   assert.equal(model([join, rejection], bob, blockedOwner).requests[0].status, 'rejected')
 })
+
+
+test('community inbox activity uses eligible messages or initial state, never settings or channel navigation', async () => {
+  const [alice, bob] = await Promise.all([identity(), identity()])
+  const initial = await state(alice, [alice, bob], { updatedAt: Date.now() - 30000 })
+  const changed = await next(alice, initial, { name: 'Renamed community', updatedAt: Date.now() - 10000 })
+  const created = stateEvent(alice, initial), settings = stateEvent(alice, changed)
+  const empty = model([created, settings], alice).communities[0]
+  assert.equal(empty.activityAt, initial.updatedAt)
+  assert.equal(empty.updatedAt, changed.updatedAt, 'signed state timestamp remains untouched')
+  const sent = message(bob, changed, 'Latest actual conversation activity')
+  sent.timestamp = Date.now() - 5000
+  const read = { ...defaultMessagingPreferences(), readAt: { [protocol.communityChannelKey(initial.id, initial.channels[0].id)]: Date.now() }, notifications: { [initial.id]: 'muted' }, archived: [initial.id] }
+  assert.equal(model([created, settings, sent], alice, read).communities[0].activityAt, sent.timestamp)
+  const rename = await next(alice, changed, { name: 'Another name', updatedAt: Date.now() })
+  assert.equal(model([created, settings, sent, stateEvent(alice, rename)], alice, read).communities[0].activityAt, sent.timestamp)
+})

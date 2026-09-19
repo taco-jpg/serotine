@@ -59,7 +59,8 @@ These commands are for the site operator's Cloudflare account; run them with an 
 | Chunks per file | At most 256 |
 | Unsigned capability query | Public availability and limits only |
 | Staged/ready draft | 24 hours from upload initialization |
-| Published attachment | 30 days from the first successful publish |
+| Published direct/private-group attachment | Until all intended recipients verify and durably cache it, with a seven-day fallback expiry |
+| Published community attachment | 30 days from the first successful publish |
 | Per-identity reserved upload bytes | 5 GiB, plus bounded encryption overhead |
 | Global reserved upload bytes | 50 GiB, plus bounded encryption overhead |
 | Live uploads per identity | 100 |
@@ -69,7 +70,7 @@ These commands are for the site operator's Cloudflare account; run them with an 
 
 The browser Backpack is separate local storage. Its 5 GB limit does not reserve server upload space. Server quotas count both staged and published attachments until successful physical cleanup. Local browser storage remains subject to browser/device capacity.
 
-Publication and expiry are authoritative server values returned in the receipt. Repeating publish does not extend the lifetime. A backup containing an attachment reference does not extend its download availability; save the actual file before that timestamp if it must remain available afterward. Existing retained-event attachment formats continue to be readable. If the server has no R2 binding, clients can continue the bounded legacy upload path; a large upload gets a setup error rather than silently entering an event store that cannot hold it.
+Publication and expiry are authoritative server values returned in the receipt. SIP-18 can reclaim direct/private-group bytes earlier after authenticated completion bound to the exact message, manifest, upload, and intended recipient set. Only fully verified files saved in the durable local cache qualify; generic read or delivered receipts do not. See [SIP 8–18 implementation notes](SIP-8-18.md). Repeating publish does not extend the lifetime. A backup containing an attachment reference does not extend its download availability; save the actual file before that timestamp if it must remain available afterward. Existing retained-event attachment formats continue to be readable. If the server has no R2 binding, clients can continue the bounded legacy upload path; a large upload gets a setup error rather than silently entering an event store that cannot hold it.
 
 ## Request and cleanup guarantees
 

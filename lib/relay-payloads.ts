@@ -12,7 +12,7 @@ const digest = async (bytes: ArrayBuffer) => Array.from(new Uint8Array(await cry
 function reference(value: string): Reference | null {
   if (!value.startsWith(PAYLOAD_PREFIX)) return null
   const parsed = JSON.parse(value.slice(PAYLOAD_PREFIX.length)) as Reference
-  if (!/^relay-payloads\/(?:v2|legacy-v2)\/[0-9a-f]{64}$/.test(parsed.key) || !/^[0-9a-f]{64}$/.test(parsed.sha256)
+  if (!/^relay-payloads\/(?:(?:v2|legacy-v2)\/|scoped-v1\/[0-9a-f]{64}\/)[0-9a-f]{64}$/.test(parsed.key) || !/^[0-9a-f]{64}$/.test(parsed.sha256)
     || !Number.isSafeInteger(parsed.bytes) || parsed.bytes < 0 || parsed.bytes > 2 * 1024 * 1024) throw new Error('Invalid stored payload reference')
   return parsed
 }
@@ -39,10 +39,29 @@ async function read(files: PayloadBucket, ref: Reference) {
 
 /** All encrypted packets are opaque: older clients may embed file bytes even
  * in a small message. Externalize every packet, without trying to classify it. */
-export async function storeRelayPayload(value: string): Promise<string> {
+export async function storeRelayPayload(value: string, scope?: { id: string; timestamp: number; db: D1DatabaseBinding }): Promise<string> {
   const env = await context()
   if (env.SEROTINE_STORAGE_VERSION === '1') return value // pre-cutover revision compatibility
   if (!env.serotine_files) throw new Error('The serotine_files R2 binding is required')
+  if (scope) {
+    const bytes = encoder.encode(value), sha256 = await digest(bytes.buffer)
+    const generationDigest = await digest(encoder.encode(JSON.stringify([scope.timestamp, sha256])).buffer)
+    const key = `relay-payloads/scoped-v1/${scope.id}/${generationDigest}`
+    // Reserve an exact cleanup key BEFORE the external write. Never sharing a
+    // key between scopes makes terminal object deletion safe without scans.
+    const reserved = await scope.db.prepare(`INSERT OR IGNORE INTO RetentionObject(objectKey,scopeId,eventTimestamp,expiresAt)
+      SELECT ?, ?, ?, ? WHERE EXISTS(SELECT 1 FROM RetentionScope WHERE scopeId = ? AND closedAt = 0 AND boundaryAt < ?)`)
+      .bind(key, scope.id, scope.timestamp, Date.now() + 8 * 86400_000, scope.id, scope.timestamp).run()
+    if (!reserved.meta.changes && !await scope.db.prepare("SELECT 1 FROM RetentionObject WHERE objectKey = ?").bind(key).first()) throw new Error('Conversation retention has ended')
+    await env.serotine_files.put(key, bytes.buffer, { httpMetadata: { contentType: 'application/octet-stream' } })
+    const closed = await scope.db.prepare("SELECT closedAt, boundaryAt FROM RetentionScope WHERE scopeId = ?").bind(scope.id).first<{ closedAt: number; boundaryAt: number }>()
+    if (!closed || closed.closedAt || scope.timestamp <= closed.boundaryAt) {
+      const files = env.serotine_files as PayloadBucket & { delete(keys: string[]): Promise<void> }
+      await files.delete([key])
+      throw new Error('Conversation retention has ended')
+    }
+    return PAYLOAD_PREFIX + JSON.stringify({ key, bytes: bytes.byteLength, sha256 } satisfies Reference)
+  }
   return write(env.serotine_files, value)
 }
 export async function hydrateRelayPayloads<T extends { encryptedData: string }>(rows: T[]): Promise<T[]> {

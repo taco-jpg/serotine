@@ -159,6 +159,6 @@ function RemoteAttachmentView({ metadata, identity }: { metadata: AttachmentMeta
         : url ? <a href={url} download={name} aria-label={`Download ${name}`} className="inline-flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-current/10"><Download className="size-4" /></a>
           : <button type="button" disabled={!identity} aria-label={`Download ${name}`} className="inline-flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-current/10 disabled:opacity-50" onClick={() => { if (sessionRef.current) void download(sessionRef.current, false) }}><Download className="size-4" /></button>}
     </div>
-    {!url && !state.loading && !state.saved && <p className="pb-2 text-xs opacity-70">Download to keep a copy. {metadata.remote?.expiresAt ? `Available until ${new Date(metadata.remote.expiresAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}.` : "Files are available for 30 days after sending."}</p>}
+    {!url && !state.loading && !state.saved && <p className="pb-2 text-xs opacity-70">Verified downloads are kept locally. Server copies are temporary and may disappear after everyone receives the file. {metadata.remote?.expiresAt ? `Expires by ${new Date(metadata.remote.expiresAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}.` : "Uncollected files expire within 30 days."}</p>}
   </div>
 }

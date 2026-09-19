@@ -346,6 +346,7 @@ test('file migration and runtime bootstrap produce the same schema', t => {
   const migrated = new DatabaseSync(':memory:')
   t.after(() => migrated.close())
   migrated.exec(fs.readFileSync(path.join(root, 'migrations/0006_encrypted_file_uploads.sql'), 'utf8'))
+  migrated.exec(fs.readFileSync(path.join(root, 'migrations/0007_ephemeral_file_delivery.sql'), 'utf8'))
   for (const sql of h.load(path.join(root, 'lib/file-upload-schema.ts')).FILE_UPLOAD_SCHEMA) h.sqlite.exec(sql)
   const schema = db => db.prepare("SELECT name, type, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => ({ ...row, sql: row.sql.replace(/\s+/g, ' ').trim() }))
   assert.deepEqual(schema(h.sqlite), schema(migrated))

@@ -1,11 +1,15 @@
 import type { Identity } from "./identity"
 import type { AttachmentMeta } from "./messaging-types"
 import { createRequestProof } from "./request-auth"
+import type { RetentionDescriptor } from "./retention-protocol"
+import { cacheVerifiedAttachment, getVerifiedAttachment, isAttachmentUnavailable, markAttachmentUnavailable } from "./verified-attachment-cache"
 import { MAX_FILE_BYTES, REMOTE_ATTACHMENT_CHUNK_BYTES, attachmentPreviewKind, isAttachmentMeta, normalizeMime,
   safeFilename, validateAttachmentFile, type AttachmentKind, type AttachmentProgress, type PreparedAttachment } from "./attachments"
 
 export const MAX_MEMORY_DOWNLOAD_BYTES = 64 * 1024 * 1024
 export const MAX_AUTO_PREVIEW_BYTES = 20 * 1024 * 1024
+class AttachmentUnavailableError extends Error {}
+const unavailableMessage = "This attachment is no longer available from the server, and this browser has no cached copy. Ask the sender to send it again."
 const endpoint = "/api/files"
 const encoder = new TextEncoder()
 const hex = (bytes: Uint8Array) => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("")
@@ -35,7 +39,7 @@ async function boundedBody(response: Response, maximum: number): Promise<ArrayBu
 }
 
 async function transferRequest(identity: Identity, action: string, data: Record<string, unknown>, options: {
-  body?: ArrayBuffer; signal?: AbortSignal; expectedBytes?: number
+  body?: ArrayBuffer; signal?: AbortSignal; expectedBytes?: number; allowed?: () => void
 } = {}): Promise<Record<string, unknown> | ArrayBuffer> {
   options.signal?.throwIfAborted()
   const controller = new AbortController(), abort = () => controller.abort(options.signal?.reason)
@@ -44,6 +48,7 @@ async function transferRequest(identity: Identity, action: string, data: Record<
   try {
     const proof = await createRequestProof(action, data, identity.privateKey, identity.publicKey)
     const envelope = JSON.stringify({ version: 1, action, data, proof })
+    options.allowed?.()
     const response = await fetch(endpoint, { method: options.body ? "PUT" : "POST", mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store",
       referrerPolicy: "no-referrer", headers: options.body
         ? { "Content-Type": "application/octet-stream", "X-Serotine-File-Request": envelope }
@@ -59,6 +64,7 @@ async function transferRequest(identity: Identity, action: string, data: Record<
     let result: Record<string, unknown>
     try { result = JSON.parse(new TextDecoder().decode(bytes)) } catch { throw new Error("The file service is unavailable. Reload Serotine and retry.") }
     if (!response.ok || result?.success !== true) {
+      if (action === "file:read" && response.status === 410) throw new AttachmentUnavailableError(unavailableMessage)
       const error = result?.error
       throw new Error(typeof error === "string" && error.length <= 300 && !/[<>]/.test(error) && ![...error].some(character => character.charCodeAt(0) < 32) ? error : "The file transfer could not finish. Retry the transfer.")
     }
@@ -104,8 +110,28 @@ function uploadReceipt(result: Record<string, unknown> | ArrayBuffer, uploadId: 
   return Number(result.expiresAt)
 }
 
+/** Bind the published upload once to the exact outgoing message and intended
+ * recipients before that encrypted message can enter the outbox. */
+export async function registerAttachmentDelivery(identity: Identity, metadata: AttachmentMeta, messageId: string, recipients: string[], scope: RetentionDescriptor, allowed?: () => void): Promise<AttachmentMeta> {
+  if (!isAttachmentMeta(metadata)) throw new Error("This attachment has invalid delivery details.")
+  if (!metadata.remote) return metadata
+  allowed?.()
+  // Preserve the stable message binding even when registration succeeded but
+  // the response/signing/queue step failed. A composer retry uses this same ID.
+  metadata.remote.messageId = messageId
+  const result = await transferRequest(identity, "file:delivery", { uploadId: metadata.id, messageId, manifestHash: metadata.sha256, recipients, scope }, { allowed })
+  const expiresAt = uploadReceipt(result, metadata.id, "published")
+  metadata.remote.expiresAt = expiresAt
+  return { ...metadata, remote: { ...metadata.remote, messageId, expiresAt } }
+}
+async function acknowledgeVerifiedAttachment(metadata: AttachmentMeta, identity: Identity) {
+  if (!metadata.remote?.messageId) return // Older uploads use their finite TTL.
+  await transferRequest(identity, "file:received", { uploadId: metadata.id, messageId: metadata.remote.messageId,
+    manifestHash: metadata.sha256, capability: metadata.remote.capability })
+}
+
 /** One 4 MiB slice at a time: never read/base64-encode the whole File. */
-export async function stageUpload(file: File, identity: Identity, kind: AttachmentKind = "file", onProgress?: AttachmentProgress, signal?: AbortSignal): Promise<PreparedAttachment> {
+export async function stageUpload(file: File, identity: Identity, kind: AttachmentKind = "file", onProgress?: AttachmentProgress, signal?: AbortSignal, allowed?: () => void): Promise<PreparedAttachment> {
   validateAttachmentFile(file)
   if (!file.size) throw new Error("Empty files use the local attachment format.")
   signal?.throwIfAborted()
@@ -124,7 +150,7 @@ export async function stageUpload(file: File, identity: Identity, kind: Attachme
   try {
     onProgress?.(0)
     uploadReceipt(await transferRequest(identity, "file:init", { uploadId: metadata.id, size: file.size, chunkCount: metadata.chunks,
-      accessHash: await fileDigest(encoder.encode(capability)) }, { signal }), metadata.id, "staged")
+      accessHash: await fileDigest(encoder.encode(capability)) }, { signal, allowed }), metadata.id, "staged")
     for (let index = 0; index < metadata.chunks; index++) {
       signal?.throwIfAborted()
       const start = index * remote.chunkBytes, expected = Math.min(remote.chunkBytes, file.size - start)
@@ -133,20 +159,21 @@ export async function stageUpload(file: File, identity: Identity, kind: Attachme
       const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv: chunkIv(remote.ivPrefix, index), additionalData: chunkAad(metadata, index) }, key, plain)
       new Uint8Array(plain).fill(0)
       const digest = await fileDigest(ciphertext)
-      await transferRequest(identity, "file:chunk", { uploadId: metadata.id, index, size: ciphertext.byteLength, digest }, { body: ciphertext, signal })
+      await transferRequest(identity, "file:chunk", { uploadId: metadata.id, index, size: ciphertext.byteLength, digest }, { body: ciphertext, signal, allowed })
       remote.hashes.push(digest)
       onProgress?.(Math.min(99, Math.floor((index + 1) * 99 / metadata.chunks)))
     }
     metadata.sha256 = await manifestDigest(remote.hashes)
-    uploadReceipt(await transferRequest(identity, "file:complete", { uploadId: metadata.id }, { signal }), metadata.id, "ready")
+    uploadReceipt(await transferRequest(identity, "file:complete", { uploadId: metadata.id }, { signal, allowed }), metadata.id, "ready")
     signal?.throwIfAborted()
+    await cacheVerifiedAttachment(identity.publicKey, metadata, file).catch(() => undefined)
     onProgress?.(100)
     return { metadata, storage: "remote", discard,
       async publish() {
         if (discarded) throw new Error("This file draft was removed. Attach it again.")
         if (published) return
         publishRequested = true
-        remote.expiresAt = uploadReceipt(await transferRequest(identity, "file:publish", { uploadId: metadata.id }), metadata.id, "published")
+        remote.expiresAt = uploadReceipt(await transferRequest(identity, "file:publish", { uploadId: metadata.id }, { allowed }), metadata.id, "published")
         published = true
       },
     }
@@ -184,7 +211,15 @@ export async function streamAttachmentDownload(metadata: AttachmentMeta, identit
     }
     signal?.throwIfAborted()
     await sink.close()
-  } catch (error) { await sink.abort(error).catch(() => undefined); throw error }
+  } catch (error) {
+    if (error instanceof AttachmentUnavailableError) await markAttachmentUnavailable(identity.publicKey, metadata).catch(() => undefined)
+    await sink.abort(error).catch(() => undefined); throw error
+  }
+}
+
+async function assertRemoteAvailable(metadata: AttachmentMeta, identity: Identity) {
+  if ((metadata.remote?.expiresAt !== undefined && metadata.remote.expiresAt <= Date.now())
+    || await isAttachmentUnavailable(identity.publicKey, metadata).catch(() => false)) throw new AttachmentUnavailableError(unavailableMessage)
 }
 
 export type AttachmentDownload = { blob?: Blob; dispose(): Promise<void> }
@@ -201,9 +236,27 @@ export async function downloadRemoteAttachment(metadata: AttachmentMeta, identit
     const handle = await saveWindow.showSaveFilePicker({ suggestedName: safeFilename(metadata.name) })
     options.signal?.throwIfAborted()
     const writer = await handle.createWritable()
-    await streamAttachmentDownload(metadata, identity, writer, options.onProgress, options.signal)
+    const saved = await getVerifiedAttachment(identity.publicKey, metadata).catch(() => undefined)
+    if (saved) {
+      const reader = saved.stream().getReader()
+      try { while (true) { options.signal?.throwIfAborted(); const piece = await reader.read(); if (piece.done) break; await writer.write(piece.value) }; await writer.close() }
+      catch (error) { await writer.abort(error).catch(() => undefined); throw error }
+      finally { reader.releaseLock() }
+    } else {
+      try { await assertRemoteAvailable(metadata, identity) } catch (error) { await writer.abort(error).catch(() => undefined); throw error }
+      await streamAttachmentDownload(metadata, identity, writer, options.onProgress, options.signal)
+    }
+    await acknowledgeVerifiedAttachment(metadata, identity).catch(() => undefined)
     return { dispose: async () => undefined }
   }
+  const cached = await getVerifiedAttachment(identity.publicKey, metadata).catch(() => undefined)
+  if (cached) {
+    // Retry a lost acknowledgement only on the next explicit/open-preview use,
+    // never by introducing polling. Cached bytes remain usable after expiry.
+    await acknowledgeVerifiedAttachment(metadata, identity).catch(() => undefined)
+    return { blob: cached, dispose: async () => undefined }
+  }
+  await assertRemoteAvailable(metadata, identity)
   if (metadata.size <= MAX_MEMORY_DOWNLOAD_BYTES) {
     const pieces: ArrayBuffer[] = []
     await streamAttachmentDownload(metadata, identity, {
@@ -211,6 +264,10 @@ export async function downloadRemoteAttachment(metadata: AttachmentMeta, identit
     }, options.onProgress, options.signal)
     const blob = new Blob(pieces, { type: mime })
     pieces.length = 0
+    // Without a durable local copy (quota/privacy mode), keep the server copy
+    // until its finite expiry. A preview alone is never delivery completion.
+    try { await cacheVerifiedAttachment(identity.publicKey, metadata, blob); await acknowledgeVerifiedAttachment(metadata, identity) }
+    catch { /* Showing a verified in-memory download still works. */ }
     return { blob, dispose: async () => undefined }
   }
   // OPFS File objects remain disk-backed. Never concatenate a 1 GiB download in RAM.
@@ -223,6 +280,9 @@ export async function downloadRemoteAttachment(metadata: AttachmentMeta, identit
   try {
     const writer = await file.createWritable()
     await streamAttachmentDownload(metadata, identity, writer, options.onProgress, options.signal)
-    return { blob: (await file.getFile()).slice(0, metadata.size, mime), dispose }
+    const blob = (await file.getFile()).slice(0, metadata.size, mime)
+    try { await cacheVerifiedAttachment(identity.publicKey, metadata, blob); await acknowledgeVerifiedAttachment(metadata, identity) }
+    catch { /* Retain until TTL if the durable cache cannot be committed. */ }
+    return { blob, dispose }
   } catch (error) { await dispose(); throw error }
 }

@@ -9,6 +9,8 @@ const { Miniflare } = require(require.resolve('miniflare', { paths: [path.dirnam
 const root = path.resolve(__dirname, '../..')
 async function harness(sourceRoot = root, optimized = false) {
   const metricsSource = `
+let fileCounts = { puts: 0, gets: 0, deletes: 0, deletedKeys: 0 }; const fileCache = new WeakMap();
+function measuredFiles(bucket) { if(fileCache.has(bucket)) return fileCache.get(bucket); const result = { async put(...args){fileCounts.puts++;return bucket.put(...args)}, async get(...args){fileCounts.gets++;return bucket.get(...args)}, async delete(keys){fileCounts.deletes++;fileCounts.deletedKeys += Array.isArray(keys)?keys.length:1;return bucket.delete(keys)} };fileCache.set(bucket,result);return result;}
 const counts = new Map(); const measuredCache = new WeakMap(); let mode = null; let now = Date.now(); Date.now = () => now;
 function measured(db) {
  if(measuredCache.has(db))return measuredCache.get(db);
@@ -21,10 +23,12 @@ function measured(db) {
 export default {async fetch(request,env){
  const url = new URL(request.url);
  if(url.pathname==='/__mode'){mode=url.searchParams.get('value');return new Response('ok')}
+ if(url.pathname==='/__filemetrics'){const result=fileCounts;fileCounts={puts:0,gets:0,deletes:0,deletedKeys:0};return Response.json(result)}
  if(url.pathname==='/__metrics'){const result=Object.fromEntries(counts);if(url.searchParams.has('reset'))counts.clear();return Response.json(result)}
  if(url.pathname==='/__clock'){now=Number(url.searchParams.get('now'));return new Response('ok')}
- globalThis.__fixtureEnv={...env,...(mode?{SEROTINE_STORAGE_VERSION:mode}:{}),serotine_db:measured(env.serotine_db)};
- const mod=url.pathname==='/api/calls'?await import('./app/api/calls/route.ts'):url.pathname==='/api/files'?await import('./app/api/files/route.ts'):await import('./app/api/relay/route.ts');
+ globalThis.__fixtureEnv={...env,...(mode?{SEROTINE_STORAGE_VERSION:mode}:{}),serotine_db:measured(env.serotine_db),serotine_files:measuredFiles(env.serotine_files)};
+ if(url.pathname==='/__retention-maintenance'){await (await import('./lib/retention-server.ts')).maintainRetentionStorage(globalThis.__fixtureEnv.serotine_db,globalThis.__fixtureEnv.serotine_files,now);return new Response('ok')}
+ const mod=url.pathname==='/api/retention'?await import('./app/api/retention/route.ts'):url.pathname==='/api/calls'?await import('./app/api/calls/route.ts'):url.pathname==='/api/files'?await import('./app/api/files/route.ts'):await import('./app/api/relay/route.ts');
  return mod[request.method](request);
 }};`
   const built = await esbuild.build({ absWorkingDir: sourceRoot, entryPoints: ['custom-worker.ts'], bundle: true, write: false, platform: 'browser', format: 'esm', target: 'es2022',
@@ -47,8 +51,8 @@ export default {async fetch(request,env){
   const request=async(person,action,data={},options={})=>{
     const payload=action.startsWith('call:')||action.startsWith('room:')?{sessionId:person.sessionId,...data}:data
     const proof=options.proof||await client.createRequestProof(action,payload,person.privateKey,person.publicKey,now)
-    const body={version:action.startsWith('file:')||action.startsWith('call:')||action.startsWith('room:')?1:2,action,data:payload,proof}
-    const route=action.startsWith('file:')?'files':action.startsWith('call:')||action.startsWith('room:')?'calls':'relay'
+    const body={version:action.startsWith('retention:')||action.startsWith('file:')||action.startsWith('call:')||action.startsWith('room:')?1:2,action,data:payload,proof}
+    const route=action.startsWith('retention:')?'retention':action.startsWith('file:')?'files':action.startsWith('call:')||action.startsWith('room:')?'calls':'relay'
     const response=await mf.dispatchFetch(`https://serotine.example/api/${route}`, options.bytes ? {method:'PUT',headers:{'content-type':'application/octet-stream','x-serotine-file-request':JSON.stringify(body)},body:options.bytes} : {method:'POST',headers:{'content-type':'application/json',...(action.startsWith('event:')?{'x-serotine-events':'1'}:{})},body:JSON.stringify(body)})
     if(options.raw)return response
     const result=await response.json();assert.equal(result.success,true,`${action}: ${JSON.stringify(result)}`);return result

@@ -77,8 +77,10 @@ export function subscribeNavigation(owner: string, onChange: () => void): () => 
   return () => { window.removeEventListener(CHANGE_EVENT, localChange); window.removeEventListener("storage", storageChange) }
 }
 
-export function sortByRecentActivity<T extends { id: string; name: string; updatedAt: number }>(items: T[], preferences: NavigationPreferences): T[] {
-  return [...items].sort((a, b) => Math.max(b.updatedAt, preferences.opened[b.id] || 0) - Math.max(a.updatedAt, preferences.opened[a.id] || 0) || a.name.localeCompare(b.name))
+/** Navigation, names, receipts, and settings never participate in inbox rank.
+ * IDs break activity ties so renaming a contact cannot shuffle adjacent rows. */
+export function sortByRecentActivity<T extends { id: string; updatedAt: number; activityAt?: number }>(items: readonly T[], _preferences?: NavigationPreferences): T[] {
+  return [...items].sort((a, b) => (b.activityAt ?? b.updatedAt) - (a.activityAt ?? a.updatedAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
 export function restoredChatHref(preferences: NavigationPreferences, conversations: ConversationRecord[], communities: CommunityRecord[], owner: string, archived: string[] = []): string | null {

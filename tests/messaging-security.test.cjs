@@ -40,7 +40,8 @@ async function group(admin, members, extra = {}) {
 function record(e, owner, index = 0, extra = {}) {
   return { key: eventStorageKey(e), event: e, local: e.author === owner.publicKey, delivered: [...e.recipients], receivedAt: Date.now() - 1000 + index, ...extra }
 }
-function model(events, owner, preferences = defaultMessagingPreferences()) {
+// These reducer authority fixtures represent legacy groups the recipient explicitly joined.
+function model(events, owner, preferences = { ...defaultMessagingPreferences(), accepted: [...new Set(events.filter(e => e.group).map(e => e.conversationId))] }) {
   return messaging.buildMessagingModel(events.map((e, i) => record(e, owner, i)), owner.publicKey, [], preferences)
 }
 
@@ -219,7 +220,7 @@ test('relay sequence resolves equal timestamps before group membership changes',
   const update = await event(alice, g2, 'group', {}, { id: '00000000-0000-4000-8000-000000000000', timestamp: time, recipients: [bob.publicKey, carol.publicKey] })
   const stale = await event(bob, g1, 'message', { content: 'after removal' }, { timestamp: time })
   const records = [before, update, stale].map((e, i) => record(e, carol, i, { receivedAt: time, sequence: i + 1 })).reverse()
-  const state = messaging.buildMessagingModel(records, carol.publicKey, [], defaultMessagingPreferences())
+  const state = messaging.buildMessagingModel(records, carol.publicKey, [], { ...defaultMessagingPreferences(), accepted: [g1.id] })
   assert.deepEqual(state.messages.map(x => x.id), [before.id])
   assert.equal(state.groups[0].epoch, 2)
 })
@@ -262,7 +263,7 @@ test('old preferences remain readable and archived unknown groups stay out of re
   const archived = model([incoming], alice, { ...old, archived: [g.id] })
   assert.equal(archived.conversations.find(c => c.id === g.id).archived, true)
   assert.equal(archived.requests.length, 0)
-  assert.equal(archived.messages[0].id, incoming.id)
+  assert.deepEqual(archived.messages, [], 'an unaccepted legacy recipient has no access merely from an administrator membership list')
 })
 
 test('deletion hides retained contact shells, rejects old history, and reopens only for fresh content', async () => {
@@ -284,7 +285,7 @@ test('deletion hides retained contact shells, rejects old history, and reopens o
 test('deleted group checkpoints preserve departures and prevent administrator substitution', async () => {
   const [alice, bob, mallory] = await Promise.all([identity(), identity(), identity()])
   const g = await group(alice, [alice, bob]), deletedAt = Date.now()
-  const p = { ...defaultMessagingPreferences(), deleted: { [g.id]: { deletedAt, eventKeys: [], group: g, leftMembers: [bob.publicKey] } } }
+  const p = { ...defaultMessagingPreferences(), accepted: [g.id], deleted: { [g.id]: { deletedAt, eventKeys: [], group: g, leftMembers: [bob.publicKey] } } }
   const after = await event(alice, g, 'message', { content: 'After Bob left' }, { timestamp: deletedAt + 1 })
   const hijack = await group(mallory, [mallory, bob], { id: g.id, epoch: 99 })
   const forged = await event(mallory, hijack, 'message', { content: 'Wrong administrator' }, { timestamp: deletedAt + 2 })
@@ -297,4 +298,39 @@ test('deleted group checkpoints preserve departures and prevent administrator su
   const restored = model([after, forged, welcome], bob, p)
   assert.deepEqual(restored.messages.map(m => m.id), [welcome.id])
   assert.ok(restored.conversations.find(c => c.id === g.id).members.includes(bob.publicKey))
+})
+
+
+test('inbox activity ignores group renaming, private settings, receipts and local preferences', async () => {
+  const [alice, bob] = await Promise.all([identity(), identity()])
+  const created = Date.now() - 30000
+  const first = await group(alice, [alice, bob], { updatedAt: created })
+  const renamed = await group(alice, [alice, bob], { ...first, name: 'Renamed group', epoch: 2, updatedAt: created + 10000 })
+  const initial = await event(alice, first, 'group', {}, { timestamp: created })
+  const change = await event(alice, renamed, 'group', {}, { timestamp: created + 10000 })
+  const empty = model([initial, change], alice).conversations.find(item => item.id === first.id)
+  assert.equal(empty.activityAt, created, 'metadata revisions preserve the earliest known creation')
+  const chat = await event(bob, alice.publicKey, 'message', { content: 'Ordinary activity' }, { timestamp: created + 5000 })
+  const setting = await event(alice, bob.publicKey, 'private-settings', { ttlSeconds: 0 }, { timestamp: created + 20000 })
+  const receipt = await event(alice, bob.publicKey, 'receipt', { targetId: chat.id, receipt: 'read' }, { timestamp: created + 25000 })
+  const preferences = { ...defaultMessagingPreferences(), readAt: { [bob.publicKey]: Date.now() }, archived: [bob.publicKey], notifications: { [bob.publicKey]: 'muted' } }
+  const result = model([initial, change, chat, setting, receipt], alice, preferences)
+  assert.equal(result.conversations.find(item => item.id === bob.publicKey).activityAt, chat.timestamp)
+  const settingsOnly = model([setting], alice).conversations.find(item => item.id === bob.publicKey)
+  assert.equal(settingsOnly.activityAt, 0, 'a timer control is not a first message')
+})
+
+test('a removed member needs a fresh invitation signature; an administrator cannot reuse old acceptance', async () => {
+  const [alice, bob] = await Promise.all([identity(), identity()])
+  const admission = load(path.join(root, 'lib/group-admission.ts'))
+  const cid = `group:${crypto.randomUUID()}`
+  const invitation = await admission.signGroupInvitation({ id: crypto.randomUUID(), groupId: cid, admin: alice.publicKey, invitee: bob.publicKey, createdAt: Date.now(), expiresAt: Date.now() + 60000 }, alice)
+  const acceptance = await admission.signGroupAcceptance(invitation, bob)
+  const g1 = await messaging.signGroup({ id: cid, name: 'Explicit group', admin: alice.publicKey, members: [alice.publicKey, bob.publicKey], epoch: 1, updatedAt: Date.now(), protocol: 2, admissions: [acceptance], legacyMembers: [], consumedInvitations: [invitation.id] }, alice)
+  const g2 = await messaging.signGroup({ ...g1, members: [alice.publicKey], admissions: [], epoch: 2 }, alice)
+  const stale = await messaging.signGroup({ ...g1, epoch: 3 }, alice)
+  const controls = [await event(alice, g1, 'group', {}), await event(alice, g2, 'group', {}, { recipients: [bob.publicKey] }), await event(alice, stale, 'group', {})]
+  const state = model(controls, bob)
+  assert.equal(state.groups[0].epoch, 2)
+  assert.equal(state.groups[0].members.includes(bob.publicKey), false)
 })

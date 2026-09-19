@@ -21,6 +21,8 @@ vm.runInNewContext(compile(source, "page.tsx").outputText, {
     if (name === "./landing.module.css") return { default: classes }
     if (name === "./landing-controls") return { LandingEnhancements: () => null, ThemeControl: () => React.createElement("button", { disabled: true, "aria-label": "Change color theme" }) }
     if (name === "@/components/ui/identity-icon") return { IdentityIcon: () => React.createElement("span", { "aria-hidden": true }) }
+    if (name === "@/components/ui/app-logo") return { AppLogo: () => React.createElement("span", {}, "serotine.") }
+    if (name === "@/components/ui/button") return { Button: props => props.children }
     throw new Error(`Unexpected dependency: ${name}`)
   },
 })
@@ -129,9 +131,10 @@ test("event-driven motion suspends for interaction and cleans up", () => {
   assert.match(css, /data-interacting="true"/)
 })
 
-test("warm/plum art direction survives with unpinned mobile and reduced-motion fallback", () => {
-  assert.match(css, /--paper:\s*#f6f4ef/); assert.match(css, /--paper:\s*#201e23/)
-  assert.match(css, /:global\(\.dark\) \.landing/)
+test("shared semantic palette preserves unpinned mobile and reduced-motion fallback", () => {
+  assert.match(css, /--paper:\s*var\(--background\)/)
+  assert.match(css, /--ink:\s*var\(--foreground\)/)
+  assert.doesNotMatch(css, /--theme-chrome:.*!important/)
   assert.match(css, /min-width:\s*801px/)
   assert.match(css, /prefers-reduced-motion:\s*reduce/)
   assert.match(css, /animation:\s*none\s*!important/)
@@ -145,13 +148,12 @@ test("real limitations and optional cryptography source are retained", () => {
   assert.equal(find("canvas").length, 0); assert.equal(find("img").length, 0)
 })
 
-test("actual small-text and control token contrast remains readable in both themes", () => {
-  function luminance(hex) { return [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0) }
-  const ratio = (a, b) => { const x = [luminance(a), luminance(b)].sort((a, b) => a - b); return (x[1] + .05) / (x[0] + .05) }
-  for (const block of [css.match(/\.landing \{([\s\S]*?)\n\}/)[1], css.match(/:global\(\.dark\) \.landing \{([\s\S]*?)\n\}/)[1]]) {
-    const token = name => block.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`))[1]
-    for (const background of ["paper", "surface", "note"]) assert.ok(ratio(token("muted-ink"), token(background)) >= 4.5, background)
-    assert.ok(ratio(token("input-line"), token("surface")) >= 3)
-    assert.ok(ratio(token("focus"), token("paper")) >= 3)
+test("landing uses the same verified foreground/background pairs as app themes", () => {
+  for (const [token, semantic] of Object.entries({ paper: 'background', surface: 'message-incoming', ink: 'foreground', 'muted-ink': 'muted-foreground', note: 'message-outgoing', focus: 'primary', 'button-ink': 'primary-foreground', 'button-fill': 'primary' })) {
+    assert.ok(css.includes(`--${token}: var(--${semantic})`), token)
   }
+  assert.match(css, /color: var\(--message-incoming-foreground\)/)
+  assert.match(css, /color: var\(--message-outgoing-foreground\)/)
+  assert.match(source, /<AppLogo/)
+  assert.match(source, /<Button asChild/)
 })

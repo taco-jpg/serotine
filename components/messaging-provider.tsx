@@ -23,11 +23,15 @@ const emptyCommunityModel: CommunityModel = { communities: [], messages: [], req
 const MessagingContext = createContext<MessagingContextValue | null>(null)
 const unavailable = async (): Promise<never> => { throw new Error("Your identity is still loading. Try again in a moment.") }
 const empty = {
+  profile: { revision: 1, device: "", values: {}, valuesVersion: { revision: 1, device: "" }, grants: {}, grantVersions: {} }, getProfile: () => ({}), getProfileSharing: () => [], saveProfile: unavailable, setProfileSharing: unavailable, removeFriend: unavailable,
+  getDeliveryMode: () => "relay" as const, setDeliveryMode: unavailable, connectDirect: unavailable, sendDirectFile: unavailable,
+  getDirectStatus: () => ({ state: "idle" as const, reason: "Your identity is loading." }),
   plugins: FIRST_PARTY_PLUGINS.map(manifest => ({ manifest, installed: false, enabled: false })),
   setPluginEnabled: unavailable, removePlugin: unavailable, refreshPeerCapabilities: unavailable,
   getPluginAvailability: () => ({ available: false, peerStatus: "local" as const, reason: "Your identity is still loading." }),
   identity: null, contacts: [], ready: false, error: null, status: "connecting", conversations: [], messages: [], groups: [], requests: [], preferences: defaultMessagingPreferences(),
-  sendText: unavailable, sendSecret: unavailable, setPrivateMode: unavailable, destroyPrivateHistory: unavailable, editMessage: unavailable, deleteMessage: unavailable, pinMessage: unavailable, createPoll: unavailable, vote: unavailable, createGroup: unavailable, updateGroup: unavailable, leaveGroup: unavailable,
+  shareMessages: unavailable, sendText: unavailable, sendSecret: unavailable, setPrivateMode: unavailable, destroyPrivateHistory: unavailable, editMessage: unavailable, deleteMessage: unavailable, pinMessage: unavailable, createPoll: unavailable, vote: unavailable, createGroup: unavailable, updateGroup: unavailable, leaveGroup: unavailable,
+  inviteGroupMember: unavailable, revokeGroupInvitation: unavailable, declineGroupInvitation: unavailable, dissolveGroup: unavailable, getPendingGroupInvitations: () => [],
   acceptRequest: unavailable, blockContact: unavailable, markRead: unavailable, archiveConversation: unavailable, deleteConversation: unavailable, setNotificationMode: unavailable, setReadReceipts: unavailable, requestNotifications: unavailable, retry: unavailable, sync: unavailable, sendEvent: unavailable, refresh: unavailable,
   getAttachmentChunks: () => [],
   getPrivateMode: () => 0,
@@ -89,12 +93,15 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
     }
   }, [])
   const value = useMemo<MessagingContextValue>(() => engine ? {
+    profile: engine.profiles.state, getProfile: engine.profiles.getProfile, getProfileSharing: engine.profiles.getSharing, saveProfile: engine.profiles.saveProfile, setProfileSharing: engine.profiles.setSharing, removeFriend: engine.removeFriend,
+    getDeliveryMode: engine.getDeliveryMode, setDeliveryMode: engine.setDeliveryMode, getDirectStatus: engine.getDirectStatus, connectDirect: engine.connectDirect, sendDirectFile: engine.sendDirectFile,
     plugins: engine.plugins, setPluginEnabled: engine.setPluginEnabled, removePlugin: engine.removePlugin,
     getPluginAvailability: engine.getPluginAvailability, refreshPeerCapabilities: engine.refreshPeerCapabilities,
     identity: engine.identity, contacts: engine.contacts, ready, error: error ?? engine.error, status: engine.status, preferences: engine.preferences, ...engine.model,
-    sendText: engine.sendText, editMessage: engine.editMessage, deleteMessage: engine.deleteMessage, pinMessage: engine.pinMessage, createPoll: engine.createPoll, vote: engine.vote, createGroup: engine.createGroup,
+    shareMessages: engine.shareMessages, sendText: engine.sendText, editMessage: engine.editMessage, deleteMessage: engine.deleteMessage, pinMessage: engine.pinMessage, createPoll: engine.createPoll, vote: engine.vote, createGroup: engine.createGroup,
     sendSecret: engine.sendSecret, setPrivateMode: engine.setPrivateMode, destroyPrivateHistory: engine.destroyPrivateHistory,
     getPrivateMode: engine.getPrivateMode,
+    inviteGroupMember: engine.inviteGroupMember, revokeGroupInvitation: engine.revokeGroupInvitation, declineGroupInvitation: engine.declineGroupInvitation, dissolveGroup: engine.dissolveGroup, getPendingGroupInvitations: engine.getPendingGroupInvitations,
     updateGroup: engine.updateGroup, leaveGroup: engine.leaveGroup, acceptRequest: engine.acceptRequest, blockContact: engine.blockContact, markRead: engine.markRead,
     archiveConversation: engine.archiveConversation, deleteConversation: engine.deleteConversation,
     setNotificationMode: engine.setNotificationMode, setReadReceipts: engine.setReadReceipts, requestNotifications: engine.requestNotifications, retry: engine.retry, sync: engine.sync,
@@ -139,6 +146,8 @@ export function MessagingProvider({ children }: { children: ReactNode }) {
   }), [engine, ready, value])
   return <MessagingContext.Provider value={value}><CommunityContext.Provider value={communityValue}><CallingProvider messaging={value} communities={communityValue.model.communities}>{children}</CallingProvider></CommunityContext.Provider></MessagingContext.Provider>
 }
+export function useOptionalMessaging() { return useContext(MessagingContext) }
+
 export function useMessaging(): MessagingContextValue {
   const value = useContext(MessagingContext)
   if (!value) throw new Error("useMessaging must be used within MessagingProvider.")

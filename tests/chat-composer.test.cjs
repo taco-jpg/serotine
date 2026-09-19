@@ -36,7 +36,7 @@ function harness(options = {}) {
     identity: { publicKey: 'self-key' }, ready: true, error: '', status: 'online',
     contacts: [{ pub: 'friend-key', alias: 'Friend' }], conversations: [], groups: [], messages: [], plugins: [],
     preferences: { blocked: [], notifications: {}, readAt: {} },
-    getPrivateMode: () => 0, markRead: async () => {},
+    getDeliveryMode: () => "relay", getDirectStatus: () => ({ state: "idle" }), getPrivateMode: () => 0, markRead: async () => {},
     getPluginAvailability: () => ({ available: false, reason: 'This plugin is disabled.', peerStatus: 'local' }),
     sendText: async (...args) => { textSends.push(args); await options.sendText?.(...args) },
     sendEvent: async (...args) => { events.push(args); return 'event-id' },
@@ -65,6 +65,7 @@ function harness(options = {}) {
       if (specifier === '@/hooks/use-local-nickname') return { useLocalNickname: () => '' }
       if (specifier === '@/hooks/use-mention-draft') return { useMentionDraft: () => ({ mentionSpans: spans, saveMentionDraft(_value, next) { spans = next } }) }
       if (specifier === '@/lib/composer-mentions') return load('lib/composer-mentions.ts')
+      if (specifier === '@/lib/shared-messages') return { canShareMessage: () => true, MAX_SHARED_MESSAGES: 20 }
       if (specifier === '@/lib/plugins') return load('lib/plugins.ts')
       if (specifier === '@/lib/identity') return { shortAddress: pub => pub }
       if (specifier === '@/lib/protocol') return { MAX_MESSAGE_LENGTH: 8000 }

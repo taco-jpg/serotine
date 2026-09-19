@@ -1,6 +1,8 @@
 import type { Metadata } from "next"
 import Link from "next/link"
 import { IdentityIcon } from "@/components/ui/identity-icon"
+import { AppLogo } from "@/components/ui/app-logo"
+import { Button } from "@/components/ui/button"
 import { LandingEnhancements, ThemeControl } from "./landing-controls"
 import styles from "./landing.module.css"
 
@@ -22,8 +24,8 @@ export default function LandingPage() {
     <div id="serotine-landing" className={styles.landing}>
       <a href="#main" className={styles.skipLink}>Skip to content</a>
       <header className={styles.header}>
-        <Link href="/" className={styles.brand} aria-label="Serotine home">serotine<span aria-hidden="true">.</span></Link>
-        <div className={styles.headerActions}><ThemeControl /><Link prefetch={false} href="/login" className={styles.entry}>Open app <Arrow diagonal /></Link></div>
+        <Link href="/" className={styles.brand} aria-label="Serotine home"><AppLogo /></Link>
+        <div className={styles.headerActions}><ThemeControl /><Button asChild variant="outline"><Link prefetch={false} href="/login">Open app <Arrow diagonal /></Link></Button></div>
       </header>
       <main id="main" tabIndex={-1}>
         <section className={styles.story} data-story aria-labelledby="hero-title">
@@ -93,7 +95,7 @@ export default function LandingPage() {
             <span className={styles.echoLine} aria-hidden="true" />
             <div className={styles.echoNote}><span className={styles.sender}>You</span><p data-echo>“I thought you’d like this.”</p><span className={styles.echoCaption} data-echo-caption>It can start with something small.</span></div>
           </div>
-          <div className={styles.invitation}><Link prefetch={false} href="/login" className={styles.primaryEntry}>Start your conversation <Arrow /></Link><p className={styles.entryNote}>An identity on your device.<br />No email address or phone number.</p></div>
+          <div className={styles.invitation}><Button asChild size="lg" className={styles.primaryEntry}><Link prefetch={false} href="/login">Start your conversation <Arrow /></Link></Button><p className={styles.entryNote}>An identity on your device.<br />No email address or phone number.</p></div>
         </section>
       </main>
       <footer className={styles.footer}>

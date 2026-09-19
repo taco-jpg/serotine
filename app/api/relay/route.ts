@@ -2,14 +2,14 @@ import {
   deleteMessage, getMyMessages, getSignal, storeEncryptedMessage, storeSignal,
   getEventFeed, getLegacyInbox, storeEncryptedEvent, retireIdentity,
 } from "@/app/actions"
-import { ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, PUBLIC_KEY_PATTERN, type RequestProof } from "@/lib/protocol"
+import { ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, PUBLIC_KEY_PATTERN, validRetentionScopes, type RequestProof } from "@/lib/protocol"
 import { requestProofFailureMessage } from "@/lib/request-auth"
 
 export const dynamic = "force-dynamic"
 
 // Legacy files remain inline; event chunks and signals keep their smaller limits.
 const MAX_BODY_BYTES = MAX_PACKET_LENGTH + 16 * 1024
-const MAX_EVENT_BODY_BYTES = 144 * 1024
+const MAX_EVENT_BODY_BYTES = 160 * 1024
 const MAX_CONTROL_BODY_BYTES = 80 * 1024
 const INVALID_REQUEST = "Invalid messaging request. Reload Serotine and try again."
 
@@ -135,11 +135,11 @@ export async function POST(request: Request): Promise<Response> {
         if (!keys(data, [])) break
         return json(await retireIdentity(data as Record<string, never>, proof))
       case "event:send":
-        if (!keys(data, ["id", "recipientPubKey", "encryptedData"])
+        if (!keys(data, ["id", "recipientPubKey", "encryptedData"], ["retention"])
           || !id(data.id) || !peer(data.recipientPubKey) || !packet(data.encryptedData, MAX_EVENT_PACKET_LENGTH)) break
         return json(await storeEncryptedEvent(data as unknown as Parameters<typeof storeEncryptedEvent>[0], proof))
       case "event:sync":
-        if (!keys(data, [], ["after"]) || (Object.hasOwn(data, "after")
+        if (!keys(data, [], ["after", "retentionScopes"]) || (data.retentionScopes !== undefined && !validRetentionScopes(data.retentionScopes)) || (Object.hasOwn(data, "after")
           && (typeof data.after !== "number" || !Number.isSafeInteger(data.after) || data.after < 0))) break
         return json(await getEventFeed(data as unknown as Parameters<typeof getEventFeed>[0], proof))
       case "message:inbox":

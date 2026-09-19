@@ -29,12 +29,12 @@ function setup(saved = new Map(), withWindow = true) {
 
 function community(id, extra = {}) { return { id, name: id === server ? 'Cameron' : 'Other server', joined: true, updatedAt: 10, channels: [{ id: general }, { id: help }], ...extra } }
 
-test('opening Cameron brings it above newer test chats and preserves that ordering after reload', () => {
+test('opening Cameron restores its route without promoting it above newer activity', () => {
   const { api, saved } = setup()
   const chats = [{ id: cameron, name: 'Cameron', updatedAt: 10 }, { id: other, name: 'Test chat', updatedAt: 20 }]
   api.rememberNavigation(owner, { kind: 'conversation', id: cameron }, undefined, 30)
   const reloaded = setup(saved).api
-  assert.deepEqual(reloaded.sortByRecentActivity(chats, reloaded.loadNavigationPreferences(owner)).map(item => item.id), [cameron, other])
+  assert.deepEqual(reloaded.sortByRecentActivity(chats, reloaded.loadNavigationPreferences(owner)).map(item => item.id), [other, cameron])
   assert.equal(reloaded.restoredChatHref(reloaded.loadNavigationPreferences(owner), chats, [], owner), `/chat/${cameron}`)
   assert.equal(chats[0].updatedAt, 10, 'a visit must not rewrite message activity')
   assert.equal(reloaded.sortByRecentActivity([{ ...chats[1], updatedAt: 40 }, chats[0]], reloaded.loadNavigationPreferences(owner))[0].id, other, 'new incoming messages can still bring a chat forward')
@@ -76,9 +76,9 @@ test('communities and direct conversations share one recent-activity ordering', 
   const { api } = setup()
   const chats = [{ id: cameron, name: 'Cameron', updatedAt: 10 }, community(server, { updatedAt: 20 }), community(secondServer, { updatedAt: 30 })]
   api.rememberNavigation(owner, { kind: 'conversation', id: cameron }, undefined, 40)
-  assert.deepEqual(api.sortByRecentActivity(chats, api.loadNavigationPreferences(owner)).map(item => item.id), [cameron, secondServer, server])
+  assert.deepEqual(api.sortByRecentActivity(chats, api.loadNavigationPreferences(owner)).map(item => item.id), [secondServer, server, cameron])
   api.rememberNavigation(owner, { kind: 'community', id: server }, help, 50)
-  assert.deepEqual(api.sortByRecentActivity(chats, api.loadNavigationPreferences(owner)).map(item => item.id), [server, cameron, secondServer])
+  assert.deepEqual(api.sortByRecentActivity(chats, api.loadNavigationPreferences(owner)).map(item => item.id), [secondServer, server, cameron])
 })
 
 test('preferences and subscription notifications stay scoped to the current identity', () => {
@@ -115,4 +115,21 @@ test('blocked browser storage keeps navigation usable for the current session an
   assert.equal(api.loadNavigationPreferences(other).lastView, null)
   assert.equal(saved.size, 0)
   assert.equal(setup(saved, false).api.loadNavigationPreferences(owner).lastView, null)
+})
+
+
+test('activity timestamps outrank state changes and stable ID ties ignore rename and input order', () => {
+  const { api } = setup()
+  const items = [
+    { id: cameron, name: 'Zed', updatedAt: 500, activityAt: 10 },
+    { id: other, name: 'Alice', updatedAt: 20, activityAt: 20 },
+    { id: server, name: 'Group', updatedAt: 800, activityAt: 10 },
+  ]
+  const expected = [other, ...[cameron, server].sort()]
+  assert.deepEqual(api.sortByRecentActivity(items).map(item => item.id), expected)
+  assert.deepEqual(api.sortByRecentActivity(items.toReversed().map(item => ({ ...item, name: 'Renamed', unreadCount: 0, archived: true }))).map(item => item.id), expected)
+  const filtered = api.sortByRecentActivity(items.filter(item => item.id !== other))
+  assert.deepEqual(filtered.map(item => item.id), expected.slice(1))
+  assert.deepEqual(api.sortByRecentActivity([...filtered, items[1]]).map(item => item.id), expected, 'unarchive restores actual activity order')
+  assert.equal(api.sortByRecentActivity(items.map(item => item.id === cameron ? { ...item, activityAt: 30 } : item))[0].id, cameron, 'only actual new activity promotes')
 })

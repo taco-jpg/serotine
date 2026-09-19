@@ -67,6 +67,8 @@ npm run deploy:check
 npm run test:d1
 npm run measure:d1
 # To remeasure the untouched baseline, supply a checkout of the pinned commit:
+
+SIPs 15 and 18 add D1 retention-scope, terminal-boundary, file-delivery, and completion metadata. The measurements below describe the earlier storage-v2 baseline; they are not a claim that lifecycle operations add zero writes. New lifecycle counters and local verification are recorded in [SIP 8–18 implementation notes](SIP-8-18.md). Request nonces and short-lived direct setup continue to use the Durable Object path.
 node tests/support/d1-workload.cjs /absolute/path/to/baseline-checkout
 ```
 

@@ -74,7 +74,13 @@ function load(filename) {
     if (specifier.startsWith('.')) return load(path.resolve(path.dirname(filename), specifier))
     return require(specifier)
   }
-  new Function('require', 'module', 'exports', 'navigator', 'window', 'localStorage', output)(sourceRequire, module, module.exports, {}, runtimeWindow, { getItem: () => null })
+  new Function('require', 'module', 'exports', 'navigator', 'window', 'localStorage', 'fetch', output)(sourceRequire, module, module.exports, {}, runtimeWindow, { getItem: () => null }, async (url, options) => {
+    assert.equal(url, '/api/files')
+    const { action, data, proof } = JSON.parse(options.body)
+    assert.equal(action, 'file:delivery')
+    assert.equal(await authentication.verifyRequestProof(action, data, proof), true)
+    return Response.json({ success: true, uploadId: data.uploadId, status: 'published', expiresAt: Date.now() + 30 * 86400_000 })
+  })
   return module.exports
 }
 const cryptography = load(path.join(root, 'lib/crypto.ts'))
@@ -297,8 +303,8 @@ test('a full 20-member community delivers each new text once to all 19 encrypted
   const delivered = packets.filter(packet => packet.id === sent)
   assert.equal(delivered.length, 19)
   assert.equal(new Set(delivered.map(packet => packet.recipientPubKey)).size, 19)
-  assert.equal(message(owner, sent)?.delivery, 'delivered')
-  assert.equal(message(owner, sent)?.deliveredTo.length, 19)
+  assert.equal(message(owner, sent)?.delivery, 'sent')
+  assert.equal(message(owner, sent)?.deliveredTo.length, 0)
   for (const guest of guests) {
     assert.equal(guest.service.model.messages.filter(message => message.id === sent).length, 1)
     assert.equal(message(guest, sent)?.content, 'One message for twenty participants')
@@ -354,7 +360,7 @@ test('blocking the owner does not disable their authorized moderation of another
   assert.equal(message(viewer, sent)?.hidden, true)
 })
 
-test('community text, polls and complete files receive delivery and optional read receipts', async () => {
+test('community text, polls and complete files keep read state local with zero receipt traffic', async () => {
   const owner = await engine(alice), guest = await engine(bob)
   const { id, invite, channel } = await create(owner)
   await join(owner, guest, invite)
@@ -366,13 +372,14 @@ test('community text, polls and complete files receive delivery and optional rea
   const file = await owner.service.sendEvent(id, channel, 'attachment', { attachment: { id: attachmentId, name: 'note.txt', mime: 'text/plain', size: 2, chunks: 1, sha256, kind: 'file' } })
   await sync(owner, guest, owner)
   for (const messageId of [text, poll, file]) {
-    assert.deepEqual(message(owner, messageId).deliveredTo, [bob.publicKey])
-    assert.equal(message(owner, messageId).delivery, 'delivered')
+    assert.deepEqual(message(owner, messageId).deliveredTo, [])
+    assert.equal(message(owner, messageId).delivery, 'sent')
   }
   assert.deepEqual(guest.service.getAttachmentChunks(id, channel, file), [{ index: 0, data: 'SGk=' }])
   await guest.instance.markCommunityRead(id, channel)
   await sync(guest, owner)
-  for (const messageId of [text, poll, file]) assert.deepEqual(message(owner, messageId).readBy, [bob.publicKey])
+  for (const messageId of [text, poll, file]) assert.deepEqual(message(owner, messageId).readBy, [])
+  assert.equal(guest.instance.records.some(record => record.event.payload.community?.type === "receipt"), false)
   assert.ok(notifications.some(([row]) => row.id === poll), 'polls enter the notification pipeline')
   assert.ok(notifications.some(([row]) => row.id === file), 'files enter the notification pipeline')
 
@@ -396,15 +403,15 @@ test('a 1 GB remote community file delivers and acknowledges its encrypted descr
   await sync(guest, owner)
   assert.deepEqual(message(guest, file).attachment, attachment)
   assert.equal(message(guest, file).content, 'Large community file')
-  assert.deepEqual(message(owner, file).deliveredTo, [bob.publicKey])
+  assert.deepEqual(message(owner, file).deliveredTo, [])
   assert.deepEqual(guest.service.getAttachmentChunks(id, channel, file), [])
   await guest.instance.markCommunityRead(id, channel)
   await sync(guest, owner)
-  assert.deepEqual(message(owner, file).readBy, [bob.publicKey])
+  assert.deepEqual(message(owner, file).readBy, [])
   const readCount = () => guest.instance.records.filter(record => record.event.payload.community?.type === 'receipt'
     && record.event.payload.community.targetId === file && record.event.payload.community.receipt === 'read').length
   await guest.instance.markCommunityRead(id, channel)
-  assert.equal(readCount(), 1)
+  assert.equal(readCount(), 0)
   assert.equal(owner.instance.records.some(record => record.event.payload.community?.type === 'attachment-chunk'), false)
 })
 
@@ -584,7 +591,7 @@ test('overlapping permission refreshes do not finish until the latest membership
   assert.equal(community(guest, id).joined, false)
 })
 
-test('files receive one read receipt when late chunks arrive after local unread state was cleared', async () => {
+test('late file completion never emits a social receipt after local unread state was cleared', async () => {
   const owner = await engine(alice), guest = await engine(bob)
   const { id, invite, channel } = await create(owner)
   await join(owner, guest, invite)
@@ -597,14 +604,14 @@ test('files receive one read receipt when late chunks arrive after local unread 
   await guest.instance.markCommunityRead(id, channel)
   const receiptCount = () => guest.instance.records.filter(row => row.event.author === bob.publicKey && row.event.payload.community?.type === 'receipt' && row.event.payload.community.targetId === file && row.event.payload.community.receipt === 'read').length
   assert.equal(community(guest, id).channelUnread[channel], 0, 'metadata clears the local badge')
-  assert.equal(receiptCount(), 0, 'missing bytes cannot receive a read acknowledgement')
+  assert.equal(receiptCount(), 0, 'read state is never broadcast')
   await store.saveStoredEvent(bob.publicKey, { ...structuredClone(outgoing(alice.publicKey, chunk)), local: false, delivered: [] })
   await guest.instance.refresh()
   await guest.instance.markCommunityRead(id, channel)
-  assert.equal(receiptCount(), 1)
+  assert.equal(receiptCount(), 0)
   historyReads = 0
   await guest.instance.markCommunityRead(id, channel)
-  assert.equal(receiptCount(), 1, 'the accepted receipt makes later render checks no-ops')
+  assert.equal(receiptCount(), 0, 'later render checks create no network event')
   assert.equal(historyReads, 0)
 })
 

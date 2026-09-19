@@ -4,6 +4,22 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
+  /* Shared structure and motion: palettes may change colors, never geometry. */
+  --space-unit: 0.25rem;
+  --content-reading: 68ch;
+  --content-wide: 77.5rem;
+  --type-caption: 0.75rem;
+  --type-body: 0.875rem;
+  --type-title: 1.25rem;
+  --radius-control: 0.25rem;
+  --radius-surface: 0.5rem;
+  --surface-shadow: 0 12px 32px -24px color-mix(in srgb, var(--foreground) 28%, transparent);
+  --motion-feedback: 120ms;
+  --motion-enter: 160ms;
+  --motion-list: 200ms;
+  --motion-panel: 200ms;
+  --motion-modal: 180ms;
+  --motion-ease: cubic-bezier(0.2, 0.7, 0.3, 1);
   /* Canvas, raised surfaces, and sidebar remain distinct in both themes. */
   --background: #eeefe7;
   --foreground: #171b14;
@@ -227,7 +243,7 @@
   }
 }
 
-/* App-only vocabulary. The landing page keeps its independent module styles. */
+/* Shared vocabulary for the public page and authenticated surfaces. */
 .app-eyebrow {
   color: var(--muted-foreground);
   font-family: inherit;
@@ -256,4 +272,33 @@
 .chat-shell :where(h1, h2, h3, h4, h5, h6),
 .serotine-dialog :where(h1, h2, h3, h4, h5, h6) {
   font-family: inherit;
+}
+
+[data-slot="button"], [data-slot="input"], [data-slot="textarea"],
+[data-slot="dropdown-menu-item"], [data-slot="select-item"],
+.chat-shell a, .chat-shell button {
+  transition-duration: var(--motion-feedback);
+  transition-timing-function: var(--motion-ease);
+}
+[data-slot="button"], [data-slot="input"], [data-slot="textarea"] { border-radius: var(--radius-control); }
+#serotine-sidebar { transition-duration: var(--motion-panel); transition-timing-function: var(--motion-ease); }
+[data-slot="dialog-content"], [data-slot="alert-dialog-content"] {
+  border-radius: var(--radius-surface);
+  box-shadow: var(--surface-shadow);
+  animation-duration: var(--motion-modal);
+  animation-timing-function: var(--motion-ease);
+}
+[data-slot="dialog-overlay"], [data-slot="alert-dialog-overlay"],
+[data-slot="dropdown-menu-content"], [data-slot="dropdown-menu-sub-content"],
+[data-slot="popover-content"], [data-slot="tooltip-content"], [data-slot="select-content"] {
+  animation-duration: var(--motion-enter);
+  animation-timing-function: var(--motion-ease);
+}
+@keyframes product-disclose { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+/* Mounted only when these controls become visible, never on route replacement. */
+.chat-shell [role="search"], .chat-shell #message-tools:not(.hidden),
+.serotine-dialog details[open] > :not(summary) { animation: product-disclose var(--motion-panel) var(--motion-ease); }
+@media (prefers-reduced-motion: reduce) {
+  :root { --motion-feedback: 0ms; --motion-enter: 0ms; --motion-list: 0ms; --motion-panel: 0ms; --motion-modal: 0ms; }
+  *, *::before, *::after { animation-iteration-count: 1 !important; }
 }

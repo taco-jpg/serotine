@@ -2,12 +2,16 @@
 sip: 18
 title: Ephemeral attachment delivery
 author: louisliu
-status: Draft
+status: Accepted
 created: 2026-09-14
-updated: 2026-09-14
+updated: 2026-09-19
 ---
 
 # SIP-18: Ephemeral attachment delivery
+
+## Implementation status — 2026-09-19
+
+Implemented in [PR #67](https://github.com/taco-jpg/serotine/pull/67); awaiting merge and deployment validation. Authenticated attachment completion follows full integrity verification and durable local storage. Direct attachments are reclaimed after intended-recipient completion; private-group attachments wait for required recipients or finite expiry. Fallback expiry is seven days for direct/private-group files and 30 days for community files. Ordinary read/delivery receipts cannot delete bytes. Cleanup and duplicate completion are idempotent; old events/backups cannot recreate deleted server objects. A device retaining its local file can display it, but cache loss after acknowledged cleanup does not promise server redownload. Local workerd/D1/R2 tests cover physical object deletion; deployed cleanup execution remains a release check.
 
 ## Summary
 

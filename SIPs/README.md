@@ -2,7 +2,7 @@
 
 Serotine Improvement Proposals live in this directory.
 
-Status review: **2026-09-14**, against application `main` at [801f09a](https://github.com/taco-jpg/serotine/commit/801f09a69f8761b35d31285b2f2089d6a01959c0).
+Status review: **2026-09-19**, against merged application `main` at [9a1473d](https://github.com/taco-jpg/serotine/commit/9a1473d6038a13e5099d94173488e74f2a744314). The implementation of [SIPs 8, 9, and 11–18](https://github.com/taco-jpg/serotine/pull/67) is awaiting merge and deployment validation. These proposals remain Accepted.
 
 | SIP | Title | Status | Implementation / remaining work |
 | --- | --- | --- | --- |
@@ -10,20 +10,22 @@ Status review: **2026-09-14**, against application `main` at [801f09a](https://g
 | [SIP-2](SIP-2-expanded-and-custom-themes.md) | Expanded and custom themes | Final | Presets, custom editor, local saving, and data-only import/export merged in [#50](https://github.com/taco-jpg/serotine/pull/50), with refinements in [#52](https://github.com/taco-jpg/serotine/pull/52) and [#54](https://github.com/taco-jpg/serotine/pull/54). |
 | [SIP-3](SIP-3-voice-and-video-calling.md) | Voice and video calling | Accepted | Direct calls, group calls, and community voice channels merged in [#58](https://github.com/taco-jpg/serotine/pull/58) and [#59](https://github.com/taco-jpg/serotine/pull/59). Working production TURN and physical-device calls across different networks still need verification before Final. |
 | [SIP-4](SIP-4-favicon-and-unread-badge.md) | Favicon and unread badge | Draft | Dynamic tab favicon/unread badge is not implemented; in-app unread counts are separate. |
-| [SIP-5](SIP-5-plugin-system.md) | Plugin system | Draft | Plugin loading, permissions, lifecycle, and extension API are not implemented. |
-| [SIP-6](SIP-6-private-chat-plugin.md) | Private chat plugin | Draft | Built-in private chats exist ([#40](https://github.com/taco-jpg/serotine/pull/40)); migration into a compatible plugin still depends on SIP-5. |
-| [SIP-7](SIP-7-ai-summary-plugin.md) | AI summary plugin | Draft | Summary workflow/provider integration and the SIP-5 plugin foundation are not implemented. |
-| [SIP-8](SIP-8-share-selected-messages.md) | Share selected messages | Draft | Selected-message bundles and their preview/import flow are not implemented; existing file and access-key sharing do not fulfill this SIP. |
-| [SIP-9](SIP-9-force-p2p-mode.md) | Force P2P mode | Draft | Direct-only messaging with persistent no-relay restrictions is not implemented. Existing direct connections do not provide that guarantee. |
+| [SIP-5](SIP-5-plugin-system.md) | Plugin system | Final | The first-party plugin foundation was merged in [PR #66](https://github.com/taco-jpg/serotine/pull/66). |
+| [SIP-6](SIP-6-private-chat-plugin.md) | Private chat plugin | Final | The Private Chat plugin migration was merged in [PR #66](https://github.com/taco-jpg/serotine/pull/66). |
+| [SIP-7](SIP-7-ai-summary-plugin.md) | AI summary plugin | Accepted | Consented preview/summary workflow and Workers AI adapter merged in [#66](https://github.com/taco-jpg/serotine/pull/66). AI remains disabled by default; a live provider request still needs deployment verification. |
+| [SIP-8](SIP-8-share-selected-messages.md) | Share selected messages | Accepted | Implemented: previewed selected-message copies, at most 20 messages/8,000 fallback characters; attachment metadata only. |
+| [SIP-9](SIP-9-force-p2p-mode.md) | Force P2P mode | Accepted | Implemented: authenticated direct-only text and files up to 2 MiB, with no relay/TURN fallback. Physical-device cross-network connectivity remains unverified. |
 | [SIP-10](SIP-10-android-and-ios-apps.md) | Android, iOS, Windows, and macOS apps | Draft | Mobile packages plus Windows EXE and macOS APP/DMG distribution, desktop integration, signing, and updates are proposed; app packages are not implemented. |
-| [SIP-11](SIP-11-custom-user-avatars.md) | Custom user avatars | Draft | Custom avatar upload, profile storage, and synchronization are not implemented. SIP-12 is a related draft, not an adopted replacement. |
-| [SIP-12](SIP-12-custom-profiles-and-per-friend-sharing.md) | Custom profiles and per-friend sharing | Draft | Profile editor, GIF banners/pictures, and per-friend field permissions are not implemented. |
-| [SIP-13](SIP-13-group-and-community-receipt-minimization.md) | Group and community receipt minimization | Draft | Stop durable per-recipient delivered/read receipts in multi-person text conversations while preserving sender-local send state. |
-| [SIP-14](SIP-14-explicit-group-invitations-and-invalidation.md) | Explicit group invitations and terminal invalidation | Draft | Make private-group membership require explicit acceptance, keep pending invitees outside active membership, and invalidate invitations when the group is dissolved. |
-| [SIP-15](SIP-15-server-side-conversation-lifecycle-purging.md) | Server-side conversation lifecycle purging | Draft | Purge retained relay/storage data when a DM relationship is removed or a group/community is terminally deleted, with minimal replay-prevention state. |
-| [SIP-16](SIP-16-unified-product-design-and-motion.md) | Unified product design and motion | Draft | Unify landing and authenticated-app design language and add restrained, shared motion without replacing SIP-2 theming. |
-| [SIP-17](SIP-17-stable-conversation-ordering-and-list-motion.md) | Stable conversation ordering and list motion | Draft | Stop local navigation from promoting a conversation to the top; reorder only for real activity and preserve spatial continuity. |
-| [SIP-18](SIP-18-ephemeral-attachment-delivery.md) | Ephemeral attachment delivery | Draft | Treat server attachment storage as a temporary delivery buffer: purge verified DM attachments promptly, purge group attachments after required recipients receive them or expiry, and bound community retention. |
+| [SIP-11](SIP-11-custom-user-avatars.md) | Custom user avatars | Accepted | Implemented: bounded static/GIF avatars, local processing, still fallback, and SIP-12 per-friend visibility. |
+| [SIP-12](SIP-12-custom-profiles-and-per-friend-sharing.md) | Custom profiles and per-friend sharing | Accepted | Implemented: six private-by-default profile fields, per-friend grants, revocation, and six-day permissions requiring explicit renewal. |
+| [SIP-13](SIP-13-group-and-community-receipt-minimization.md) | Group and community receipt minimization | Accepted | Implemented: no new group/community social receipts; local submission/unread state remains, and DM receipts are unchanged. |
+| [SIP-14](SIP-14-explicit-group-invitations-and-invalidation.md) | Explicit group invitations and terminal invalidation | Accepted | Implemented: signed acceptance, seven-day pending invites, revoke/decline, consent-preserving legacy migration, and terminal dissolution. |
+| [SIP-15](SIP-15-server-side-conversation-lifecycle-purging.md) | Server-side conversation lifecycle purging | Accepted | Implemented: authenticated retention scopes, terminal submission fences, and retryable relay/file cleanup. Deployed cleanup still needs verification. |
+| [SIP-16](SIP-16-unified-product-design-and-motion.md) | Unified product design and motion | Accepted | Implemented: shared semantic design/motion tokens, theme continuity, and reduced-motion support across landing/app surfaces. |
+| [SIP-17](SIP-17-stable-conversation-ordering-and-list-motion.md) | Stable conversation ordering and list motion | Accepted | Implemented: message/creation-based ordering, stable ties, separate route restoration, and keyed row motion. |
+| [SIP-18](SIP-18-ephemeral-attachment-delivery.md) | Ephemeral attachment delivery | Accepted | Implemented: verified durable-receipt cleanup; seven-day DM/group and 30-day community file expiry. No guaranteed redownload after local cache loss. |
+
+The implementation summaries for SIPs 8, 9, and 11–18 describe the implementation PR above, not merged or deployed behavior. Local unit tests, synthetic browser scenarios, and local workerd/D1/R2 checks exercise protocol, UI, and storage behavior. They do not certify live Workers AI, production cleanup execution, or P2P/calling between physical devices on different networks. See the [implementation and deployment guide](https://github.com/taco-jpg/serotine/blob/feat/sip-8-18/docs/SIP-8-18.md).
 
 Use the [status definitions](../STATUS.md). Final applies to the documented implemented scope; later extensions stay separate. Accepted does not certify a production release, and Draft does not mean a feature has been approved or implemented. This review checks repository evidence, not the current live deployment.
 

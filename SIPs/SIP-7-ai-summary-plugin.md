@@ -2,11 +2,16 @@
 sip: 7
 title: AI summary plugin
 author: louisliu
-status: Draft
+status: Accepted
 created: 2026-09-12
+updated: 2026-09-19
 ---
 
 # SIP-7: AI summary plugin
+
+## Implementation status — 2026-09-19
+
+The consented summary workflow and server-side Workers AI adapter were merged in [PR #66](https://github.com/taco-jpg/serotine/pull/66). The exact bounded ordinary-text preview requires explicit confirmation; results stay local until separately sent. AI starts disabled in deployment configuration. Unit and browser tests use synthetic conversations and mock inference; enabling the binding and verifying a real provider request remain deployment checks. See the [configuration and limits](https://github.com/taco-jpg/serotine/blob/main/docs/SIP-5-7-plugins.md).
 
 ## Summary
 

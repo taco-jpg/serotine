@@ -2,16 +2,20 @@
 sip: 9
 title: Force P2P mode
 author: louisliu
-status: Draft
+status: Accepted
 created: 2026-09-12
-updated: 2026-09-14
+updated: 2026-09-19
 ---
 
 # SIP-9: Force P2P mode
 
+## Implementation status — 2026-09-19
+
+Implemented in [PR #67](https://github.com/taco-jpg/serotine/pull/67); awaiting merge and deployment validation. Force P2P supports accepted one-to-one contacts who both enable it and keep Serotine open. Sending requires an authenticated direct connection; conversation payloads never fall back to the message relay, attachment storage, or TURN. Signed setup records expire after 60 seconds; STUN and setup metadata remain permitted. Direct files have a 2 MiB cap, bounded chunks, progress, cancellation, integrity checks, and authenticated acknowledgement. Routing restrictions survive retries, mode changes, and backup restore. Direct-only history stays excluded from AI summaries. Local unit/browser checks cover routing and failure behavior; physical devices on different networks must still demonstrate actual P2P connectivity before rollout.
+
 ## Summary
 
-Add **Force P2P** as a fourth messaging mode alongside the existing choices. In this mode, two people exchange encrypted messages and small files directly while both have Serotine open and connected. Conversation content never enters the message relay, attachment storage, or TURN. If a direct connection cannot be established, sending stays unavailable; Serotine never silently falls back to a relay.
+Add **Force P2P** as an explicit messaging delivery choice alongside the existing relay-backed default. In this mode, two people exchange encrypted messages and small files directly while both have Serotine open and connected. Conversation content never enters the message relay, attachment storage, or TURN. If a direct connection cannot be established, sending stays unavailable; Serotine never silently falls back to a relay.
 
 Start with basic one-to-one messaging. Smaller file limits and fewer relay-dependent features are acceptable tradeoffs for reducing server traffic and storage.
 
@@ -23,7 +27,7 @@ The goal is **no server-relayed message or file payloads for these conversations
 
 ## Proposal
 
-### Fourth mode and connection agreement
+### Delivery mode and connection agreement
 
 - Offer **Force P2P** as an explicit conversation choice. Preserve the existing modes and default.
 - Explain before activation: **“Both people must have Serotine open and connected. Messages and files travel directly. Offline delivery is unavailable, and the other person may learn your network address.”**
@@ -61,7 +65,7 @@ The sender must also be connected when delivery happens. Previously received loc
 
 The first version supports accepted one-to-one contacts, encrypted text, and small file/image attachments. Group chats, communities, live multi-device catch-up, offline push delivery, and voice/video changes are outside this version. Unsupported features should be visibly unavailable in this mode.
 
-Use a separate, lower per-file limit for Force P2P, displayed before selection and enforced before transfer and on receipt. Select the exact cap after browser/device testing; this SIP does not assume a measured safe value. Limit concurrent transfers and bound memory buffers, with progress and cancellation controls. A file above the cap stays local and gets a clear explanation; it is never uploaded automatically.
+Use a separate, lower per-file limit for Force P2P, displayed before selection and enforced before transfer and on receipt. The first implementation sets this cap to 2 MiB; cross-network physical-device validation remains a separate release check. Limit concurrent transfers and bound memory buffers, with progress and cancellation controls. A file above the cap stays local and gets a clear explanation; it is never uploaded automatically.
 
 A smaller cap is a product limit for resource use and reliability, not a WebRTC requirement. Direct transfers can be fast or slow depending on both connections and devices; smaller caps alone do not ensure speed.
 
@@ -117,4 +121,4 @@ Before implementation is accepted, verify:
 - Duplicate retries, acknowledgements, file integrity, cancellation, and advertised limits behave correctly.
 - A local or same-network test is not presented as proof of universal direct connectivity.
 
-Measure the reduction in relay payload bytes and storage separately from remaining signaling traffic. Keep status **Draft** until the proposal is reviewed and implementation work is explicitly undertaken.
+Measure the reduction in relay payload bytes and storage separately from remaining signaling traffic. The feature is implemented on the branch linked above and remains **Accepted** pending merge and deployment validation. Keep the real-device, distinct-network acceptance check separate from local browser results.

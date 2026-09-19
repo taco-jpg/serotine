@@ -2,17 +2,22 @@
 sip: 11
 title: Custom user avatars
 author: louisliu
-status: Draft
+status: Accepted
 created: 2026-09-13
+updated: 2026-09-19
 ---
 
 # SIP-11: Custom user avatars
 
-Related draft: [SIP-12: Custom profiles and per-friend sharing](SIP-12-custom-profiles-and-per-friend-sharing.md) extends this proposal with animated pictures, GIF banners, and other profile fields. If adopted, its explicit per-friend sharing rules replace the broad avatar visibility described below. Both proposals remain Draft.
+## Implementation status — 2026-09-19
+
+Implemented in [PR #67](https://github.com/taco-jpg/serotine/pull/67); awaiting merge and deployment validation. SIP-12 field-level, per-friend consent governs avatar visibility; shared communities do not grant access. Local processing supports static images and animated GIFs with a generated-avatar fallback for unauthorized, unsupported, or unavailable media. Input is capped at 4 MiB and 4096 × 4096 decoded static pixels; processed avatars are at most 512 × 512 and banners 1024 × 512. Each processed item plus its still preview is capped at 128 KiB. GIFs additionally allow at most 80 frames and 20 seconds per loop, with a decoded-pixel budget. Reduced motion uses the still preview.
+
+Related accepted proposal: [SIP-12: Custom profiles and per-friend sharing](SIP-12-custom-profiles-and-per-friend-sharing.md) extends this proposal with animated pictures, GIF banners, and other profile fields. Its explicit per-friend sharing rules replace the broad avatar visibility described below. Both proposals remain Accepted while their implementation awaits merge and deployment validation.
 
 ## Summary
 
-Add optional custom profile avatars to Serotine. Users can choose an image for their identity, replace it later, or remove it and return to the existing fallback avatar. The same avatar should appear consistently anywhere that identity is shown. This SIP records a proposal for discussion; it does not authorize or contain an implementation.
+Add optional custom profile avatars to Serotine. Users can choose an image for their identity, replace it later, or remove it and return to the existing fallback avatar. The same avatar should appear consistently anywhere that identity is shown. The status section above records the implemented scope and release boundary for this SIP and SIP-12.
 
 ## Motivation
 

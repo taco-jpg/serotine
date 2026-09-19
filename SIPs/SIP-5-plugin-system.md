@@ -2,11 +2,16 @@
 sip: 5
 title: Plugin system
 author: louisliu
-status: Draft
+status: Final
 created: 2026-09-12
+updated: 2026-09-19
 ---
 
 # SIP-5: Plugin system
+
+## Implementation status — 2026-09-19
+
+The first-party plugin foundation was merged in [PR #66](https://github.com/taco-jpg/serotine/pull/66). It provides bundled manifests and versions, identity/browser-scoped installation and explicit permissions, enable/disable/remove controls, local commands, and authenticated peer capability negotiation. This release does not load arbitrary third-party code. See the [implementation guide](https://github.com/taco-jpg/serotine/blob/main/docs/SIP-5-7-plugins.md).
 
 ## Summary
 

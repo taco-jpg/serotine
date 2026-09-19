@@ -2,12 +2,16 @@
 sip: 17
 title: Stable conversation ordering and list motion
 author: louisliu
-status: Draft
+status: Accepted
 created: 2026-09-14
-updated: 2026-09-14
+updated: 2026-09-19
 ---
 
 # SIP-17: Stable conversation ordering and list motion
+
+## Implementation status — 2026-09-19
+
+Implemented in [PR #67](https://github.com/taco-jpg/serotine/pull/67); awaiting merge and deployment validation. Inbox rank uses meaningful message or creation activity with deterministic identity ties. Opening, reading, settings changes, archive/restore, filtering, and navigation restoration do not promote conversations. The last route/channel is restored separately. Real activity moves keyed rows with a short positional transition using SIP-16 motion tokens and reduced-motion preferences.
 
 ## Summary
 
@@ -17,7 +21,7 @@ When real activity does change ordering, rows should move with a short spatial t
 
 ## Motivation
 
-The current navigation preference system records each opened conversation and `sortByRecentActivity` combines that local open timestamp with the conversation's real `updatedAt` value. As a result, clicking an older conversation immediately makes it the newest item in the sidebar.
+Before this implementation, navigation preferences recorded each opened conversation and `sortByRecentActivity` combined that local open timestamp with the conversation's `updatedAt` value. Clicking an older conversation could therefore make it the newest item in the sidebar.
 
 That behavior is disorienting for two reasons:
 

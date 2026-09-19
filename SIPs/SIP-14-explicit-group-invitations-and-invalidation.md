@@ -2,12 +2,16 @@
 sip: 14
 title: Explicit group invitations and terminal invalidation
 author: louisliu
-status: Draft
+status: Accepted
 created: 2026-09-14
-updated: 2026-09-14
+updated: 2026-09-19
 ---
 
 # SIP-14: Explicit group invitations and terminal invalidation
+
+## Implementation status — 2026-09-19
+
+Implemented in [PR #67](https://github.com/taco-jpg/serotine/pull/67); awaiting merge and deployment validation. Pending invitations keep invitees outside active recipients until explicit signed acceptance, even when they are already friends. Invitations expire after seven days and can be declined or revoked. Signed controls and current server authority reject stale acceptance and terminal group restoration. Legacy groups migrate through fresh invitations; automatic acceptance requires the recipient’s own recorded explicit group acceptance or prior signed group message. Friendship alone never qualifies, so unproven legacy recipients remain pending. Administrator Dissolve group is separate from member Leave group and local deletion. Dissolution records terminal authority, invalidates invitations, and integrates with SIP-15 cleanup; saved local history remains read-only.
 
 ## Summary
 

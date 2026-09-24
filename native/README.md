@@ -9,13 +9,13 @@ The renderer reuses the existing React messaging UI. Its JavaScript, CSS, fonts,
 Use Node 22.13 or later (CI pins 22.23.2), install the repository dependencies with `npm ci`, and set `SEROTINE_RELAY_ORIGIN` to your deployed HTTPS relay origin. This is a public build setting, not a secret. Use a bare origin with no path, credentials, or query string; mobile targets require the standard HTTPS port. Native authenticated requests retain the relay's signed ownership checks; the browser CORS policy is unchanged.
 
 ```sh
-export SEROTINE_RELAY_ORIGIN=https://your-deployed-relay.example
+export SEROTINE_RELAY_ORIGIN=https://serotine.peni667.org
 npm ci
 npm run native:build
 node native/scripts/verify-versions.cjs
 ```
 
-Replace the example with an actual deployment before testing synchronization. CI falls back to `https://native-development.invalid` when no relay variable is configured, producing an offline development package. The first build is a development build; `npm run native:build -- --release` creates the production renderer and must use a production endpoint.
+This is the same server used by the Serotine website. Development CI uses it by default; set the repository variable `SEROTINE_RELAY_ORIGIN` to use a different deployment. Local builds still require an explicit origin. The first build is a development build; `npm run native:build -- --release` creates the production renderer and must use a production endpoint. The app keeps its own local identity and history; import a backup to transfer them from the browser.
 
 ### Windows / macOS
 

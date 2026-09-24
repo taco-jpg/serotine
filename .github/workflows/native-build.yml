@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Without an explicitly configured relay these are offline development packages.
-  SEROTINE_RELAY_ORIGIN: ${{ vars.SEROTINE_RELAY_ORIGIN || 'https://native-development.invalid' }}
+  # Use the same relay as the website; forks can override this public build setting.
+  SEROTINE_RELAY_ORIGIN: ${{ vars.SEROTINE_RELAY_ORIGIN || 'https://serotine.peni667.org' }}
   NEXT_TELEMETRY_DISABLED: '1'
 
 jobs:
@@ -101,6 +101,9 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
       - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
       - run: npm ci
       - run: npm --prefix native/mobile ci

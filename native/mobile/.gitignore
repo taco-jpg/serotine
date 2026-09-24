@@ -1,0 +1,14 @@
+node_modules/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+android/app/src/main/assets/serotine-config.json
+android/app/src/main/res/xml/config.xml
+ios/App/App/public/
+ios/App/App/capacitor.config.json
+ios/App/App/config.xml
+ios/relay.generated.xcconfig
+*.keystore
+*.jks
+*.p12
+*.mobileprovision

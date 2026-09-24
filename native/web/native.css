@@ -1,0 +1,10 @@
+body { margin: 0; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+.native-status { min-height: 2rem; display: flex; flex-wrap: wrap; justify-content: space-between; gap: .25rem 1rem; padding: .35rem .75rem; background: var(--card); border-bottom: 1px solid var(--border); font-size: .7rem; }
+.native-status button { text-decoration: underline; }
+.native-info { position: fixed; inset: 3rem 1rem auto; z-index: 100; max-width: 42rem; margin: auto; max-height: 80dvh; overflow-y: auto; background: var(--card); border: 1px solid var(--border); padding: 1.5rem; box-shadow: var(--surface-shadow); }
+.native-info p { margin: 1rem 0; line-height: 1.6; }
+.native-screen { height: calc(100dvh - 2rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
+.native-screen > .app-surface { min-height: 100%; }
+.native-screen .h-dvh { height: 100%; }
+.native-screen .chat-shell { top: calc(var(--app-top, 0px) + 2rem + env(safe-area-inset-top)); height: calc(var(--app-height, 100dvh) - 2rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
+.native-failure { margin: 3rem auto; max-width: 36rem; padding: 1.5rem; font: 1rem/1.6 system-ui; }

@@ -2,6 +2,8 @@ import type { Identity } from "./identity"
 import { createRequestProof } from "./request-auth"
 import { isCallObject } from "./call-protocol"
 import { CALL_SOCKET_PATH, CALL_SOCKET_REQUEST_BYTES, CALL_SOCKET_RESPONSE_BYTES, CALL_SOCKET_PENDING_LIMIT } from "./call-socket-protocol"
+import { getNativeBridge } from "../native/shared/bridge"
+import { apiFetch } from "../native/shared/transport"
 
 export class CallTransportError extends Error {
   constructor(message: string, public code?: "direct-only") { super(message) }
@@ -19,6 +21,7 @@ interface Options {
 /** Call signaling only. Requests retain their identity proofs and encrypted SDP/ICE.
  * A disconnected mutation is rejected, never automatically sent a second time. */
 export function createCallSocket(identity: Identity, sessionId: string, options: Options = {}) {
+  if (getNativeBridge()) return createNativeCallSignaling(identity, sessionId, options.timeoutMs)
   const pending = new Map<string, Pending>(), listeners = new Set<() => void>()
   let socket: WebSocket | null = null, opening: Promise<void> | null = null
   let authenticated = false, disposed = false, attempts = 0
@@ -141,6 +144,80 @@ export function createCallSocket(identity: Identity, sessionId: string, options:
       if (disposed) return
       disposed = true; listeners.clear(); clearTimeout(reconnect); reconnect = undefined
       if (socket) drop(socket)
+    },
+  }
+}
+
+/** Initial installed builds use the existing signed HTTPS endpoint. Browser
+ * clients retain WSS; no local WebView origin is trusted by the socket server.
+ * Foreground polling is explicit until a native WSS bridge is implemented. */
+function createNativeCallSignaling(identity: Identity, sessionId: string, timeoutMs = 10_000) {
+  const requests = new Set<AbortController>(), listeners = new Set<() => void>()
+  let disposed = false, clockOffset = 0
+  let interval: ReturnType<typeof setInterval> | undefined
+  let unsubscribeResume: (() => void) | undefined
+  const wake = () => {
+    if (disposed || (typeof document !== "undefined" && document.visibilityState === "hidden")) return
+    for (const listener of listeners) { try { listener() } catch { /* Independent consumers. */ } }
+  }
+  return {
+    now: () => Date.now() + clockOffset,
+    async request(action: string, data: Record<string, unknown>): Promise<Record<string, unknown>> {
+      if (disposed) throw unavailable()
+      if (data.sessionId !== sessionId || action === "call:socket") throw unexpected()
+      if (requests.size >= CALL_SOCKET_PENDING_LIMIT) throw new CallTransportError("Calling is busy. Wait a moment and retry.")
+      const controller = new AbortController()
+      requests.add(controller)
+      const timer = setTimeout(() => controller.abort(new CallTransportError("Call setup took too long. Please try again.")), timeoutMs)
+      try {
+        const proof = await createRequestProof(action, data, identity.privateKey, identity.publicKey, Date.now() + clockOffset)
+        controller.signal.throwIfAborted()
+        if (disposed) throw unavailable()
+        const encoded = JSON.stringify({ version: 1, action, data, proof })
+        if (new TextEncoder().encode(encoded).length > CALL_SOCKET_REQUEST_BYTES) throw new CallTransportError("This call setup is too large. Try starting a new call.")
+        const response = await apiFetch("/api/calls", {
+          method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: encoded, signal: controller.signal, cache: "no-store", credentials: "omit", redirect: "error",
+        })
+        if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "")) throw unexpected()
+        const text = await response.text()
+        if (new TextEncoder().encode(text).length > CALL_SOCKET_RESPONSE_BYTES) throw unexpected()
+        let body: unknown
+        try { body = JSON.parse(text) } catch { throw unexpected() }
+        if (!isCallObject(body)) throw unexpected()
+        controller.signal.throwIfAborted()
+        if (disposed) throw unavailable()
+        if (!response.ok || body.success !== true) {
+          const message = body.error
+          const safe = typeof message === "string" && message.length > 0 && message.length <= 500 && !/[<>]/.test(message) && ![...message].some(character => character.charCodeAt(0) < 32)
+          throw safe ? new CallTransportError(message, body.code === "direct-only" ? "direct-only" : undefined) : unexpected()
+        }
+        if (Number.isSafeInteger(body.serverTime) && Number(body.serverTime) > 0) clockOffset = Number(body.serverTime) - Date.now()
+        return body
+      } catch (error) {
+        if (error instanceof CallTransportError) throw error
+        throw unavailable()
+      } finally { clearTimeout(timer); requests.delete(controller) }
+    },
+    subscribe(listener: () => void) {
+      if (disposed) return () => {}
+      listeners.add(listener)
+      if (!interval) {
+        interval = setInterval(wake, 1500)
+        unsubscribeResume = getNativeBridge()?.onResume(wake)
+      }
+      return () => {
+        listeners.delete(listener)
+        if (!listeners.size) { clearInterval(interval); interval = undefined; unsubscribeResume?.(); unsubscribeResume = undefined }
+      }
+    },
+    dispose() {
+      if (disposed) return
+      disposed = true
+      clearInterval(interval); interval = undefined; unsubscribeResume?.(); unsubscribeResume = undefined
+      listeners.clear()
+      for (const controller of requests) controller.abort(unavailable())
+      requests.clear()
     },
   }
 }

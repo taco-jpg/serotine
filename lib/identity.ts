@@ -1,6 +1,7 @@
 import { exportKey, exportPublicKeyToHex, generateEncryptionKeyPair, importKey, importPublicKeyFromHex, arrayBufferToBase64, base64ToArrayBuffer } from "./crypto"
 import { PUBLIC_KEY_PATTERN } from "./protocol"
 import { createRequestProof, verifyRequestProof } from "./request-auth"
+import { flushNativeStorage } from "./native-persistence"
 
 const IDENTITY_KEY = "serotine_identity_v2"
 const ARCHIVED_IDENTITIES_KEY = "serotine_identity_archives_v1"
@@ -85,6 +86,7 @@ export async function replaceRetiredIdentity(expectedPublicKey: string, retire: 
         localStorage.setItem(ARCHIVED_IDENTITIES_KEY, JSON.stringify([...archived.filter(item => item.publicKey !== existing.publicKey), existing]))
         saveContacts(replacement.publicKey, [...contacts.values()])
         if (localStorage.getItem(retiredKey) !== "retired") localStorage.setItem(retiredKey, "pending")
+        await flushNativeStorage()
       } catch { throw new IdentityAccessError("Recovery keys could not be saved. Free browser storage and try again; no retirement request was sent.") }
       await retire()
       try { localStorage.setItem(retiredKey, "retired") }
@@ -92,6 +94,7 @@ export async function replaceRetiredIdentity(expectedPublicKey: string, retire: 
       try { saveIdentity(replacement, before) }
       catch { throw new IdentityAccessError("Your old address was retired, but the replacement could not be activated. Keep this browser data and retry; your replacement key is saved.") }
       try { localStorage.removeItem(pendingKey) } catch { /* Later switches archive this replacement, so it cannot be reused. */ }
+      await flushNativeStorage()
       return replacement
     } finally {
       if (typeof window !== "undefined") window.dispatchEvent(new Event("serotine:identity-changed"))
@@ -126,6 +129,7 @@ export async function restoreValidatedIdentity(value: Identity, options: Restore
       }
       await importData?.(identity)
       saveIdentity(identity, before)
+      await flushNativeStorage()
       return identity
     } finally {
       if (typeof window !== "undefined") window.dispatchEvent(new Event("serotine:identity-changed"))
@@ -160,6 +164,7 @@ export async function createIdentity(): Promise<Identity> {
     const pair = await generateEncryptionKeyPair()
     const identity: Identity = { version: 2, publicKey: await exportPublicKeyToHex(pair.publicKey), privateKey: await exportKey(pair.privateKey) }
     saveIdentity(identity, before)
+    await flushNativeStorage()
     return identity
   })
 }

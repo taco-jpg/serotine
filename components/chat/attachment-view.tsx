@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
+import { saveDownload } from "@/lib/save-download"
 import { Download, FileText, LoaderCircle, Maximize2, X } from "lucide-react"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import type { Identity } from "@/lib/identity"
@@ -119,8 +120,7 @@ function RemoteAttachmentView({ metadata, identity }: { metadata: AttachmentMeta
       setState({ progress: 100, url: session.url, saved: !resource.blob })
       // Memory/OPFS fallback needs an explicit browser download after verification.
       if (!autoPreview && session.url) {
-        const link = document.createElement("a")
-        link.href = session.url; link.download = name; link.click()
+        if (resource.blob) await saveDownload(resource.blob, name)
       }
     } catch (error) {
       if (session.active) setState({ progress: 0, error: controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")

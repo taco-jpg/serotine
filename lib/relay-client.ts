@@ -1,3 +1,4 @@
+import { apiFetch } from "../native/shared/transport"
 import type * as Actions from "@/app/actions"
 import { EVENT_FEED_PAGE_SIZE, ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_PACKET_LENGTH, MAX_SIGNAL_PACKET_LENGTH, MESSAGE_PAGE_SIZE, PUBLIC_KEY_PATTERN, type RequestProof, validRetentionScopes } from "./protocol"
 
@@ -69,7 +70,7 @@ function validResult(action: RelayAction, value: unknown, data: unknown, proof: 
   return true
 }
 
-async function relay<Result>(action: RelayAction, data: unknown, proof: RequestProof): Promise<Result> {
+async function relay<Result>(action: RelayAction, data: unknown, proof: RequestProof, beforeNativeRequest?: () => void): Promise<Result> {
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<never>((_, reject) => {
@@ -81,7 +82,7 @@ async function relay<Result>(action: RelayAction, data: unknown, proof: RequestP
   try {
     // One request only: a lost response must never silently replay a signed write.
     return await Promise.race([timeout, (async () => {
-      const response = await fetch("/api/relay", {
+      const response = await apiFetch("/api/relay", {
         method: "POST", mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store",
         // Safari turns the page's no-referrer policy into Origin: null for this
         // POST. Send only the site origin, never the chat path or query. An empty
@@ -90,7 +91,7 @@ async function relay<Result>(action: RelayAction, data: unknown, proof: RequestP
         headers: { "Content-Type": "application/json", Accept: "application/json",
           ...(action.startsWith("event:") ? { "X-Serotine-Events": "1" } : {}) },
         body: JSON.stringify({ version: 2, action, data, proof }), signal: controller.signal,
-      })
+      }, beforeNativeRequest)
       if (response.status === 404) {
         throw new RelayTransportError("This server is missing the messaging relay. Reload Serotine; if this continues, the site owner needs to update the deployment.")
       }
@@ -121,7 +122,7 @@ export const getMyMessages: typeof Actions.getMyMessages = (data, proof) => rela
 export const deleteMessage: typeof Actions.deleteMessage = (data, proof) => relay("message:ack", data, proof)
 export const storeSignal: typeof Actions.storeSignal = (data, proof) => relay("signal:send", data, proof)
 export const getSignal: typeof Actions.getSignal = (data, proof) => relay("signal:read", data, proof)
-export const storeEncryptedEvent: typeof Actions.storeEncryptedEvent = (data, proof) => relay("event:send", data, proof)
+export const storeEncryptedEvent = (data: Parameters<typeof Actions.storeEncryptedEvent>[0], proof: RequestProof, beforeNativeRequest?: () => void): ReturnType<typeof Actions.storeEncryptedEvent> => relay("event:send", data, proof, beforeNativeRequest)
 export const getEventFeed: typeof Actions.getEventFeed = (data, proof) => relay("event:sync", data, proof)
 export const getLegacyInbox: typeof Actions.getLegacyInbox = (data, proof) => relay("message:inbox", data, proof)
 export const retireIdentity: typeof Actions.retireIdentity = (data, proof) => relay("identity:retire", data, proof)

@@ -1,8 +1,10 @@
 import { openDB, type DBSchema, type IDBPTransaction } from "idb"
-import { safeFilename, validateAttachmentFile } from "./attachments"
+import { formatFileSize, safeFilename, validateAttachmentFile } from "./attachments"
+import { nativeStorageLimits } from "./native-persistence"
 
 export const BANK_MAX_BYTES = 5 * 1024 ** 3
 export const BANK_MAX_FILES = 100
+export function bankCapacityBytes(): number { return nativeStorageLimits()?.bankBytes ?? BANK_MAX_BYTES }
 const EVENT = "serotine:file-bank"
 const CHANNEL = "serotine-file-bank-v1"
 const source = globalThis.crypto?.randomUUID?.() ?? String(Math.random())
@@ -30,7 +32,7 @@ function validateOwner(owner: string) {
 }
 
 function storageError(cause: unknown): Error {
-  if (cause instanceof Error && cause.name === "QuotaExceededError") return new Error("This browser is out of storage. Backpack supports up to 5 GB, but your browser may allow less. Free some device or site storage and try again; your saved files were not removed.")
+  if (cause instanceof Error && cause.name === "QuotaExceededError") return new Error(`This device is out of storage. Backpack supports up to ${formatFileSize(bankCapacityBytes())}, but your device may allow less. Free some storage and try again; your saved files were not removed.`)
   if (cause instanceof Error && ["SecurityError", "InvalidStateError", "UnknownError"].includes(cause.name)) return new Error("Browser storage is unavailable. Check this site's storage permissions and try again.")
   return cause instanceof Error ? cause : new Error("Unable to access saved files. Please try again.")
 }
@@ -147,7 +149,7 @@ export async function saveBankFiles(owner: string, files: File[]): Promise<void>
     const metadata = tx.objectStore("metadata"), blobs = tx.objectStore("blobs")
     const existing = await metadata.getAll()
     if (existing.length + rows.length > BANK_MAX_FILES) throw new Error(`Backpack holds up to ${BANK_MAX_FILES} files. Remove some files before adding more.`)
-    if ([...existing, ...rows].reduce((total, row) => total + row.size, 0) > BANK_MAX_BYTES) throw new Error("Backpack has a 5 GB limit. Remove some saved files before adding more.")
+    if ([...existing, ...rows].reduce((total, row) => total + row.size, 0) > bankCapacityBytes()) throw new Error(`Backpack has a ${formatFileSize(bankCapacityBytes()).replace(".0 ", " ")} limit. Remove some saved files before adding more.`)
     for (const { blob, ...entry } of rows) {
       await metadata.add(entry)
       await blobs.add({ id: entry.id, blob })

@@ -1,0 +1,33 @@
+{
+  "appId": "app.serotine.client",
+  "appName": "Serotine",
+  "webDir": "../web/dist",
+  "server": {
+    "hostname": "localhost",
+    "androidScheme": "https",
+    "iosScheme": "capacitor",
+    "cleartext": false
+  },
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  },
+  "ios": {
+    "contentInset": "automatic"
+  },
+  "loggingBehavior": "none",
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": false
+    },
+    "CapacitorCookies": {
+      "enabled": false
+    }
+  },
+  "cordova": {
+    "preferences": {
+      "DisableDeploy": "true",
+      "KeepRunning": "false"
+    }
+  }
+}

@@ -1,6 +1,7 @@
 "use client"
 
 import Link from "next/link"
+import { appLinkOrigin } from "@/native/shared/bridge"
 import { usePathname, useRouter } from "next/navigation"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Plus, Copy, Check, Loader2, Search, Pencil, Users, QrCode, Archive, UserRound, Settings2, Bell, Ban, Trash2, Inbox, RefreshCw, PanelLeftClose, PanelLeftOpen, CircleAlert, Hash, Puzzle } from "lucide-react"
@@ -149,7 +150,7 @@ function InboxLayout({ children }: { children: React.ReactNode }) {
     try {
       if (pathname !== "/chat/communities" && sessionStorage.getItem("serotine_pending_community_invite")) router.replace("/chat/communities")
     } catch { /* Session storage may be unavailable. */ }
-    setInviteLink(`${window.location.origin}/chat#invite=${identity.publicKey}`)
+    setInviteLink(`${appLinkOrigin()}/chat#invite=${identity.publicKey}`)
     const readInvite = () => {
       const hashAddress = new URLSearchParams(window.location.hash.slice(1)).get("invite")
       let address = hashAddress

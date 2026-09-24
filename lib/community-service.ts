@@ -1,4 +1,5 @@
 import { retentionDescriptor } from "./retention-protocol"
+import { appLinkOrigin } from "../native/shared/bridge"
 import { requestRetention } from "./retention-client"
 import type { Identity } from "./identity"
 import type { EventKind, EventPayload, MessagingEvent, MessagingPreferences, StoredEvent } from "./messaging-types"
@@ -227,7 +228,7 @@ export class CommunityService {
     const current = this.owner(id)
     if (current.joiningPaused || current.inviteGeneration !== invite.inviteGeneration || current.signature !== community.signature)
       throw new Error("The community changed while this invitation was being prepared. Create another invitation.")
-    return buildCommunityInviteUrl(invite, typeof window !== "undefined" ? window.location.origin : "https://serotine.chat")
+    return buildCommunityInviteUrl(invite, appLinkOrigin())
   })
   joinCommunity = async (input: string): Promise<string> => {
     const invite = await parseCommunityInvite(input)

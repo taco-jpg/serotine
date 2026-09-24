@@ -4,6 +4,10 @@ Browser-based, end-to-end encrypted messaging with device-local identities and a
 
 Direct voice/video calls, group calls, and community voice channels are described in [SIP 3 calling](docs/SIP-3-calling.md), including call privacy, WSS signaling, direct WebRTC/STUN routing, and browser support checks.
 
+## Installed apps (SIP-10)
+
+Development client source and build instructions for Android, iPhone/iPad, Windows and macOS are in [native/README.md](native/README.md). These bundled clients are pending platform build results, signing and physical-device qualification. See [SIP-10 implementation and release gates](docs/SIP-10-apps.md) for limits and outstanding acceptance checks.
+
 ## Conversations
 
 Selected-message sharing, Force P2P, private profiles, explicit group invitations, and server retention behavior are documented in the [SIP 8–18 implementation guide](docs/SIP-8-18.md).

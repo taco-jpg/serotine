@@ -71,6 +71,14 @@ jobs:
       - name: Check real Windows startup, backup import, and persistence
         if: matrix.platform == 'windows'
         run: node scripts/native-desktop-smoke.cjs
+      - name: Keep synthetic Windows test diagnostics on failure
+        if: failure() && matrix.platform == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: serotine-windows-smoke-diagnostics
+          path: native/desktop/dist/smoke/
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Package development app without a publisher certificate
         run: npm --prefix native/desktop run package:dev -- --${{ matrix.target }} --${{ matrix.arch }}
         env:

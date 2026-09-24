@@ -15,6 +15,7 @@ const message = 'Synthetic Windows desktop durability check'
 const password = 'Synthetic backup smoke password only'
 const errorCodes = new Set(['HOST_INFO', 'STORAGE_READ', 'STORAGE_RESTORE', 'STORAGE_WRITE', 'UI_START', 'STORAGE_RUNTIME'])
 let phase = 'SETUP', current, currentPage
+const rendererErrors = []
 
 function check(condition, code) { assert(condition, `DESKTOP_${phase}_${code}`) }
 function progress(value) { phase = value; process.stdout.write(`[desktop-smoke] ${value}\n`) }
@@ -73,7 +74,16 @@ async function startupDiagnostics() {
       let info = 'OK', store = 'OK'
       try { await window.serotineNative.getInfo() } catch (error) { info = safeCode(error) }
       try { await window.serotineNative.readSnapshot() } catch (error) { store = safeCode(error) }
-      return `${allowed.includes(stage) ? stage : 'NO_STAGE'};INFO=${info};STORE=${store}`
+      const body = document.body.textContent
+      const route = location.pathname === '/login' ? 'LOGIN' : location.pathname === '/chat' ? 'CHAT_HOME'
+        : location.pathname.startsWith('/chat/') ? 'CHAT_THREAD' : 'ROOT_OR_OTHER'
+      const buttons = [...document.querySelectorAll('button')].map(button => button.textContent.trim())
+      const self = [...document.querySelectorAll('a')].some(anchor => anchor.textContent.trim() === 'Message yourself')
+      const ui = { route, opening: body.includes('Opening your saved data'), checking: body.includes('Checking this browser'),
+        loginError: !!document.querySelector('[aria-label="Open your identity"] [role=alert]'),
+        screenError: body.includes('Serotine could not open this screen'), openMessages: buttons.includes('Open messages'),
+        self, history: !!document.querySelector('[role=region][aria-label="Conversation messages"]') }
+      return `${allowed.includes(stage) ? stage : 'NO_STAGE'};INFO=${info};STORE=${store};UI=${JSON.stringify(ui)}`
     })
   } catch { return 'DIAGNOSTICS_UNAVAILABLE' }
 }
@@ -86,13 +96,16 @@ async function waitForStartup() {
   check(await currentPage.getByRole('heading', { name: 'Serotine could not open its saved data.' }).count() === 0, 'STARTUP_FAILED')
 }
 async function launch(dataHome) {
+  const scenario = phase
   await fs.mkdir(dataHome, { recursive: true })
+  progress(`${scenario}_PROCESS_LAUNCH`)
   current = await electron.launch({
     executablePath: require(path.join(desktop, 'node_modules/electron')),
     args: [`--user-data-dir=${path.join(dataHome, 'chromium')}`, desktop],
     env: { ...process.env, LOCALAPPDATA: dataHome, APPDATA: path.join(dataHome, 'roaming') },
     timeout: 40000,
   })
+  progress(`${scenario}_HOST_ATTACH`)
   // Keep the real native bridge, IPC sender checks, safeStorage, filesystem and
   // protocol handler. Only disable Node HTTPS to make the fixture wholly local.
   await current.evaluate(() => {
@@ -100,9 +113,12 @@ async function launch(dataHome) {
     https.request = () => { throw new Error('Synthetic desktop smoke is offline.') }
   })
   currentPage = await current.firstWindow({ timeout: 30000 })
+  currentPage.on('pageerror', error => rendererErrors.push({ phase, name: error.name, message: error.message.slice(0, 1500) }))
   currentPage.setDefaultTimeout(30000)
   await currentPage.context().route('https://**/*', route => route.abort())
+  progress(`${scenario}_UI_WAIT`)
   await waitForStartup()
+  progress(`${scenario}_UI_READY`)
   const actual = await current.evaluate(({ BrowserWindow, safeStorage, app }) => {
     const window = BrowserWindow.getAllWindows()[0]
     const preferences = window.webContents.getLastWebPreferences()
@@ -115,6 +131,7 @@ async function launch(dataHome) {
   const location = new URL(currentPage.url())
   check(location.protocol === 'serotine:' && location.hostname === 'app', 'CUSTOM_ORIGIN_MISSING')
   check(await currentPage.evaluate(() => typeof window.require === 'undefined' && !!window.serotineNative), 'PRELOAD_ISOLATION')
+  progress(`${scenario}_HOST_VERIFIED`)
   return { page: currentPage, snapshotFile: path.join(actual.userData, 'native-v1/snapshot.v1.json') }
 }
 async function waitForDurableContains(text) {
@@ -132,6 +149,26 @@ async function legacyBackup(identity) {
   return Buffer.from(JSON.stringify({ format: 'serotine-backup', version: 2,
     salt: Buffer.from(salt).toString('base64'), iv: Buffer.from(iv).toString('base64'), ciphertext: Buffer.from(ciphertext).toString('base64') }))
 }
+async function saveFailureEvidence(error) {
+  const directory = path.join(desktop, 'dist/smoke')
+  await fs.mkdir(directory, { recursive: true })
+  // This process only opens isolated synthetic fixtures; no existing app profile
+  // or user backup is read. Never include the native snapshot or private JWK.
+  const report = { phase, error: { name: error?.name, stack: String(error?.stack ?? '').slice(0, 8000) }, rendererErrors }
+  if (currentPage) {
+    report.screen = await currentPage.evaluate(async () => {
+      const redact = text => String(text).replace(/04[0-9a-f]{128}/gi, '[synthetic-address]')
+      const texts = selector => [...document.querySelectorAll(selector)].slice(0, 30).map(node => redact(node.textContent).slice(0, 400))
+      return { url: redact(location.href), ready: document.readyState, headings: texts('h1,h2'), buttons: texts('button'),
+        status: texts('[role=status]'), alerts: texts('[role=alert]'), body: redact(document.body.innerText).slice(0, 6000),
+        identityPresent: !!localStorage.getItem('serotine_identity_v2'),
+        databases: (await indexedDB.databases()).map(db => ({ name: redact(db.name), version: db.version })) }
+    }).catch(() => ({ unavailable: true }))
+    await currentPage.screenshot({ path: path.join(directory, 'failure.png'), fullPage: true, timeout: 5000 }).catch(() => undefined)
+  }
+  await fs.writeFile(path.join(directory, 'failure.json'), JSON.stringify(report, null, 2))
+  process.stderr.write(`Synthetic desktop failure evidence: native/desktop/dist/smoke/failure.json\nError kind: ${error?.name ?? 'Unknown'}\n`)
+}
 async function run() {
   check(process.platform === 'win32', 'REQUIRES_WINDOWS')
   const config = JSON.parse(await fs.readFile(path.join(root, 'native/web/dist/native-config.json'), 'utf8'))
@@ -142,6 +179,7 @@ async function run() {
     const first = await launch(path.join(temporary, 'created'))
     let page = first.page
     const snapshotFile = first.snapshotFile
+    progress('FRESH_CREATE_IDENTITY')
     await page.getByRole('button', { name: 'Create my identity', exact: true }).click()
     await page.getByRole('main').getByRole('link', { name: 'Message yourself', exact: true }).waitFor()
     const identity = await page.evaluate(() => JSON.parse(localStorage.getItem('serotine_identity_v2')))
@@ -162,25 +200,33 @@ async function run() {
 
     progress('RESTART_RESTORE')
     ;({ page } = await launch(path.join(temporary, 'created')))
+    progress('RESTART_ADDRESS_CHECK')
     const restored = await page.evaluate(() => JSON.parse(localStorage.getItem('serotine_identity_v2'))?.publicKey)
     check(restored === identity.publicKey, 'ADDRESS_CHANGED')
+    progress('RESTART_OPEN_MESSAGES')
     await page.getByRole('button', { name: 'Open messages', exact: true }).click()
     await page.waitForFunction(() => location.pathname.startsWith('/chat'))
+    progress('RESTART_CONVERSATION_NAVIGATION')
     const self = page.getByRole('main').getByRole('link', { name: 'Message yourself', exact: true })
     const history = page.getByRole('region', { name: 'Conversation messages', exact: true })
     await Promise.race([self.waitFor(), history.waitFor()])
     if (await self.count()) await self.click()
+    progress('RESTART_HISTORY_VISIBLE')
     await page.getByRole('region', { name: 'Conversation messages', exact: true }).getByText(message, { exact: true }).waitFor()
+    progress('RESTART_QUIT')
     await closeApp()
 
     progress('OLD_BACKUP_IMPORT')
     ;({ page } = await launch(path.join(temporary, 'imported')))
+    progress('OLD_BACKUP_PICKER')
     await page.getByRole('button', { name: 'I have a backup', exact: true }).click()
     await page.getByLabel('Serotine backup', { exact: true }).setInputFiles({ name: 'synthetic-legacy-identity.json', mimeType: 'application/json', buffer: backup })
     await page.getByLabel('Backup password', { exact: true }).fill('Deliberately wrong fixture password')
+    progress('OLD_BACKUP_WRONG_PASSWORD')
     await page.getByRole('button', { name: 'Restore backup', exact: true }).click()
     await page.getByRole('alert').filter({ hasText: 'The backup password is incorrect, or the file is damaged.' }).waitFor()
     check(await page.evaluate(() => localStorage.getItem('serotine_identity_v2') === null), 'WRONG_PASSWORD_CHANGED_IDENTITY')
+    progress('OLD_BACKUP_RESTORE')
     await page.getByLabel('Backup password', { exact: true }).fill(password)
     await page.getByRole('button', { name: 'Restore backup', exact: true }).click()
     await page.getByRole('main').getByRole('link', { name: 'Message yourself', exact: true }).waitFor()
@@ -190,6 +236,7 @@ async function run() {
 
     progress('IMPORTED_RESTART')
     ;({ page } = await launch(path.join(temporary, 'imported')))
+    progress('IMPORTED_ADDRESS_CHECK')
     check(await page.evaluate(() => JSON.parse(localStorage.getItem('serotine_identity_v2'))?.publicKey) === identity.publicKey, 'IMPORTED_ADDRESS_CHANGED')
     await page.getByRole('button', { name: 'Open messages', exact: true }).waitFor()
     await closeApp()
@@ -198,6 +245,7 @@ async function run() {
   } catch (error) {
     const assertion = /^DESKTOP_[A-Z_]+$/.test(error?.message ?? '') ? `;${error.message}` : ''
     process.stderr.write(`Desktop smoke failed at ${phase}: ${await startupDiagnostics()}${assertion}\n`)
+    await saveFailureEvidence(error).catch(() => undefined)
     process.exitCode = 1
   } finally {
     await closeApp({ emergency: true }).catch(() => undefined)

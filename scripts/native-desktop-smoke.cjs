@@ -207,10 +207,9 @@ async function run() {
     await page.getByRole('button', { name: 'Open messages', exact: true }).click()
     await page.waitForFunction(() => location.pathname.startsWith('/chat'))
     progress('RESTART_CONVERSATION_NAVIGATION')
-    const self = page.getByRole('main').getByRole('link', { name: 'Message yourself', exact: true })
-    const history = page.getByRole('region', { name: 'Conversation messages', exact: true })
-    await Promise.race([self.waitFor(), history.waitFor()])
-    if (await self.count()) await self.click()
+    // Opening messages resumes the persisted last conversation. The temporary
+    // home link can disappear during that redirect; assert the final route.
+    await page.waitForURL(url => url.pathname === `/chat/${identity.publicKey}`)
     progress('RESTART_HISTORY_VISIBLE')
     await page.getByRole('region', { name: 'Conversation messages', exact: true }).getByText(message, { exact: true }).waitFor()
     progress('RESTART_QUIT')

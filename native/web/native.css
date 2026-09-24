@@ -8,3 +8,8 @@ body { margin: 0; padding: env(safe-area-inset-top) env(safe-area-inset-right) e
 .native-screen .h-dvh { height: 100%; }
 .native-screen .chat-shell { top: calc(var(--app-top, 0px) + 2rem + env(safe-area-inset-top)); height: calc(var(--app-height, 100dvh) - 2rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
 .native-failure { margin: 3rem auto; max-width: 36rem; padding: 1.5rem; font: 1rem/1.6 system-ui; }
+.native-failure { width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
+.native-failure p { margin: 1rem 0; }
+.native-failure input { max-width: 100%; border: 1px solid currentColor; padding: .5rem; }
+.native-failure button { max-width: 100%; white-space: normal; border: 1px solid currentColor; border-radius: .25rem; padding: .5rem .75rem; }
+.native-failure button:disabled { opacity: .5; cursor: not-allowed; }

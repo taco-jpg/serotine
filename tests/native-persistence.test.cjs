@@ -12,7 +12,7 @@ let bundle
 before(async () => {
   bundle = (await esbuild.build({
     stdin: { contents: `export * from './native/shared/persistence'; export * from './native/shared/persistence-idb';
-      export * from './lib/native-persistence'; export * from './lib/identity'; export * from './lib/storage';
+      export * from './lib/native-persistence'; export * from './lib/identity'; export * from './lib/storage'; export * from './lib/full-backup';
       export { saveStoredEvent, getStoredEvents, eventStorageKey } from './lib/messaging-store';
       export * from './lib/file-bank'; export * from './lib/verified-attachment-cache'; export { attachmentFileLimit, validateAttachmentFile } from './lib/attachments';`, resolveDir: root },
     bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'Harness',
@@ -236,4 +236,125 @@ test('the total snapshot ceiling never replaces the last recoverable native enve
   await assert.rejects(h.flushNativeStorage(), /64 MiB local storage limit/)
   assert.equal(h.disk.value, previous)
   assert.equal(h.errors.length, 1)
+})
+
+test('an intact snapshot with an 8 MiB file reopens without exhausting the base64 validator stack', async () => {
+  const h = harness(); await h.initialize()
+  const bytes = new Uint8Array(8 * 1024 ** 2)
+  bytes[0] = 12; bytes[bytes.length - 1] = 231
+  await h.saveBankFiles(owner, [new File([bytes], 'large-intact.bin')])
+  const reopened = harness(h.disk.value); await reopened.initialize()
+  const [entry] = await reopened.listBankFiles(owner)
+  const restored = new Uint8Array(await (await reopened.getBankFile(owner, entry.id)).arrayBuffer())
+  assert.equal(restored.byteLength, bytes.byteLength)
+  assert.equal(restored[0], 12); assert.equal(restored[restored.length - 1], 231)
+  assert.equal(reopened.errors.length, 0)
+  for (const invalid of ['A===', '====', 'AA=A', 'AAA', 'AAAA\n']) {
+    assert.throws(() => reopened.decodeNativeValue(['buffer', invalid]), /damaged/)
+  }
+})
+
+test('acknowledged recovery clears fatal working storage with its original methods', async () => {
+  const h = harness(); await h.initialize()
+  const identity = await h.createIdentity()
+  await h.saveMessageToStorage(identity.publicKey, { id: 'saved', senderPubKey: identity.publicKey,
+    peerPubKey: peer, content: 'working history', timestamp: 123, delivery: 'pending' })
+  h.disk.fail = true
+  h.localStorage.setItem('serotine:latest', 'unsaved')
+  await assert.rejects(h.flushNativeStorage(), /disk full/)
+  assert.throws(() => h.localStorage.clear(), /disk full/, 'ordinary clear must remain fenced')
+  let resets = 0
+  const result = await h.recoverNativePersistence(async () => {
+    resets++; h.disk.value = null; h.disk.fail = false
+    return { reset: true }
+  })
+  assert.deepEqual(result, { reset: true })
+  assert.equal(resets, 1)
+  assert.equal(h.localStorage.length, 0)
+  assert.deepEqual(await h.indexedDB.databases(), [])
+  await tick()
+  assert.equal(h.disk.value, null, 'no queued work may recreate the erased snapshot')
+  assert.throws(() => h.persistNativeMutation(), /recovery is in progress/)
+})
+
+test('recovery drains pending snapshot writes before native confirmation and cancellation preserves data', async () => {
+  const h = harness(); await h.initialize()
+  const identity = await h.createIdentity()
+  let release, confirmed = false
+  h.disk.wait = new Promise(resolve => { release = resolve })
+  h.localStorage.setItem('serotine:pending', 'keep on cancel')
+  const recovery = h.recoverNativePersistence(async () => { confirmed = true; return { reset: false } })
+  await tick()
+  assert.equal(confirmed, false)
+  assert.throws(() => h.localStorage.setItem('serotine:too-late', 'blocked'), /recovery is in progress/)
+  release()
+  assert.deepEqual(await recovery, { reset: false })
+  assert.equal(h.localStorage.getItem('serotine:pending'), 'keep on cancel')
+  assert.ok(h.disk.value.includes('keep on cancel'))
+  assert.equal((await h.loadIdentity()).publicKey, identity.publicKey)
+  h.disk.wait = undefined
+  h.localStorage.setItem('serotine:after-cancel', 'writes can resume')
+  await h.flushNativeStorage()
+  assert.ok(h.disk.value.includes('writes can resume'))
+})
+
+test('confirmed recovery waits for pending saves and cannot resurrect the native envelope afterward', async () => {
+  const h = harness(); await h.initialize()
+  let release, resetCalled = false
+  h.disk.wait = new Promise(resolve => { release = resolve })
+  h.localStorage.setItem('serotine:pending-reset', 'queued before reset')
+  const recovering = h.recoverNativePersistence(async () => {
+    resetCalled = true
+    assert.ok(h.disk.value.includes('queued before reset'), 'the pending save drained first')
+    h.disk.value = null
+    return { reset: true }
+  })
+  await tick()
+  assert.equal(resetCalled, false)
+  release()
+  assert.deepEqual(await recovering, { reset: true })
+  const writes = h.disk.writes
+  await tick(); await tick()
+  assert.equal(h.disk.value, null)
+  assert.equal(h.disk.writes, writes)
+  assert.equal(h.localStorage.length, 0)
+})
+
+test('a rejected native recovery preserves the working cache and fences an ambiguous result', async () => {
+  const h = harness(); await h.initialize()
+  await h.createIdentity()
+  const before = h.disk.value, local = h.localStorage.getItem('serotine_identity_v2')
+  await assert.rejects(h.recoverNativePersistence(async () => { throw new Error('Native reset rejected') }), /reset rejected/)
+  assert.equal(h.disk.value, before)
+  assert.equal(h.localStorage.getItem('serotine_identity_v2'), local)
+  assert.throws(() => h.localStorage.setItem('serotine:after-error', 'blocked'), /recovery is in progress/)
+})
+
+test('startup recovery can clear a corrupt envelope before storage interception was installed', async () => {
+  const h = harness('{broken', { serotine_identity_v2: 'surviving cache' })
+  await assert.rejects(h.initialize(), /damaged/)
+  await h.recoverNativePersistence(async () => { h.disk.value = null; return { reset: true } })
+  assert.equal(h.localStorage.length, 0)
+  assert.equal(h.disk.value, null)
+})
+
+test('existing encrypted identity and full backups retain their address through native import and restart', async () => {
+  const original = harness(); await original.initialize()
+  const identity = await original.createIdentity()
+  await original.saveMessageToStorage(identity.publicKey, { id: 'old-history', senderPubKey: identity.publicKey,
+    peerPubKey: peer, content: 'history from the existing browser format', timestamp: 123, delivery: 'sent' })
+  const password = 'synthetic-regression-password'
+  const backups = [
+    { text: await original.exportIdentityBackup(identity, password), history: false },
+    { text: await original.exportFullBackup(identity, password), history: true },
+  ]
+  for (const backup of backups) {
+    const destination = harness(); await destination.initialize()
+    await destination.restoreBackup(backup.text, password)
+    const restarted = harness(destination.disk.value); await restarted.initialize()
+    assert.equal((await restarted.loadIdentity()).publicKey, identity.publicKey)
+    if (backup.history) assert.equal((await restarted.getMessagesFromStorage(identity.publicKey, peer))[0].content, 'history from the existing browser format')
+    assert.equal(destination.errors.length, 0)
+    assert.equal(restarted.errors.length, 0)
+  }
 })

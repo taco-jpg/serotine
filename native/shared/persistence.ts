@@ -31,7 +31,11 @@ function base64(bytes: Uint8Array): string {
   return btoa(text)
 }
 function unbase64(text: unknown): Uint8Array<ArrayBuffer> {
-  if (typeof text !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(text)) throw fail("The saved native data is damaged. Nothing was replaced.")
+  // Repeated regexp groups exhaust V8's stack on valid multi-megabyte files.
+  // Check the alphabet and padding in linear time without backtracking.
+  if (typeof text !== "string" || text.length % 4 !== 0) throw fail("The saved native data is damaged. Nothing was replaced.")
+  const padding = text.endsWith("==") ? 2 : text.endsWith("=") ? 1 : 0
+  if (/[^A-Za-z0-9+/]/.test(text.slice(0, text.length - padding))) throw fail("The saved native data is damaged. Nothing was replaced.")
   return Uint8Array.from(atob(text), character => character.charCodeAt(0))
 }
 
@@ -215,9 +219,20 @@ async function restore(snapshot: Snapshot): Promise<void> {
   for (const [key, value] of snapshot.local) localStorage.setItem(key, value)
 }
 
-interface PersistenceController { assertReady(): void; changed(): Promise<void>; flush(): Promise<void> }
+interface PersistenceController {
+  assertReady(): void
+  changed(): Promise<void>
+  flush(): Promise<void>
+  settleWrites(): Promise<void>
+  clearWorkingSettings(): void
+}
 let controller: PersistenceController | undefined
+let recoveryInProgress = false
+function assertNoRecovery(): void {
+  if (recoveryInProgress) throw fail("Local recovery is in progress. Close and reopen Serotine before continuing.")
+}
 export function assertNativePersistenceReady(): void {
+  assertNoRecovery()
   if (!controller) throw fail("Native storage has not finished opening. Messaging has not started.")
   controller.assertReady()
 }
@@ -226,17 +241,52 @@ export function persistNativeMutation(): Promise<void> {
   return controller!.changed()
 }
 
+/** The UI must unmount first. The callback owns native typed/destructive
+ * confirmation and must acknowledge success before any working cache is erased.
+ * Fence later mutations and drain snapshots BEFORE native reset so no queued
+ * save can recreate the erased envelope. Cancellation preserves all data.
+ * After success or an ambiguous native error, remain fenced until a reload. */
+export async function recoverNativePersistence(resetNative: () => Promise<{ reset: boolean }>): Promise<{ reset: boolean }> {
+  assertNoRecovery()
+  recoveryInProgress = true
+  let cancelled = false
+  try {
+    await controller?.settleWrites()
+    // Enumerate before the destructive native operation. Unsupported browser
+    // storage must not turn reset into a half-finished cache cleanup.
+    const working = await indexedDB.databases()
+    const result = await resetNative()
+    if (!result.reset) { cancelled = true; return { reset: false } }
+    // Intercepted clear() intentionally throws after a fatal write. Use the
+    // captured original only after explicit native acknowledgement.
+    if (controller) controller.clearWorkingSettings()
+    else localStorage.clear()
+    for (const database of working) if (database.name && /^(?:serotine-|chat-storage$)/.test(database.name)) {
+      await new Promise<void>((resolve, reject) => {
+        const deletion = indexedDB.deleteDatabase(database.name!)
+        deletion.onsuccess = () => resolve()
+        deletion.onerror = () => reject(fail("The working database cache could not be cleared. Close and reopen Serotine to finish recovery."))
+        deletion.onblocked = () => reject(fail("The working database cache is still open. Close and reopen Serotine to finish recovery."))
+      })
+    }
+    return { reset: true }
+  } finally {
+    if (cancelled) recoveryInProgress = false
+  }
+}
+
 /** Native startup must await this function BEFORE importing/mounting the UI.
  * Native storage is authoritative; WebView localStorage/IndexedDB are rebuildable
  * working caches. The native layer must separately exclude them from OS backup.
  * Errors are sticky: no more network or durable writes until safe restart. */
 export async function initializeNativePersistence(bridge: NativeSnapshotStore, onFailure: (error: Error) => void = () => {}): Promise<{ flush(): Promise<void> }> {
+  assertNoRecovery()
   if (controller) throw fail("Native storage was already initialized.")
   let fatal: Error | undefined
   let generation = 0, durableGeneration = 0
   let writing: Promise<void> | undefined
   const announce = (state: "saving" | "saved" | "error") => window.dispatchEvent(new CustomEvent("serotine:native-storage", { detail: { state } }))
-  const assertReady = () => { if (fatal) throw fatal }
+  const assertReady = () => { if (fatal) throw fatal; assertNoRecovery() }
   const report = (cause: unknown) => {
     if (!fatal) { fatal = cause instanceof Error ? cause : fail(); announce("error"); onFailure(fatal) }
     return fatal
@@ -278,7 +328,10 @@ export async function initializeNativePersistence(bridge: NativeSnapshotStore, o
     Storage.prototype.setItem = function (key, value) { assertReady(); originalSet.call(this, key, value); if (this === localStorage && LOCAL_KEY.test(String(key))) schedule() }
     Storage.prototype.removeItem = function (key) { assertReady(); originalRemove.call(this, key); if (this === localStorage && LOCAL_KEY.test(String(key))) schedule() }
     Storage.prototype.clear = function () { assertReady(); originalClear.call(this); if (this === localStorage) schedule() }
-    controller = { assertReady, changed, flush }
+    controller = { assertReady, changed, flush,
+      settleWrites: async () => { await writing?.catch(() => {}) },
+      clearWorkingSettings: () => { originalClear.call(localStorage) },
+    }
     registerNativeStorageBarrier(flush)
     return { flush }
   } catch (cause) { throw report(cause) }

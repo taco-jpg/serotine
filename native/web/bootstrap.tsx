@@ -2,10 +2,13 @@ import { Capacitor, registerPlugin, type PluginListenerHandle } from "@capacitor
 import { createRoot, type Root } from "react-dom/client"
 import type { NativeBridge, NativeInfo, NativeRequest, NativeResponse } from "../shared/bridge"
 import { setNativeInfo } from "../shared/bridge"
-import { initializeNativePersistence } from "../shared/persistence"
+import { initializeNativePersistence, recoverNativePersistence } from "../shared/persistence"
 import { saveDownload } from "@/lib/save-download"
 
 let reactRoot: Root | undefined
+type FailureStage = "HOST_CONNECT" | "HOST_INFO" | "STORAGE_READ" | "STORAGE_RESTORE" | "STORAGE_WRITE" | "UI_START" | "STORAGE_RUNTIME"
+let startupStage: FailureStage = "HOST_CONNECT"
+let appStarted = false
 
 interface MobilePlugin {
   getInfo(): Promise<NativeInfo>
@@ -18,7 +21,7 @@ interface MobilePlugin {
   resetStorage(input: { confirmation: "DELETE LOCAL DATA" }): Promise<{ reset: boolean }>
   addListener(name: string, listener: (event: { active?: boolean }) => void): Promise<PluginListenerHandle>
 }
-function failure() {
+function failure(stage: FailureStage = appStarted ? "STORAGE_RUNTIME" : startupStage) {
   // Never display exception payloads which may contain private state or keys.
   reactRoot?.unmount()
   reactRoot = undefined
@@ -27,13 +30,16 @@ function failure() {
   const main = document.createElement("main")
   main.className = "native-failure"
   main.setAttribute("role", "alert")
+  main.dataset.nativeErrorCode = stage
   const title = document.createElement("h1")
-  title.textContent = "Serotine could not open its saved data."
+  title.textContent = stage.startsWith("STORAGE_") ? "Serotine could not open its saved data." : "Serotine could not finish starting."
   const detail = document.createElement("p")
   detail.textContent = "Your stored files have been preserved. Close and reopen the app to retry. If storage is full, free some device space first. Do not clear app data or uninstall without your encrypted backup."
-  main.append(title, detail)
+  const diagnostic = document.createElement("p")
+  diagnostic.textContent = `Diagnostic code: ${stage}. Include this code when reporting the problem; you do not need to share your backup or password.`
+  main.append(title, detail, diagnostic)
   const bridge = window.serotineNative
-  if (bridge?.resetStorage) {
+  if (bridge?.resetStorage && !appStarted && stage.startsWith("STORAGE_")) {
     const warning = document.createElement("p")
     warning.textContent = "If the saved data cannot be recovered, you can erase this app's local data and then restore a password-encrypted backup. This permanently removes local identities, history, files and settings. Data not in your backup cannot be recovered."
     const reset = document.createElement("button")
@@ -51,19 +57,8 @@ function failure() {
       if (confirmation.value !== "DELETE LOCAL DATA") return
       reset.disabled = true
       void (async () => {
-        const result = await bridge.resetStorage!({ confirmation: "DELETE LOCAL DATA" })
+        const result = await recoverNativePersistence(() => bridge.resetStorage!({ confirmation: "DELETE LOCAL DATA" }))
         if (!result.reset) { reset.disabled = false; return }
-        // Startup-only recovery: no React, messaging engines or open app DBs.
-        const names = await indexedDB.databases()
-        for (const db of names) if (db.name && /^(serotine-|chat-storage)/.test(db.name)) {
-          await new Promise<void>((resolve, reject) => {
-            const operation = indexedDB.deleteDatabase(db.name!)
-            operation.onsuccess = () => resolve(); operation.onerror = () => reject(operation.error)
-          })
-        }
-        // Storage interception may already be fatal after a runtime disk error.
-        // The native host restricts reset to startup and clears its WebView too.
-        localStorage.clear()
         window.location.reload()
       })().catch(() => { warning.textContent = "Recovery could not complete. Close and reopen Serotine before trying again. Your encrypted backup remains the recovery source."; reset.disabled = false })
     }
@@ -99,14 +94,26 @@ async function start() {
   }
   const bridge = window.serotineNative
   if (!bridge) throw new Error("The installed client requires its native host.")
+  startupStage = "HOST_INFO"
   const info = await bridge.getInfo()
   setNativeInfo(info)
-  const persistence = await initializeNativePersistence({ readSnapshot: () => bridge.readSnapshot(), writeSnapshot: value => bridge.writeSnapshot({ value }) }, failure)
+  startupStage = "STORAGE_RESTORE"
+  const persistence = await initializeNativePersistence({
+    readSnapshot: async () => {
+      try { return await bridge.readSnapshot() }
+      catch (error) { startupStage = "STORAGE_READ"; throw error }
+    },
+    writeSnapshot: async value => {
+      try { await bridge.writeSnapshot({ value }) }
+      catch (error) { if (!appStarted) startupStage = "STORAGE_WRITE"; throw error }
+    },
+  }, () => failure())
   bridge.onBeforeQuit?.(async () => {
     reactRoot?.unmount(); reactRoot = undefined
     try { await persistence.flush() }
     catch (error) { failure(); throw error }
   })
+  startupStage = "UI_START"
   const { NativeApp } = await import("./app")
   bridge.onResume(() => {
     window.dispatchEvent(new Event("online"))
@@ -136,5 +143,6 @@ async function start() {
   }
   reactRoot = createRoot(document.getElementById("root")!)
   reactRoot.render(<NativeApp info={info} />)
+  appStarted = true
 }
-void start().catch(failure)
+void start().catch(() => failure())

@@ -68,6 +68,9 @@ jobs:
       - run: node native/scripts/verify-versions.cjs
       - run: npm run native:build
       - run: npm --prefix native/desktop test
+      - name: Check real Windows startup, backup import, and persistence
+        if: matrix.platform == 'windows'
+        run: node scripts/native-desktop-smoke.cjs
       - name: Package development app without a publisher certificate
         run: npm --prefix native/desktop run package:dev -- --${{ matrix.target }} --${{ matrix.arch }}
         env:

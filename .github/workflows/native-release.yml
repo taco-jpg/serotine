@@ -1,7 +1,10 @@
 name: Prepare signed native release artifacts
 
-# Deliberately manual. This workflow never creates a GitHub Release, uploads to
-# TestFlight/Play, deploys the relay, merges code, or enables an auto-updater.
+# Deliberately manual. Each successful signed platform build is attached to a
+# GitHub prerelease for the requested version. The prerelease can only be
+# finalized after all four platform binaries are present. This workflow still
+# never uploads to TestFlight/Play, deploys the relay, merges code, or enables
+# an auto-updater.
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +21,11 @@ on:
         description: New integer greater than NATIVE_LAST_RELEASE_BUILD_NUMBER
         type: string
         required: true
+      finalize:
+        description: Publish as a stable release after this upload (requires all four platform binaries)
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -222,3 +230,102 @@ jobs:
             native/mobile/ios/release/*.ipa
             native/mobile/ios/release/ARTIFACTS.json
             native/mobile/ios/release/SHA256SUMS
+
+
+  publish:
+    name: Publish ${{ inputs.platform }} asset to GitHub Releases
+    needs: [desktop, android, ios]
+    if: >-
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      vars.NATIVE_RELEASE_ENABLED == 'true' &&
+      (
+        ((inputs.platform == 'windows' || inputs.platform == 'macos') && needs.desktop.result == 'success') ||
+        (inputs.platform == 'android' && needs.android.result == 'success') ||
+        (inputs.platform == 'ios' && needs.ios.result == 'success')
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v${{ inputs.version }}
+    steps:
+      - name: Download signed platform artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: serotine-signed-${{ inputs.platform }}-${{ inputs.version }}-${{ inputs.build_number }}
+          path: signed-artifact
+      - name: Normalize release asset names and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          case "${{ inputs.platform }}" in
+            windows)
+              mapfile -t matches < <(find signed-artifact -type f -name '*.exe' -print)
+              ext=exe
+              suffix=windows-x64
+              ;;
+            macos)
+              mapfile -t matches < <(find signed-artifact -type f -name '*.dmg' -print)
+              ext=dmg
+              suffix=macos-arm64
+              ;;
+            android)
+              mapfile -t matches < <(find signed-artifact -type f -name '*.apk' -print)
+              ext=apk
+              suffix=android
+              ;;
+            ios)
+              mapfile -t matches < <(find signed-artifact -type f -name '*.ipa' -print)
+              ext=ipa
+              suffix=ios
+              ;;
+          esac
+          if [ "${#matches[@]}" -ne 1 ]; then
+            printf 'Expected exactly one package for %s, found %s\n' "${{ inputs.platform }}" "${#matches[@]}"
+            printf '%s\n' "${matches[@]}"
+            exit 1
+          fi
+          asset="serotine-${{ inputs.version }}-${suffix}.${ext}"
+          cp "${matches[0]}" "release-assets/${asset}"
+          (
+            cd release-assets
+            sha256sum "${asset}" > "serotine-${{ inputs.version }}-${suffix}-SHA256SUMS.txt"
+          )
+      - name: Create version prerelease if it does not exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Serotine $TAG" \
+              --prerelease \
+              --notes "Signed native binaries produced by Serotine's protected release workflow. Assets may appear one platform at a time while this release is marked prerelease. The iOS IPA is a distribution artifact; normal iPhone/iPad installation should use TestFlight or the App Store."
+          fi
+      - name: Upload signed package and checksum
+        shell: bash
+        run: gh release upload "$TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Finalize stable release
+        if: inputs.finalize
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          required=(
+            "serotine-${{ inputs.version }}-windows-x64.exe"
+            "serotine-${{ inputs.version }}-macos-arm64.dmg"
+            "serotine-${{ inputs.version }}-android.apk"
+            "serotine-${{ inputs.version }}-ios.ipa"
+          )
+          for name in "${required[@]}"; do
+            if ! grep -Fxq "$name" <<<"$assets"; then
+              echo "Cannot finalize $TAG: missing $name"
+              exit 1
+            fi
+          done
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest

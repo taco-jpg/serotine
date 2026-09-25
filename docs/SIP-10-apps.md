@@ -52,13 +52,13 @@ Before uninstalling or erasing data, export and verify an encrypted backup. Andr
 
 ## Release setup
 
-The [native build guide](../native/README.md) gives local commands. All release operations here prepare artifacts for review; uploading to stores or publishing download links is a separate action.
+The [native build guide](../native/README.md) gives local commands. The protected release workflow prepares and verifies one signed platform artifact at a time, then attaches it to a versioned GitHub prerelease. App Store / TestFlight / Play distribution remains a separate action.
 
 1. Confirm ownership of the production bundle/application IDs, Android release key, Windows signing account/certificate, Apple Developer membership, and App Store Connect app record. Keep recoverable backups of signing material outside the repository.
 2. Configure the GitHub environment `native-release` with required reviewers, restricted `main` deployments, and no fork access. The YAML references an environment; it cannot itself install required-reviewer rules.
 3. Set repository variable `NATIVE_RELEASE_ENABLED=true` only when this environment is protected. Set environment variables `SEROTINE_RELAY_ORIGIN` to the production HTTPS origin and `NATIVE_LAST_RELEASE_BUILD_NUMBER` to the last distributed build number (`0` before the first distribution).
-4. Match the root, desktop, and mobile package versions. Manually dispatch **Prepare signed native release artifacts** on `main`, choose one platform, and supply that version and a strictly greater build number. The native build rejects unsuitable production endpoints. The version guard checks configuration consistency, not App Store/Play historical records; release owners must maintain the previous build value accurately.
-5. Install and qualify the signed output before any public distribution. Preserve `ARTIFACTS.json`, `SHA256SUMS`, commit ID, toolchain versions, signature identity, test results, and release notes. Update the recorded last-distributed build number after distribution. Use one version/build number consistently for the same cross-platform release when appropriate.
+4. Match the root, desktop, and mobile package versions. Manually dispatch **Prepare signed native release artifacts** on `main`, choose one platform, and supply that version and a strictly greater build number. A successful job adds that signed package and a checksum to GitHub prerelease `v<version>`; repeated platform runs accumulate assets on the same prerelease. The native build rejects unsuitable production endpoints. The version guard checks configuration consistency, not App Store/Play historical records; release owners must maintain the previous build value accurately.
+5. Install and qualify each signed output before treating the version as stable. On the last platform run, set `finalize=true`; the workflow refuses to finalize unless the Windows x64 EXE, macOS arm64 DMG, Android APK, and iOS IPA are all attached. Preserve the Actions provenance metadata, commit ID, toolchain versions, signature identity, test results, and release notes. Update the recorded last-distributed build number after distribution. Use one version/build number consistently for the same cross-platform release when appropriate.
 
 ### Protected credentials
 
@@ -73,7 +73,7 @@ Never put certificates, keystores, provisioning profiles, passwords, developer a
 
 For local Android release preparation, set `ANDROID_KEYSTORE_PATH` to the secure local keystore plus the four signing/build environment settings documented above and run `assembleRelease` after building/syncing a production renderer. Desktop uses `package:release`, `CSC_LINK`, and `CSC_KEY_PASSWORD`; macOS additionally needs notarization credentials. The CI maps platform-specific secret names to the desktop script's generic names. Do not use `package:dev` for an official app ID.
 
-The iOS helper creates a signed archive and exports an IPA using an App Store provisioning profile. It does not upload anything. After successful qualification, submit through App Store Connect/Transporter for TestFlight processing and any external-beta review. A downloadable IPA is not the general iPhone installation route. App Store acceptance is not established by a successful build; minimum-functionality and privacy requirements still apply.
+The iOS helper creates a signed archive and exports an IPA using an App Store provisioning profile. The release workflow may attach that IPA to GitHub Releases as a distribution artifact, but it does not submit anything to App Store Connect. After successful qualification, submit through App Store Connect/Transporter for TestFlight processing and any external-beta review. A downloadable IPA is not the general iPhone installation route. App Store acceptance is not established by a successful build; minimum-functionality and privacy requirements still apply.
 
 ### Release verification and installation
 

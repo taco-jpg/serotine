@@ -1,6 +1,6 @@
 # Serotine installed clients
 
-SIP-10 now has bundled mobile and desktop client source, native storage/transport adapters, and build workflows. These are development clients pending platform build results, signing setup, and physical-device qualification. There is no published Android APK, TestFlight beta, Windows installer, or macOS release supplied by this change.
+SIP-10 now has bundled mobile and desktop client source, native storage/transport adapters, and build workflows. Development packages are built in CI, while public production binaries still require the protected signing setup and platform qualification described below. The signed release workflow can attach Windows, macOS, Android, and iOS artifacts to a versioned GitHub prerelease and finalize it only after all four platform binaries are present.
 
 The renderer reuses the existing React messaging UI. Its JavaScript, CSS, fonts, and static assets ship inside the app, so opening the app does not require downloading executable code from the website. The hosted Cloudflare relay remains separate. Packaging does not start a Next.js server on the device.
 
@@ -65,6 +65,6 @@ App builds share existing message and backup formats. Calling permission plumbin
 
 `native-build.yml` runs native unit and bundled-renderer browser smoke tests on Linux, builds development Windows x64, macOS arm64, and Android packages, and compiles the iOS Simulator target. It uploads only selected packages, SHA-256 checksums, and nonsecret provenance metadata. Android development packages use Android's debug certificate; Windows/macOS development packages have no publisher signature.
 
-`native-release.yml` runs only by manual dispatch on `main` with `NATIVE_RELEASE_ENABLED=true`, and all signing jobs reference the `native-release` environment. Configure environment reviewers and branch protection before enabling it. It verifies versions, builds a production renderer, requires signing credentials, verifies signatures, and uploads reviewable artifacts. It never publishes a Release, sends a build to TestFlight/Play, or deploys the backend.
+`native-release.yml` runs only by manual dispatch on `main` with `NATIVE_RELEASE_ENABLED=true`, and all signing jobs reference the `native-release` environment. Configure environment reviewers and branch protection before enabling it. It verifies versions, builds a production renderer, requires signing credentials, verifies signatures, uploads reviewable Actions artifacts, and then attaches the selected signed package plus a fresh SHA-256 checksum to `v<version>` on GitHub Releases. The version stays a prerelease while platforms are being collected. Set the workflow's `finalize` input only on the last platform; finalization fails unless Windows x64, macOS arm64, Android, and iOS assets are all present. It still never sends a build to TestFlight/Play or deploys the backend.
 
 The build workflows have not been executed on hosted Windows/macOS/Android runners as part of this change. Passing source tests cannot establish successful installation, OS updates, or device behavior.

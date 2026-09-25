@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Serotine</string>
+    <string name="title_activity_main">Serotine</string>
+    <string name="package_name">app.serotine.client</string>
+    <string name="custom_url_scheme">app.serotine.client</string>
+</resources>

@@ -1,0 +1,22 @@
+{
+  "name": "serotine-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "sync": "node scripts/prepare.cjs && cap sync && node scripts/pin-ios.cjs",
+    "android": "npm run sync && cap open android",
+    "ios": "npm run sync && cap open ios",
+    "test": "node --test tests/*.test.cjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.2",
+    "@capacitor/core": "8.5.2",
+    "@capacitor/ios": "8.5.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.2"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

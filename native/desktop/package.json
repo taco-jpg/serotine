@@ -1,0 +1,19 @@
+{
+  "name": "serotine-desktop",
+  "version": "1.0.0",
+  "description": "Bundled Serotine desktop client",
+  "author": "Serotine contributors",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test *.test.cjs",
+    "package:dev": "electron-builder --config electron-builder.cjs --publish never",
+    "package:release": "node package-release.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.4.5",
+    "electron-builder": "26.16.1"
+  },
+  "engines": { "node": ">=22.13.0" }
+}

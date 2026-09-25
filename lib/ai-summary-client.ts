@@ -1,3 +1,4 @@
+import { apiFetch } from "../native/shared/transport"
 import type { Identity } from "./identity"
 import { createRequestProof } from "./request-auth"
 import { isSummaryMessages, SUMMARY_ACTION, SUMMARY_MAX_OUTPUT, SUMMARY_TIMEOUT_MS, type SummaryMessage } from "./ai-summary"
@@ -21,9 +22,11 @@ export async function requestAiSummary(identity: Identity, messages: readonly Su
     // Signing is asynchronous. Re-read consent/scope immediately before the
     // network export so a disable or identity switch cannot race that await.
     if (!isAllowed()) throw new Error("AI summary access changed. Review the plugin settings and preview again.")
-    const response = await fetch("/api/plugins/summary", { method: "POST", credentials: "same-origin", cache: "no-store",
+    const response = await apiFetch("/api/plugins/summary", { method: "POST", credentials: "same-origin", cache: "no-store",
       redirect: "error", headers: { "Content-Type": "application/json" }, signal: controller.signal,
-      body: JSON.stringify({ version: 1, action: SUMMARY_ACTION, data, proof }) })
+      body: JSON.stringify({ version: 1, action: SUMMARY_ACTION, data, proof }) }, () => {
+        if (!isAllowed()) throw new Error("AI summary access changed. Review the plugin settings and preview again.")
+      })
     const value: unknown = await response.json()
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("AI summary returned an invalid response. Your conversation is unchanged.")
     const result = value as Record<string, unknown>

@@ -1264,7 +1264,25 @@ export class MessagingEngine {
             // Permanent signed marker plus current cross-tab policy fence: no retry,
             // restore or mode change can release direct content to the relay.
             if (record.event.route === "direct-only" || this.getDeliveryMode(record.event.conversationId) === "direct-only") return
-            const result = await storeEncryptedEvent(data, proof)
+            const result = await storeEncryptedEvent(data, proof, () => {
+              // Installed clients may wait for a durable snapshot before native
+              // I/O. Recheck live policy after that wait, immediately before send.
+              this.assertActive()
+              this.assertPrivatePlugin(record.event.conversationId, record.event.kind, record.event.payload)
+              if (!eligible(record) || isDeletedStoredEvent(record, owner, this.preferences)) throw new Error("Sending is no longer allowed for this conversation.")
+              if (record.event.kind === "private-message" && (!this.records.some(row => row.key === record.key)
+                || isPrivateEventExpired(record, owner, privateDestroyCutoffs(this.records, owner)))) throw new Error("This private message has expired.")
+              if (record.event.group) {
+                const current = this.model.groups.find(group => group.id === record.event.conversationId)
+                if (current?.deleted || this.preferences.terminatedGroups?.includes(record.event.conversationId) || this.groupAdmissionStates.get(record.event.conversationId)?.terminal
+                  || (current && (current.epoch !== record.event.group.epoch || current.signature !== record.event.group.signature))) throw new Error("Group membership changed. Review the group before sending again.")
+              }
+              if (record.event.kind === "community") {
+                const reason = communityOutboxError(record.event, this.communities.model, owner)
+                if (reason) throw new Error(reason)
+              }
+              if (record.event.kind === "profile" && record.event.payload.profile!.type !== "revoke" && record.event.payload.profile!.type !== "sync" && !this.trustedPluginPeer(recipientPubKey)) throw new Error("Profile sharing is no longer allowed.")
+            })
             this.assertActive()
             if (!result.success && result.retryAfterMs) {
               // This authenticated refusal did not store the event. Keep the

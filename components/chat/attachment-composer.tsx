@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, type ReactNode, type RefObject } from "react"
 import { File as FileIcon, FolderPlus, Mic, Paperclip, Settings2, Square, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { MAX_FILE_BYTES, attachmentPreviewKind, formatFileSize, safeFilename, validateAttachmentFile, type AttachmentCaption, type AttachmentKind, type AttachmentProgress, type PreparedAttachment } from "@/lib/attachments"
+import { MAX_FILE_BYTES, attachmentFileLimit, attachmentPreviewKind, formatFileSize, safeFilename, validateAttachmentFile, type AttachmentCaption, type AttachmentKind, type AttachmentProgress, type PreparedAttachment } from "@/lib/attachments"
 import { bindFileInputEvents } from "./file-input-events"
 import { compactAttachment } from "@/lib/compact-attachment"
 import { AutoCompactFilesSetting, useAutoCompactFiles } from "./use-auto-compact-files"
@@ -51,7 +51,7 @@ function AttachmentPreview({ item }: { item: PendingFile }) {
   return <div className="flex h-12 items-center justify-center text-muted-foreground"><FileIcon aria-hidden="true" className="size-7" /></div>
 }
 
-export function AttachmentComposer({ owner = "", scopeKey = "", disabled = false, maxFileBytes = MAX_FILE_BYTES, captureRef, pasteRef, composerRef, onStateChange, onSend, onStage, onPublish, onDiscard, onSelectGif, extraActions, toolbarHint, toolbarVisible = true, toolbarId, children }: {
+export function AttachmentComposer({ owner = "", scopeKey = "", disabled = false, maxFileBytes = attachmentFileLimit(), captureRef, pasteRef, composerRef, onStateChange, onSend, onStage, onPublish, onDiscard, onSelectGif, extraActions, toolbarHint, toolbarVisible = true, toolbarId, children }: {
   owner?: string
   scopeKey?: string
   disabled?: boolean
@@ -472,8 +472,8 @@ export function AttachmentComposer({ owner = "", scopeKey = "", disabled = false
       {toolbarHint && <div className="ml-auto text-xs text-muted-foreground">{toolbarHint}</div>}
     </div>
     <div className={settingsOpen && toolbarVisible ? "space-y-2 rounded-lg border border-border bg-card p-3" : "hidden"}>
-      <p className="text-xs text-muted-foreground">Files up to {formatFileSize(maxFileBytes)} each{maxFileBytes < MAX_FILE_BYTES ? " in this group" : ""}. You can also drop files into the chat or paste them into the message box.</p>
-      {maxFileBytes < MAX_FILE_BYTES && <p className="text-xs text-muted-foreground">Larger groups have a smaller limit because files are sent separately to each member. Direct chats support {formatFileSize(MAX_FILE_BYTES)}.</p>}
+      <p className="text-xs text-muted-foreground">Files up to {formatFileSize(maxFileBytes)} each{maxFileBytes < attachmentFileLimit() ? " in this group" : ""}. You can also drop files into the chat or paste them into the message box.</p>
+      {maxFileBytes < attachmentFileLimit() && <p className="text-xs text-muted-foreground">Larger groups have a smaller limit because files are sent separately to each member. Direct chats support {formatFileSize(attachmentFileLimit())}.</p>}
       <AutoCompactFilesSetting enabled={autoCompact} onChange={setAutoCompact} disabled={unavailable} />
     </div>
   </div>

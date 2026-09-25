@@ -1,0 +1,2 @@
+#include "relay.generated.xcconfig"
+CAPACITOR_DEBUG = false

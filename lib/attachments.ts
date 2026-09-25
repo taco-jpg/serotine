@@ -1,5 +1,6 @@
 import type { Identity } from "./identity"
 import { assertRelayFileRoute } from "./direct-policy"
+import { nativeStorageLimits } from "./native-persistence"
 import type { AttachmentMeta, GroupState, MessagingContextValue } from "./messaging-types"
 import { ID_PATTERN, MAX_EVENT_PACKET_LENGTH, MAX_MESSAGE_LENGTH, MAX_RETAINED_EVENT_BYTES, MAX_RETAINED_EVENT_COUNT, PUBLIC_KEY_PATTERN } from "./protocol"
 
@@ -14,7 +15,7 @@ export type AttachmentProgress = (percent: number) => void
 export type AttachmentCaption = { content: string; mentions?: string[] }
 
 /** Keep one transfer within the existing relay budget, including group fanout. */
-export function attachmentFileLimit(_group?: GroupState): number { return MAX_FILE_BYTES }
+export function attachmentFileLimit(_group?: GroupState): number { return nativeStorageLimits()?.fileBytes ?? MAX_FILE_BYTES }
 
 export function legacyAttachmentFileLimit(group?: GroupState): number {
   if (!group) return LEGACY_MAX_FILE_BYTES
@@ -56,6 +57,8 @@ export function normalizeMime(mime: string): string {
 export function validateAttachmentFile(file: Pick<File, "size" | "name">, maxBytes = MAX_FILE_BYTES): void {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("This group's details are too large to attach files. Ask the group owner to update the group.")
   if (!Number.isSafeInteger(file.size) || file.size < 0) throw new Error("This file has an invalid size.")
+  const nativeLimit = nativeStorageLimits()?.fileBytes
+  if (nativeLimit !== undefined && file.size > nativeLimit) throw new Error(`The installed beta supports files up to ${formatFileSize(nativeLimit)} each. Choose a smaller file.`)
   if (file.size > Math.min(MAX_FILE_BYTES, maxBytes)) throw new Error(maxBytes < MAX_FILE_BYTES
     ? `This group supports files up to ${formatFileSize(maxBytes)} each. Choose a smaller file or send it in a direct chat.`
     : "Choose a file up to 1 GB.")

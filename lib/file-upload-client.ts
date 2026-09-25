@@ -1,3 +1,6 @@
+import { apiFetch } from "../native/shared/transport"
+import { getNativeBridge } from "../native/shared/bridge"
+import { nativeStorageLimits } from "./native-persistence"
 import type { Identity } from "./identity"
 import type { AttachmentMeta } from "./messaging-types"
 import { createRequestProof } from "./request-auth"
@@ -49,11 +52,11 @@ async function transferRequest(identity: Identity, action: string, data: Record<
     const proof = await createRequestProof(action, data, identity.privateKey, identity.publicKey)
     const envelope = JSON.stringify({ version: 1, action, data, proof })
     options.allowed?.()
-    const response = await fetch(endpoint, { method: options.body ? "PUT" : "POST", mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store",
+    const response = await apiFetch(endpoint, { method: options.body ? "PUT" : "POST", mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store",
       referrerPolicy: "no-referrer", headers: options.body
         ? { "Content-Type": "application/octet-stream", "X-Serotine-File-Request": envelope }
         : { "Content-Type": "application/json", Accept: options.expectedBytes === undefined ? "application/json" : "application/octet-stream" },
-      body: options.body ?? envelope, signal: controller.signal })
+      body: options.body ?? envelope, signal: controller.signal }, options.allowed)
     if (response.ok && options.expectedBytes !== undefined) {
       if (!/^application\/octet-stream(?:\s*;|$)/i.test(response.headers.get("content-type") ?? "")) throw new Error("The file service returned an unexpected response.")
       const bytes = await boundedBody(response, options.expectedBytes)
@@ -79,7 +82,7 @@ export async function fileStorageAvailable(signal?: AbortSignal): Promise<boolea
   signal?.addEventListener("abort", abort, { once: true })
   const timeout = setTimeout(() => controller.abort(), 20_000)
   try {
-    const response = await fetch(endpoint, { method: "GET", mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store", signal: controller.signal })
+    const response = await apiFetch(endpoint, { method: "GET", mode: "same-origin", credentials: "same-origin", redirect: "error", cache: "no-store", signal: controller.signal })
     if (response.status === 404) return false
     if (!response.ok) throw new Error("The file service is temporarily unavailable. Try attaching your file again.")
     const bytes = await boundedBody(response, 8192)
@@ -230,9 +233,11 @@ export async function downloadRemoteAttachment(metadata: AttachmentMeta, identit
   preview?: boolean; onProgress?: AttachmentProgress; signal?: AbortSignal
 } = {}): Promise<AttachmentDownload> {
   if (!isAttachmentMeta(metadata) || !metadata.remote) throw new Error("This attachment has invalid download details.")
+  const nativeLimit = nativeStorageLimits()?.fileBytes
+  if (nativeLimit && metadata.size > nativeLimit) throw new Error("This file exceeds the installed beta's 16 MiB limit. Open it in the browser client instead.")
   const mime = attachmentPreviewKind(metadata.mime) ? metadata.mime : "application/octet-stream"
   const saveWindow = typeof window !== "undefined" ? window as SaveWindow : undefined
-  if (!options.preview && saveWindow?.showSaveFilePicker) {
+  if (!options.preview && !getNativeBridge() && saveWindow?.showSaveFilePicker) {
     const handle = await saveWindow.showSaveFilePicker({ suggestedName: safeFilename(metadata.name) })
     options.signal?.throwIfAborted()
     const writer = await handle.createWritable()

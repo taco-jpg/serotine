@@ -1,0 +1,224 @@
+name: Prepare signed native release artifacts
+
+# Deliberately manual. This workflow never creates a GitHub Release, uploads to
+# TestFlight/Play, deploys the relay, merges code, or enables an auto-updater.
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to prepare
+        type: choice
+        required: true
+        options: [windows, macos, android, ios]
+      version:
+        description: Exact package.json version
+        type: string
+        required: true
+      build_number:
+        description: New integer greater than NATIVE_LAST_RELEASE_BUILD_NUMBER
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-release
+  cancel-in-progress: false
+
+env:
+  EXPECTED_VERSION: ${{ inputs.version }}
+  SEROTINE_BUILD_NUMBER: ${{ inputs.build_number }}
+  NEXT_TELEMETRY_DISABLED: '1'
+
+jobs:
+  desktop:
+    if: github.ref == 'refs/heads/main' && vars.NATIVE_RELEASE_ENABLED == 'true' && (inputs.platform == 'windows' || inputs.platform == 'macos')
+    # Configure required reviewers and a main-only deployment rule on this environment.
+    environment: native-release
+    runs-on: ${{ inputs.platform == 'windows' && 'windows-2025' || 'macos-26' }}
+    timeout-minutes: 45
+    env:
+      SEROTINE_RELAY_ORIGIN: ${{ vars.SEROTINE_RELAY_ORIGIN }}
+      NATIVE_LAST_RELEASE_BUILD_NUMBER: ${{ vars.NATIVE_LAST_RELEASE_BUILD_NUMBER }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            native/desktop/package-lock.json
+      - run: node native/scripts/verify-versions.cjs --release
+      - run: npm ci
+      - run: npm --prefix native/desktop ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm --prefix native/desktop test
+      - run: npm run native:build -- --release
+      - name: Build signed Windows x64 installer
+        if: inputs.platform == 'windows'
+        run: npm --prefix native/desktop run package:release -- --x64
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      - name: Verify Authenticode signature
+        if: inputs.platform == 'windows'
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem native/desktop/dist/*.exe)
+          if ($installers.Count -eq 0) { throw 'Missing Windows installer' }
+          foreach ($installer in $installers) {
+            if ((Get-AuthenticodeSignature $installer.FullName).Status -ne 'Valid') {
+              throw 'Installer Authenticode verification failed'
+            }
+          }
+      - name: Build signed and notarized macOS arm64 disk image
+        if: inputs.platform == 'macos'
+        run: npm --prefix native/desktop run package:release -- --arm64
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Verify macOS app and notarization ticket
+        if: inputs.platform == 'macos'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          apps=(native/desktop/dist/mac*/*.app)
+          images=(native/desktop/dist/*.dmg)
+          test "${#apps[@]}" -gt 0
+          test "${#images[@]}" -gt 0
+          for app in "${apps[@]}"; do
+            codesign --verify --deep --strict "$app"
+            xcrun stapler validate "$app"
+            spctl --assess --type execute "$app"
+          done
+          for image in "${images[@]}"; do codesign --verify "$image"; done
+      - name: Record checksums and artifact provenance
+        run: node native/scripts/artifact-metadata.cjs native/desktop/dist ${{ inputs.platform }} ${{ inputs.platform == 'windows' && 'x64' || 'arm64' }} release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: serotine-signed-${{ inputs.platform }}-${{ inputs.version }}-${{ inputs.build_number }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            native/desktop/dist/*.exe
+            native/desktop/dist/*.dmg
+            native/desktop/dist/ARTIFACTS.json
+            native/desktop/dist/SHA256SUMS
+
+  android:
+    if: github.ref == 'refs/heads/main' && vars.NATIVE_RELEASE_ENABLED == 'true' && inputs.platform == 'android'
+    environment: native-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      SEROTINE_RELAY_ORIGIN: ${{ vars.SEROTINE_RELAY_ORIGIN }}
+      NATIVE_LAST_RELEASE_BUILD_NUMBER: ${{ vars.NATIVE_LAST_RELEASE_BUILD_NUMBER }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            native/mobile/package-lock.json
+      - run: node native/scripts/verify-versions.cjs --release
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - run: npm ci
+      - run: npm --prefix native/mobile ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm --prefix native/mobile test
+      - run: npm run native:build -- --release
+      - run: npm --prefix native/mobile run sync
+      - name: Build with the protected Android release key
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          set +x
+          export ANDROID_KEYSTORE_PATH="$RUNNER_TEMP/serotine-release.jks"
+          trap 'rm -f "$ANDROID_KEYSTORE_PATH"' EXIT
+          node -e "const fs=require('node:fs'); if(!process.env.ANDROID_KEYSTORE_BASE64) throw new Error('Missing Android release key'); fs.writeFileSync(process.env.ANDROID_KEYSTORE_PATH, Buffer.from(process.env.ANDROID_KEYSTORE_BASE64,'base64'), {mode:0o600})"
+          cd native/mobile/android
+          bash gradlew --no-daemon assembleRelease
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          shopt -s nullglob
+          apks=(native/mobile/android/app/build/outputs/apk/release/*.apk)
+          test "${#apks[@]}" -gt 0
+          for apk in "${apks[@]}"; do "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$apk"; done
+      - run: node native/scripts/artifact-metadata.cjs native/mobile/android/app/build/outputs/apk/release android universal release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: serotine-signed-android-${{ inputs.version }}-${{ inputs.build_number }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            native/mobile/android/app/build/outputs/apk/release/*.apk
+            native/mobile/android/app/build/outputs/apk/release/ARTIFACTS.json
+            native/mobile/android/app/build/outputs/apk/release/SHA256SUMS
+
+  ios:
+    if: github.ref == 'refs/heads/main' && vars.NATIVE_RELEASE_ENABLED == 'true' && inputs.platform == 'ios'
+    environment: native-release
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      SEROTINE_RELAY_ORIGIN: ${{ vars.SEROTINE_RELAY_ORIGIN }}
+      NATIVE_LAST_RELEASE_BUILD_NUMBER: ${{ vars.NATIVE_LAST_RELEASE_BUILD_NUMBER }}
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            native/mobile/package-lock.json
+      - run: node native/scripts/verify-versions.cjs --release
+      - run: xcodebuild -version
+      - run: npm ci
+      - run: npm --prefix native/mobile ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm --prefix native/mobile test
+      - run: npm run native:build -- --release
+      - run: npm --prefix native/mobile run sync
+      - name: Sign and export for later TestFlight submission
+        run: bash native/scripts/sign-ios.sh
+        env:
+          IOS_DISTRIBUTION_CERT_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERT_BASE64 }}
+          IOS_CERT_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
+          IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - run: node native/scripts/artifact-metadata.cjs native/mobile/ios/release ios arm64 release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: serotine-signed-ios-${{ inputs.version }}-${{ inputs.build_number }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            native/mobile/ios/release/*.ipa
+            native/mobile/ios/release/ARTIFACTS.json
+            native/mobile/ios/release/SHA256SUMS

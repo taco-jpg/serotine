@@ -10,6 +10,7 @@ import { IdentityConflictError, loadArchivedIdentities, shortAddress, type Archi
 import { exportFullBackup, MAX_BACKUP_FILE_BYTES, restoreBackup } from "@/lib/full-backup"
 import { RestoreConfirmation } from "@/components/auth/restore-confirmation"
 import { IdentitySecurity } from "@/components/identity-security"
+import { saveDownload } from "@/lib/save-download"
 
 export function AccountTools({ identity }: { identity: Identity }) {
   const id = useId()
@@ -39,14 +40,8 @@ export function AccountTools({ identity }: { identity: Identity }) {
     if (password !== confirmation) throw new Error("The backup passwords do not match.")
     const backupIdentity = source ?? identity
     const text = await exportFullBackup(backupIdentity, password)
-    const url = URL.createObjectURL(new Blob([text], { type: "application/json" }))
-    const anchor = document.createElement("a")
-    anchor.href = url
-    anchor.download = `serotine-backup-${backupIdentity.publicKey.slice(0, 10)}-${new Date().toISOString().slice(0, 10)}.json`
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    const saved = await saveDownload(new Blob([text], { type: "application/json" }), `serotine-backup-${backupIdentity.publicKey.slice(0, 10)}-${new Date().toISOString().slice(0, 10)}.json`)
+    if (!saved) { setStatus("Backup save cancelled."); return }
     setStatus(mode === "link" ? "Download started. Transfer this file to your other device and restore it there using this password." : "Backup download started. Keep the file and its password somewhere you can recover them.")
     setPassword(""); setConfirmation(""); setShowPassword(false)
   }

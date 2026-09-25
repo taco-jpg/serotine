@@ -1,0 +1,77 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace = "app.serotine.client"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "app.serotine.client"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode Integer.parseInt(System.getenv("SEROTINE_BUILD_NUMBER") ?: "1")
+        versionName new groovy.json.JsonSlurper().parse(file("../../package.json")).version
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    compileOptions { coreLibraryDesugaringEnabled true }
+    buildFeatures { buildConfig true }
+    signingConfigs {
+        release {
+            def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+            if (keystorePath) {
+                storeFile file(keystorePath)
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+    buildTypes {
+        debug { applicationIdSuffix ".dev"; versionNameSuffix "-dev" }
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.1.5"
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.webkit:webkit:$androidxWebkitVersion"
+    implementation "org.apache.cordova:framework:$cordovaAndroidVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+// Release packaging fails closed without externally supplied signing credentials.
+gradle.taskGraph.whenReady { graph ->
+    def nativeConfig = new groovy.json.JsonSlurper().parse(file("src/main/assets/public/native-config.json"))
+    if (graph.allTasks.any { it.name == "assembleDebug" } && nativeConfig.development != true) throw new GradleException("Debug requires the development renderer")
+    if (graph.allTasks.any { it.name in ["packageRelease", "signReleaseBundle"] } && nativeConfig.development != false) throw new GradleException("Release requires npm run native:build -- --release")
+    if (graph.allTasks.any { it.name in ["packageRelease", "signReleaseBundle"] }) {
+        ["ANDROID_KEYSTORE_PATH", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD"].each { name ->
+            if (!System.getenv(name)) throw new GradleException("Missing release signing environment: " + name)
+        }
+        if (!System.getenv("SEROTINE_BUILD_NUMBER")) throw new GradleException("Set an increasing SEROTINE_BUILD_NUMBER for release updates")
+    }
+}

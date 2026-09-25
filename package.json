@@ -40,9 +40,13 @@
     "test:uploads": "node scripts/staged-uploads-smoke.cjs",
     "test:d1": "node --test tests/d1-storage.test.cjs tests/relay-payload-migration.test.cjs",
     "measure:d1": "node tests/support/d1-workload.cjs --optimized",
-    "test:direct": "node scripts/direct-smoke.cjs"
+    "test:direct": "node scripts/direct-smoke.cjs",
+    "native:build": "node scripts/native-build.mjs",
+    "native:test": "node --test tests/native-*.test.cjs native/desktop/*.test.cjs",
+    "native:smoke": "node scripts/native-smoke.cjs"
   },
   "dependencies": {
+    "@capacitor/core": "8.5.2",
     "@hookform/resolvers": "^3.10.0",
     "@radix-ui/react-accordion": "1.2.2",
     "@radix-ui/react-alert-dialog": "1.1.4",
@@ -113,6 +117,7 @@
     "@typescript-eslint/parser": "^8.59.1",
     "esbuild": "0.25.4",
     "eslint": "^10.1.0",
+    "fake-indexeddb": "6.2.5",
     "globals": "^17.6.0",
     "playwright": "^1.63.0",
     "postcss": "^8.5",

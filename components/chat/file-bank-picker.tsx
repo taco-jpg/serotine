@@ -5,8 +5,8 @@ import { File as FileIcon, FolderHeart, Pencil, Plus, Trash2 } from "lucide-reac
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
-import { attachmentPreviewKind, formatFileSize, MAX_FILE_BYTES } from "@/lib/attachments"
-import { BANK_MAX_BYTES, BANK_MAX_FILES, deleteBankFile, estimateBankStorage, getBankFile, listBankFiles, renameBankFile, saveBankFiles, subscribeToFileBank, type BankFile } from "@/lib/file-bank"
+import { attachmentFileLimit, attachmentPreviewKind, formatFileSize } from "@/lib/attachments"
+import { bankCapacityBytes, BANK_MAX_FILES, deleteBankFile, estimateBankStorage, getBankFile, listBankFiles, renameBankFile, saveBankFiles, subscribeToFileBank, type BankFile } from "@/lib/file-bank"
 
 interface FileBankPickerProps {
   owner: string
@@ -158,7 +158,7 @@ function ScopedFileBankPicker({ owner, disabled = false, onSelectFile }: FileBan
         <Button type="button" variant="outline" disabled={unavailable} onClick={() => upload.current?.click()}><Plus aria-hidden="true" className="size-4" />Add files</Button>
         <input ref={upload} type="file" multiple className="hidden" aria-label="Add files to Backpack" disabled={unavailable} onChange={event => { addFiles(Array.from(event.target.files || [])); event.target.value = "" }} />
       </div>
-      <p className="text-xs text-muted-foreground">{entries.length}/{BANK_MAX_FILES} files · {formatFileSize(bytes)} / {formatFileSize(BANK_MAX_BYTES)} · up to {formatFileSize(MAX_FILE_BYTES)} per file</p>
+      <p className="text-xs text-muted-foreground">{entries.length}/{BANK_MAX_FILES} files · {formatFileSize(bytes)} / {formatFileSize(bankCapacityBytes())} · up to {formatFileSize(attachmentFileLimit())} per file</p>
       <p className="text-xs text-muted-foreground">Available space depends on your browser.{availableBytes !== undefined ? ` About ${formatFileSize(availableBytes)} is currently available to this site.` : ""}</p>
       {error && <div role="alert" className="space-y-2 text-sm text-destructive"><p>{error}</p><Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void refresh()}>Reload files</Button></div>}
       {notice && <p role="status" className="text-sm text-muted-foreground">{notice}</p>}

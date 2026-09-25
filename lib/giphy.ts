@@ -1,3 +1,4 @@
+import { apiFetch } from "../native/shared/transport"
 // GIPHY requires direct client requests and forbids storing media URLs/assets.
 // Persist only the public GIF page URL in a message, then resolve its ID on demand.
 // https://developers.giphy.com/docs/api/#best-practices
@@ -25,7 +26,7 @@ let configRequest: ConfigRequest | null = null
 async function fetchRuntimeKey(signal: AbortSignal): Promise<string> {
   // This endpoint exposes only the public app key. GIF IDs and searches still
   // go directly to GIPHY, never through Serotine's server.
-  const response = await fetch("/api/giphy/config", { signal, credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store", redirect: "error" })
+  const response = await apiFetch("/api/giphy/config", { signal, credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store", redirect: "error" })
   if (!response.ok) throw new Error("Unable to load GIF settings. Please try again.")
   const body = object(await response.json())
   const key = typeof body?.apiKey === "string" ? body.apiKey.trim() : ""

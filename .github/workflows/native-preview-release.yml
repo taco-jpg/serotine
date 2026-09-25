@@ -34,7 +34,7 @@ jobs:
       - run: npm run typecheck
       - id: version
         shell: bash
-        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+        run: node -e "console.log('version=' + require('./package.json').version)" >> "$GITHUB_OUTPUT"
 
   desktop:
     name: Preview desktop (${{ matrix.platform }})
@@ -172,7 +172,11 @@ jobs:
           cp "${android[0]}" "release-assets/serotine-${VERSION}-preview-android-debug.apk"
           (
             cd release-assets
-            sha256sum * > "serotine-${VERSION}-preview-SHA256SUMS.txt"
+            sha256sum \
+              "serotine-${VERSION}-preview-windows-x64-unsigned.exe" \
+              "serotine-${VERSION}-preview-macos-arm64-unsigned.dmg" \
+              "serotine-${VERSION}-preview-android-debug.apk" \
+              > "serotine-${VERSION}-preview-SHA256SUMS.txt"
           )
       - name: Create or update GitHub prerelease
         shell: bash

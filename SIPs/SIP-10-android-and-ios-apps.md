@@ -2,16 +2,25 @@
 sip: 10
 title: Android, iOS, Windows, and macOS apps
 author: sodium-qed
-status: Draft
+status: Accepted
 created: 2026-09-13
-updated: 2026-09-16
+updated: 2026-09-24
 ---
 
 # SIP-10: Android, iOS, Windows, and macOS apps
 
 ## Summary
 
-Make Serotine available as installable Android, iPhone/iPad, Windows, and macOS apps, sharing the existing messaging experience and identities. Provide a signed Android APK, TestFlight followed by an App Store release for iPhone/iPad, a Windows `.exe` installer, and a macOS `.app` distributed in a `.dmg`. This SIP describes a proposed direction; it does not implement the apps or commit to a release date.
+Make Serotine available as installable Android, iPhone/iPad, Windows, and macOS apps, sharing the existing messaging experience and identities. Provide a signed Android APK, TestFlight followed by an App Store release for iPhone/iPad, a Windows `.exe` installer, and a macOS `.app` distributed in a `.dmg`. An initial implementation is under review; this SIP does not certify released apps or commit to a release date.
+
+
+## Implementation status (2026-09-24)
+
+Implementation is authorized and the initial source is available in [draft PR #69](https://github.com/taco-jpg/serotine/pull/69). This proposal is **Accepted, not Final**. Android/iOS use Capacitor, Windows/macOS use Electron, and all four bundle the shared interface with native encrypted snapshot storage, constrained signed relay access, native backup/file dialogs, and development/manual signing workflows.
+
+The implementation remains subject to platform builds, real-device install/update and backup tests, media/network qualification, production relay configuration, and signing/distribution setup. No signed APK, TestFlight release, Windows installer, or notarized macOS release is certified by the proposal status. Native storage has documented beta limits (64 MiB encoded snapshot, 16 MiB files, 32 MiB file bank). Mobile background push/share-in and native WSS calling remain follow-up work; the initial native calling compatibility path uses signed HTTPS polling.
+
+See [implementation, limits, validation and release gates](https://github.com/taco-jpg/serotine/blob/feat/sip-10-native-apps/docs/SIP-10-apps.md). The acceptance checks below remain binding; shared-source tests alone do not establish platform support.
 
 ## Motivation
 

@@ -161,8 +161,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          mapfile -t windows < <(find artifacts/windows -type f -name '*.exe' -print)
-          mapfile -t macos < <(find artifacts/macos -type f -name '*.dmg' -print)
+          mapfile -t windows < <(find artifacts/windows -type f -name '*-win-x64.exe' -print)
+          mapfile -t macos < <(find artifacts/macos -type f -name '*-mac-arm64.dmg' -print)
           mapfile -t android < <(find artifacts/android -type f -name '*.apk' -print)
           test "${#windows[@]}" -eq 1
           test "${#macos[@]}" -eq 1

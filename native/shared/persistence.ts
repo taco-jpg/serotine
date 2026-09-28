@@ -153,12 +153,37 @@ function localValues(): [string, string][] {
   return values.sort(([left], [right]) => left.localeCompare(right))
 }
 
+async function openExistingDatabase(name: string): Promise<IDBDatabase | undefined> {
+  // Enumeration is not a lock: an application migration may have upgraded this
+  // database since databases() returned. Open its current version, never the
+  // enumerated version. A concurrent deletion must not recreate an empty DB.
+  const opening = indexedDB.open(name)
+  let cancelledCreation = false
+  opening.onupgradeneeded = event => {
+    if (event.oldVersion === 0) {
+      const db = opening.result
+      opening.transaction!.abort()
+      cancelledCreation = true
+      db.close()
+    }
+  }
+  try {
+    const db = await request(opening)
+    db.onversionchange = () => db.close()
+    return db
+  } catch (error) {
+    if (cancelledCreation && opening.error?.name === "AbortError") return undefined
+    throw error
+  }
+}
+
 async function capture(): Promise<Snapshot> {
   const output: SavedDatabase[] = []
   const all = await databases()
   if (all.length > 400) throw fail("The installed beta's database limit was reached. The previous saved state is intact.")
   for (const info of all.sort((left, right) => left.name!.localeCompare(right.name!))) {
-    const db = await request(indexedDB.open(info.name!, info.version))
+    const db = await openExistingDatabase(info.name!)
+    if (!db) continue
     try {
       const names = [...db.objectStoreNames]
       if (names.length > 20) throw fail("This installed-app version cannot safely save the database schema.")
@@ -174,6 +199,9 @@ async function capture(): Promise<Snapshot> {
           return { name, keyPath: store.keyPath, indexes, keys, values }
         }))
         await done
+        // Binary encoding can be slow. The transaction already owns a stable
+        // copy of the records, so release the connection before that work.
+        db.close()
         for (const store of collected) saved.stores.push({ name: store.name, keyPath: store.keyPath, indexes: store.indexes,
           rows: await Promise.all(store.keys.map(async (key, index) => ({ key: await encodeNativeValue(key), value: await encodeNativeValue(store.values[index]) }))) })
       }

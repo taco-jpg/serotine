@@ -61,6 +61,68 @@ async function run() {
     await page.getByRole('region', { name: 'Conversation messages', exact: true }).getByText('Native durable offline smoke', { exact: true }).waitFor()
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Native narrow layout must fit viewport')
     await context.close()
+    // A restored legacy database can upgrade while a settings save enumerates
+    // it. Exercise the bundled persistence code with real Chromium IndexedDB.
+    ;({ context, page } = await open())
+    await page.getByRole('button', { name: 'Open messages', exact: true }).waitFor()
+    const migrationName = `serotine-file-bank:04${'c'.repeat(128)}`
+    await page.evaluate(async name => {
+      const open = version => new Promise((resolve, reject) => {
+        const request = indexedDB.open(name, version)
+        request.onupgradeneeded = () => {
+          const db = request.result
+          if (version === 1) db.createObjectStore('files', { keyPath: 'id' })
+          else {
+            const metadata = db.createObjectStore('metadata', { keyPath: 'id' })
+            const blobs = db.createObjectStore('blobs', { keyPath: 'id' })
+            const row = request.transaction.objectStore('files').get('migration-fixture')
+            row.onsuccess = () => {
+              const { blob, ...entry } = row.result
+              metadata.add(entry); blobs.add({ id: entry.id, blob })
+              db.deleteObjectStore('files')
+            }
+          }
+        }
+        request.onsuccess = () => resolve(request.result)
+        request.onerror = () => reject(request.error)
+      })
+      const legacy = await open(1)
+      const tx = legacy.transaction('files', 'readwrite')
+      const done = new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onabort = () => reject(tx.error) })
+      const blob = new Blob(['preserved through upgrade'], { type: 'text/plain' })
+      tx.objectStore('files').add({ id: 'migration-fixture', name: 'migration.txt', mime: blob.type,
+        size: blob.size, createdAt: 123, lastModified: 123, blob })
+      await done; legacy.close()
+      const enumerate = indexedDB.databases.bind(indexedDB)
+      indexedDB.databases = async () => {
+        const stale = await enumerate()
+        indexedDB.databases = enumerate
+        const upgraded = await open(2)
+        upgraded.close()
+        return stale
+      }
+      localStorage.setItem('serotine:migration-smoke', 'capture must survive upgrade')
+    }, migrationName)
+    await page.waitForFunction(async name => {
+      const value = JSON.parse(await window.readNativeSnapshot())
+      return value.databases.some(db => db.name === name && db.version === 2)
+        && value.local.some(([key]) => key === 'serotine:migration-smoke')
+    }, migrationName, { timeout: 10000 })
+    assert.equal(await page.locator('[data-native-error-code]').count(), 0, 'A concurrent upgrade must not freeze the app')
+    await context.close()
+    ;({ context, page } = await open())
+    await page.getByRole('button', { name: 'Open messages', exact: true }).waitFor()
+    assert.equal(await page.evaluate(name => new Promise((resolve, reject) => {
+      const opening = indexedDB.open(name)
+      opening.onerror = () => reject(opening.error)
+      opening.onsuccess = () => {
+        const db = opening.result, tx = db.transaction('blobs', 'readonly')
+        const row = tx.objectStore('blobs').get('migration-fixture')
+        row.onerror = () => reject(row.error)
+        row.onsuccess = () => { db.close(); row.result.blob.text().then(resolve, reject) }
+      }
+    }), migrationName), 'preserved through upgrade', 'Migrated file bytes must survive fresh-WebView restore')
+    await context.close()
     const good = snapshot
     snapshot = '{corrupt'
     ;({ context, page } = await open())
@@ -70,7 +132,7 @@ async function run() {
     await context.close()
     snapshot = good
     assert.deepEqual(errors, [])
-    process.stdout.write('Native renderer smoke passed: identity durability, message persistence, fresh-WebView restore, narrow layout, and corrupt-data fail-closed startup.\n')
+    process.stdout.write('Native renderer smoke passed: identity durability, message persistence, fresh-WebView restore, concurrent database upgrade with preserved file bytes, narrow layout, and corrupt-data fail-closed startup.\n')
   } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)) }
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

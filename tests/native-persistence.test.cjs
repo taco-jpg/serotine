@@ -60,6 +60,27 @@ async function waitFor(condition) { for (let at = 0; at < 200 && !condition(); a
 async function messagesDatabase(h) {
   return h.openDB(`serotine-messages:${owner}`, 1, { upgrade(db) { db.createObjectStore('messages', { keyPath: 'id' }) } })
 }
+function pauseNextDatabaseEnumeration(h) {
+  const databases = h.indexedDB.databases.bind(h.indexedDB)
+  let enumerated, release
+  const started = new Promise(resolve => { enumerated = resolve })
+  const gate = new Promise(resolve => { release = resolve })
+  h.indexedDB.databases = async () => {
+    const result = await databases()
+    h.indexedDB.databases = databases
+    enumerated()
+    await gate
+    return result
+  }
+  return { started, release, databases }
+}
+async function waitForDatabaseVersion(databases, name, version) {
+  for (let at = 0; at < 200; at++) {
+    if ((await databases()).find(db => db.name === name)?.version === version) return
+    await tick()
+  }
+  assert.fail('database version should settle')
+}
 
 test('snapshot encoding preserves Blob bytes, undefined, dates and literal tag-shaped objects', async () => {
   const h = harness()
@@ -227,6 +248,144 @@ test('overlapping native saves preserve both committed transactions and the newe
   assert.deepEqual((await saved.getAll('messages')).map(row => row.id), ['first', 'second'])
   assert.equal(reopened.localStorage.getItem('serotine:palettes:v1'), 'latest preference')
   saved.close()
+})
+
+test('a settings snapshot tolerates a restored Backpack database migrating after enumeration', async () => {
+  const original = harness(); await original.initialize()
+  const name = `serotine-file-bank:${owner}`
+  const legacy = await original.openDB(name, 1, { upgrade(db) { db.createObjectStore('files', { keyPath: 'id' }) } })
+  await legacy.put('files', { id: 'kept', name: 'notes.txt', mime: 'text/plain', size: 11,
+    createdAt: 123, lastModified: 123, blob: new Blob(['saved bytes'], { type: 'text/plain' }) })
+  legacy.close()
+  const h = harness(original.disk.value); await h.initialize()
+  const pause = pauseNextDatabaseEnumeration(h)
+  h.localStorage.setItem('serotine:sidebar-collapsed', 'false')
+  await pause.started
+  const migrating = h.listBankFiles(owner)
+  try { await waitForDatabaseVersion(pause.databases, name, 2) } finally { pause.release() }
+  const [files] = await Promise.all([migrating, h.flushNativeStorage()])
+  assert.equal(files[0].name, 'notes.txt')
+  assert.equal(h.errors.length, 0)
+  const saved = JSON.parse(h.disk.value).databases.find(db => db.name === name)
+  assert.equal(saved.version, 2)
+  assert.deepEqual(saved.stores.map(store => store.name).sort(), ['blobs', 'metadata'])
+  const reopened = harness(h.disk.value); await reopened.initialize()
+  assert.equal(await (await reopened.getBankFile(owner, 'kept')).text(), 'saved bytes')
+  assert.equal(reopened.localStorage.getItem('serotine:sidebar-collapsed'), 'false')
+})
+
+test('a database deleted after enumeration is neither recreated nor included in the next snapshot', async () => {
+  const h = harness(); await h.initialize()
+  const db = await messagesDatabase(h), name = db.name
+  await db.put('messages', { id: 'removed', content: 'deleted history' }); db.close()
+  const pause = pauseNextDatabaseEnumeration(h)
+  h.localStorage.setItem('serotine:after-delete', 'kept setting')
+  await pause.started
+  const deleting = h.deleteDB(name)
+  try { await waitForDatabaseVersion(pause.databases, name, undefined) } finally { pause.release() }
+  await Promise.all([deleting, h.flushNativeStorage()])
+  assert.deepEqual(await pause.databases(), [])
+  assert.deepEqual(JSON.parse(h.disk.value).databases, [])
+  assert.equal(h.errors.length, 0)
+  const reopened = harness(h.disk.value); await reopened.initialize()
+  assert.deepEqual(await reopened.indexedDB.databases(), [])
+  assert.equal(reopened.localStorage.getItem('serotine:after-delete'), 'kept setting')
+})
+
+test('an unrelated database-open AbortError cannot silently remove existing data from the native snapshot', async () => {
+  const h = harness(); await h.initialize()
+  const db = await messagesDatabase(h), name = db.name
+  await db.put('messages', { id: 'kept', content: 'last durable history' }); db.close()
+  const before = h.disk.value, open = h.indexedDB.open.bind(h.indexedDB)
+  h.indexedDB.open = (...args) => {
+    if (args[0] !== name) return open(...args)
+    // Model an engine-level open failure, without any creation/upgrade event.
+    const failed = { error: new DOMException('Database open aborted', 'AbortError') }
+    queueMicrotask(() => failed.onerror(new Event('error')))
+    return failed
+  }
+  h.localStorage.setItem('serotine:pending-read-failure', 'unsaved')
+  await assert.rejects(h.flushNativeStorage(), { name: 'AbortError' })
+  assert.equal(h.disk.value, before)
+  assert.equal(h.errors.length, 1)
+})
+
+test('slow binary encoding does not hold a database connection open against a concurrent migration', async () => {
+  const h = harness(); await h.initialize()
+  const db = await messagesDatabase(h), name = db.name
+  await db.put('messages', { id: 'kept', blob: new Blob(['retained bytes']) }); db.close()
+  const arrayBuffer = Blob.prototype.arrayBuffer
+  let started, release, paused = false
+  const encoding = new Promise(resolve => { started = resolve })
+  const gate = new Promise(resolve => { release = resolve })
+  Blob.prototype.arrayBuffer = async function () {
+    if (!paused) { paused = true; started(); await gate }
+    return arrayBuffer.call(this)
+  }
+  let migration
+  try {
+    h.localStorage.setItem('serotine:during-encoding', 'saved')
+    await encoding
+    migration = h.openDB(name, 2, { upgrade(db) { db.createObjectStore('metadata') } })
+    await waitForDatabaseVersion(h.indexedDB.databases.bind(h.indexedDB), name, 2)
+  } finally {
+    release()
+    Blob.prototype.arrayBuffer = arrayBuffer
+  }
+  const upgraded = await migration
+  upgraded.close()
+  await h.flushNativeStorage()
+  assert.equal(h.errors.length, 0)
+  assert.equal(JSON.parse(h.disk.value).databases.find(db => db.name === name).version, 2)
+  const reopened = harness(h.disk.value); await reopened.initialize()
+  const restored = await reopened.openDB(name, 2)
+  try { assert.equal(await (await restored.get('messages', 'kept')).blob.text(), 'retained bytes') } finally { restored.close() }
+})
+
+test('a failed concurrent migration leaves the original database available to a pending snapshot', async () => {
+  const h = harness(); await h.initialize()
+  const db = await messagesDatabase(h), name = db.name
+  await db.put('messages', { id: 'kept', content: 'original history' }); db.close()
+  const pause = pauseNextDatabaseEnumeration(h)
+  h.localStorage.setItem('serotine:after-aborted-upgrade', 'kept setting')
+  await pause.started
+  try {
+    await assert.rejects(h.openDB(name, 2, { upgrade(db, _oldVersion, _newVersion, tx) {
+      db.deleteObjectStore('messages')
+      void tx.done.catch(() => {})
+      tx.abort()
+    } }), { name: 'AbortError' })
+  } finally { pause.release() }
+  await h.flushNativeStorage()
+  assert.equal(h.errors.length, 0)
+  const saved = JSON.parse(h.disk.value).databases.find(db => db.name === name)
+  assert.equal(saved.version, 1)
+  const reopened = harness(h.disk.value); await reopened.initialize()
+  const restored = await messagesDatabase(reopened)
+  try { assert.equal((await restored.get('messages', 'kept')).content, 'original history') } finally { restored.close() }
+})
+
+test('a native commit failure after a concurrent migration preserves the previously saved schema and data', async () => {
+  const h = harness(); await h.initialize()
+  const db = await messagesDatabase(h), name = db.name
+  await db.put('messages', { id: 'kept', content: 'last durable history' }); db.close()
+  const before = h.disk.value, pause = pauseNextDatabaseEnumeration(h)
+  h.localStorage.setItem('serotine:unsaved-setting', 'pending')
+  await pause.started
+  const migration = h.openDB(name, 2, { upgrade(db) { db.createObjectStore('metadata') } })
+  const failedMigration = assert.rejects(migration, /disk full/)
+  try { await waitForDatabaseVersion(pause.databases, name, 2); h.disk.fail = true } finally { pause.release() }
+  await Promise.all([failedMigration, assert.rejects(h.flushNativeStorage(), /disk full/)])
+  assert.equal(h.disk.value, before)
+  assert.equal(h.errors.length, 1)
+  const reopened = harness(before); await reopened.initialize()
+  const restored = await messagesDatabase(reopened)
+  try {
+    assert.equal(restored.version, 1)
+    assert.equal(restored.objectStoreNames.contains('metadata'), false)
+    assert.equal((await restored.get('messages', 'kept')).content, 'last durable history')
+  } finally { restored.close() }
+  assert.equal(reopened.localStorage.getItem('serotine:unsaved-setting'), null)
 })
 
 test('the total snapshot ceiling never replaces the last recoverable native envelope', async () => {

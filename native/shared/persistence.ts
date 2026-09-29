@@ -1,14 +1,14 @@
 import { registerNativeStorageBarrier } from "../../lib/native-persistence"
 
-/** Prototype snapshot ceiling, including base64 expansion. This is deliberately
- * smaller than the browser's 5 GB Backpack limit. Native large-file storage must
- * become incremental before that capacity can be advertised for installed apps. */
+/** Default mobile snapshot ceiling, including base64 expansion. Windows opts
+ * out of this artificial byte ceiling; storage and runtime failures still stop
+ * writes without replacing the last durable native snapshot. */
 export const NATIVE_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 const FORMAT = "serotine-native-storage"
 const DB_NAME = /^(?:chat-storage|serotine-(?:messages|events|file-bank|verified-attachments):04[0-9a-f]{128})$/
 const LOCAL_KEY = /^serotine[_.:]/
 export function assertNativeDatabaseName(name: string): void {
-  if (!DB_NAME.test(name)) throw fail("This installed-app version cannot safely persist the requested database. Update Serotine before continuing.")
+  if (!DB_NAME.test(name)) throw fail("This installed-app version cannot safely persist the requested database. Update Serotine before continuing.", "UNSUPPORTED_SCHEMA")
 }
 type Encoded = [string, ...unknown[]]
 interface SavedIndex { name: string; keyPath: string | string[]; unique: boolean; multiEntry: boolean }
@@ -22,8 +22,31 @@ export interface NativeSnapshotStore {
   writeSnapshot(value: string): Promise<void>
 }
 
-function fail(message = "Installed-app storage is unavailable. Close and reopen the app to recover the last saved state; do not clear app data."): Error {
-  return new Error(message)
+type FailurePhase = "READ" | "RESTORE" | "CAPTURE" | "COMMIT"
+type FailureReason = "CAPACITY" | "UNSUPPORTED_VALUE" | "UNSUPPORTED_SCHEMA" | "DAMAGED_DATA" | "UNSUPPORTED_FORMAT" | "UNSUPPORTED_WEBVIEW" | "SNAPSHOT_FAILURE"
+class NativeStorageError extends Error {
+  constructor(message: string, readonly reason: FailureReason) { super(message) }
+}
+const diagnostics = new WeakMap<Error, string>()
+const databaseErrorCodes: Readonly<Record<string, string>> = Object.freeze({
+  AbortError: "DB_ABORT", ConstraintError: "DB_CONSTRAINT", DataError: "DB_DATA", DataCloneError: "DB_CLONE",
+  InvalidStateError: "DB_STATE", NotFoundError: "DB_NOT_FOUND", QuotaExceededError: "DB_QUOTA",
+  ReadOnlyError: "DB_READONLY", TransactionInactiveError: "DB_TRANSACTION_INACTIVE", UnknownError: "DB_UNKNOWN",
+  VersionError: "DB_VERSION", SecurityError: "DB_SECURITY", NotSupportedError: "DB_UNSUPPORTED",
+})
+/** Only locally classified, allowlisted codes may cross into the failure UI.
+ * Exception messages, stacks, paths and arbitrary name/code properties never do. */
+export function nativeStorageDiagnostic(error: unknown): string | undefined {
+  return error instanceof Error ? diagnostics.get(error) : undefined
+}
+function classifyFailure(error: Error, phase: FailurePhase): string {
+  const reason = error instanceof NativeStorageError ? error.reason
+    : phase === "READ" || phase === "COMMIT" ? "HOST_FAILURE"
+    : Object.hasOwn(databaseErrorCodes, error.name) ? databaseErrorCodes[error.name] : "SNAPSHOT_FAILURE"
+  return `${phase}_${reason}`
+}
+function fail(message = "Installed-app storage is unavailable. Close and reopen the app to recover the last saved state; do not clear app data.", reason: FailureReason = "SNAPSHOT_FAILURE"): Error {
+  return new NativeStorageError(message, reason)
 }
 function base64(bytes: Uint8Array): string {
   let text = ""
@@ -33,37 +56,37 @@ function base64(bytes: Uint8Array): string {
 function unbase64(text: unknown): Uint8Array<ArrayBuffer> {
   // Repeated regexp groups exhaust V8's stack on valid multi-megabyte files.
   // Check the alphabet and padding in linear time without backtracking.
-  if (typeof text !== "string" || text.length % 4 !== 0) throw fail("The saved native data is damaged. Nothing was replaced.")
+  if (typeof text !== "string" || text.length % 4 !== 0) throw fail("The saved native data is damaged. Nothing was replaced.", "DAMAGED_DATA")
   const padding = text.endsWith("==") ? 2 : text.endsWith("=") ? 1 : 0
-  if (/[^A-Za-z0-9+/]/.test(text.slice(0, text.length - padding))) throw fail("The saved native data is damaged. Nothing was replaced.")
+  if (/[^A-Za-z0-9+/]/.test(text.slice(0, text.length - padding))) throw fail("The saved native data is damaged. Nothing was replaced.", "DAMAGED_DATA")
   return Uint8Array.from(atob(text), character => character.charCodeAt(0))
 }
 
 /** Tag every value, including plain objects, so user data cannot impersonate a
  * binary tag. Blobs are included: losing a verified copy must never authorize
  * deletion of the only remaining attachment at the relay. */
-export async function encodeNativeValue(value: unknown, depth = 0): Promise<Encoded> {
-  if (depth > 64) throw fail("The stored data is nested too deeply to save safely.")
+export async function encodeNativeValue(value: unknown, depth = 0, maxSnapshotBytes = NATIVE_SNAPSHOT_MAX_BYTES): Promise<Encoded> {
+  if (depth > 64) throw fail("The stored data is nested too deeply to save safely.", "UNSUPPORTED_VALUE")
   if (value === null) return ["null"]
   if (value === undefined) return ["undefined"]
   if (typeof value === "string" || typeof value === "boolean") return [typeof value, value]
   if (typeof value === "number" && Number.isFinite(value)) return ["number", value]
   if (value instanceof Date && Number.isFinite(value.getTime())) return ["date", value.toISOString()]
   if (value instanceof Blob) {
-    if (value.size > NATIVE_SNAPSHOT_MAX_BYTES * 0.7) throw fail("This file exceeds the installed beta's local storage limit. The previous saved state is intact.")
+    if (Number.isFinite(maxSnapshotBytes) && value.size > maxSnapshotBytes * 0.7) throw fail("This file exceeds the installed beta's local storage limit. The previous saved state is intact.", "CAPACITY")
     return ["blob", value.type, base64(new Uint8Array(await value.arrayBuffer()))]
   }
   if (value instanceof ArrayBuffer) return ["buffer", base64(new Uint8Array(value))]
   if (value instanceof Uint8Array) return ["bytes", base64(value)]
-  if (Array.isArray(value)) return ["array", await Promise.all(value.map(item => encodeNativeValue(item, depth + 1)))]
+  if (Array.isArray(value)) return ["array", await Promise.all(value.map(item => encodeNativeValue(item, depth + 1, maxSnapshotBytes)))]
   if (value && typeof value === "object" && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)) {
-    return ["object", await Promise.all(Object.entries(value).map(async ([key, item]) => [key, await encodeNativeValue(item, depth + 1)]))]
+    return ["object", await Promise.all(Object.entries(value).map(async ([key, item]) => [key, await encodeNativeValue(item, depth + 1, maxSnapshotBytes)]))]
   }
-  throw fail("This installed-app version cannot safely save a stored value. The previous saved state is intact.")
+  throw fail("This installed-app version cannot safely save a stored value. The previous saved state is intact.", "UNSUPPORTED_VALUE")
 }
 
 export function decodeNativeValue(value: unknown, depth = 0): unknown {
-  if (depth > 64 || !Array.isArray(value) || typeof value[0] !== "string") throw fail("The saved native data is damaged. Nothing was replaced.")
+  if (depth > 64 || !Array.isArray(value) || typeof value[0] !== "string") throw fail("The saved native data is damaged. Nothing was replaced.", "DAMAGED_DATA")
   const [tag, item] = value
   if (tag === "null" && value.length === 1) return null
   if (tag === "undefined" && value.length === 1) return undefined
@@ -77,12 +100,12 @@ export function decodeNativeValue(value: unknown, depth = 0): unknown {
   if (tag === "object" && Array.isArray(item) && value.length === 2) {
     const output: Record<string, unknown> = {}
     for (const pair of item) {
-      if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== "string" || Object.hasOwn(output, pair[0])) throw fail("The saved native data is damaged. Nothing was replaced.")
+      if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== "string" || Object.hasOwn(output, pair[0])) throw fail("The saved native data is damaged. Nothing was replaced.", "DAMAGED_DATA")
       Object.defineProperty(output, pair[0], { enumerable: true, writable: true, configurable: true, value: decodeNativeValue(pair[1], depth + 1) })
     }
     return output
   }
-  throw fail("The saved native data is damaged. Nothing was replaced.")
+  throw fail("The saved native data is damaged. Nothing was replaced.", "DAMAGED_DATA")
 }
 
 function validKeyPath(value: unknown): value is string | string[] { return typeof value === "string" || Array.isArray(value) && value.every(key => typeof key === "string") }
@@ -90,27 +113,27 @@ function namesUnique(values: { name: string }[]): boolean { return new Set(value
 
 /** Validate the complete envelope and every encoded record before touching the
  * WebView cache. Authentication/decryption belongs to the native OS adapter. */
-export function parseNativeSnapshot(text: string): Snapshot {
-  if (new TextEncoder().encode(text).length > NATIVE_SNAPSHOT_MAX_BYTES) throw fail("The saved native data exceeds this app version's storage limit.")
+export function parseNativeSnapshot(text: string, maxSnapshotBytes = NATIVE_SNAPSHOT_MAX_BYTES): Snapshot {
+  if (Number.isFinite(maxSnapshotBytes) && new TextEncoder().encode(text).length > maxSnapshotBytes) throw fail("The saved native data exceeds this app version's storage limit.", "CAPACITY")
   let value: Snapshot
-  try { value = JSON.parse(text) as Snapshot } catch { throw fail("The saved native data is damaged. Nothing was replaced.") }
+  try { value = JSON.parse(text) as Snapshot } catch { throw fail("The saved native data is damaged. Nothing was replaced.", "DAMAGED_DATA") }
   if (value?.format !== FORMAT || value.version !== 1 || !Array.isArray(value.local) || !Array.isArray(value.databases)
-    || value.local.length > 100_000 || value.databases.length > 400) throw fail("The saved native data has an unsupported format. Nothing was replaced.")
+    || value.local.length > 100_000 || value.databases.length > 400) throw fail("The saved native data has an unsupported format. Nothing was replaced.", "UNSUPPORTED_FORMAT")
   const local = new Set<string>()
   for (const pair of value.local) {
-    if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== "string" || !LOCAL_KEY.test(pair[0]) || typeof pair[1] !== "string" || local.has(pair[0])) throw fail("The saved native settings are damaged. Nothing was replaced.")
+    if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== "string" || !LOCAL_KEY.test(pair[0]) || typeof pair[1] !== "string" || local.has(pair[0])) throw fail("The saved native settings are damaged. Nothing was replaced.", "DAMAGED_DATA")
     local.add(pair[0])
   }
-  if (!namesUnique(value.databases)) throw fail("The saved native databases are duplicated. Nothing was replaced.")
+  if (!namesUnique(value.databases)) throw fail("The saved native databases are duplicated. Nothing was replaced.", "DAMAGED_DATA")
   for (const db of value.databases) {
-    if (!db || !DB_NAME.test(db.name) || !Number.isSafeInteger(db.version) || db.version < 1 || !Array.isArray(db.stores) || db.stores.length > 20 || !namesUnique(db.stores)) throw fail("The saved native database is damaged. Nothing was replaced.")
+    if (!db || !DB_NAME.test(db.name) || !Number.isSafeInteger(db.version) || db.version < 1 || !Array.isArray(db.stores) || db.stores.length > 20 || !namesUnique(db.stores)) throw fail("The saved native database is damaged. Nothing was replaced.", "DAMAGED_DATA")
     for (const store of db.stores) {
       if (typeof store.name !== "string" || !store.name || store.keyPath !== null && !validKeyPath(store.keyPath)
         || !Array.isArray(store.indexes) || store.indexes.length > 20 || !namesUnique(store.indexes)
-        || !Array.isArray(store.rows) || store.rows.length > 250_000) throw fail("The saved native database schema is damaged. Nothing was replaced.")
-      for (const index of store.indexes) if (!index || typeof index.name !== "string" || !validKeyPath(index.keyPath) || typeof index.unique !== "boolean" || typeof index.multiEntry !== "boolean") throw fail("The saved native index is damaged. Nothing was replaced.")
+        || !Array.isArray(store.rows) || store.rows.length > 250_000) throw fail("The saved native database schema is damaged. Nothing was replaced.", "DAMAGED_DATA")
+      for (const index of store.indexes) if (!index || typeof index.name !== "string" || !validKeyPath(index.keyPath) || typeof index.unique !== "boolean" || typeof index.multiEntry !== "boolean") throw fail("The saved native index is damaged. Nothing was replaced.", "DAMAGED_DATA")
       for (const row of store.rows) {
-        if (!row || typeof row !== "object") throw fail("The saved native record is damaged. Nothing was replaced.")
+        if (!row || typeof row !== "object") throw fail("The saved native record is damaged. Nothing was replaced.", "DAMAGED_DATA")
         const key = decodeNativeValue(row.key) as IDBValidKey, decoded = decodeNativeValue(row.value)
         try {
           indexedDB.cmp(key, key)
@@ -119,7 +142,7 @@ export function parseNativeSnapshot(text: string): Snapshot {
             const inline = Array.isArray(store.keyPath) ? store.keyPath.map(atPath) : atPath(store.keyPath)
             if (indexedDB.cmp(key, inline as IDBValidKey) !== 0) throw fail()
           }
-        } catch { throw fail("The saved native record key is damaged. Nothing was replaced.") }
+        } catch { throw fail("The saved native record key is damaged. Nothing was replaced.", "DAMAGED_DATA") }
       }
     }
   }
@@ -139,7 +162,7 @@ function completed(tx: IDBTransaction): Promise<void> {
   return result
 }
 async function databases(): Promise<IDBDatabaseInfo[]> {
-  if (typeof indexedDB?.databases !== "function") throw fail("This system WebView cannot safely enumerate installed-app data. Update the system WebView before opening Serotine.")
+  if (typeof indexedDB?.databases !== "function") throw fail("This system WebView cannot safely enumerate installed-app data. Update the system WebView before opening Serotine.", "UNSUPPORTED_WEBVIEW")
   const all = await indexedDB.databases()
   for (const db of all) if (db.name?.startsWith("serotine-")) assertNativeDatabaseName(db.name)
   return all.filter(db => db.name && DB_NAME.test(db.name))
@@ -177,25 +200,25 @@ async function openExistingDatabase(name: string): Promise<IDBDatabase | undefin
   }
 }
 
-async function capture(): Promise<Snapshot> {
+async function capture(maxSnapshotBytes: number): Promise<Snapshot> {
   const output: SavedDatabase[] = []
   const all = await databases()
-  if (all.length > 400) throw fail("The installed beta's database limit was reached. The previous saved state is intact.")
+  if (all.length > 400) throw fail("The installed beta's database limit was reached. The previous saved state is intact.", "CAPACITY")
   for (const info of all.sort((left, right) => left.name!.localeCompare(right.name!))) {
     const db = await openExistingDatabase(info.name!)
     if (!db) continue
     try {
       const names = [...db.objectStoreNames]
-      if (names.length > 20) throw fail("This installed-app version cannot safely save the database schema.")
+      if (names.length > 20) throw fail("This installed-app version cannot safely save the database schema.", "UNSUPPORTED_SCHEMA")
       const saved: SavedDatabase = { name: db.name, version: db.version, stores: [] }
       if (names.length) {
         const tx = db.transaction(names, "readonly"), done = completed(tx)
         const collected = await Promise.all(names.map(async name => {
           const store = tx.objectStore(name)
-          if (store.autoIncrement) throw fail("This app version cannot safely snapshot an auto-increment database.")
+          if (store.autoIncrement) throw fail("This app version cannot safely snapshot an auto-increment database.", "UNSUPPORTED_SCHEMA")
           const indexes = [...store.indexNames].map(indexName => { const index = store.index(indexName); return { name: index.name, keyPath: index.keyPath, unique: index.unique, multiEntry: index.multiEntry } })
           const [keys, values] = await Promise.all([request(store.getAllKeys()), request(store.getAll())])
-          if (indexes.length > 20 || keys.length > 250_000) throw fail("The installed beta's database limit was reached. The previous saved state is intact.")
+          if (indexes.length > 20 || keys.length > 250_000) throw fail("The installed beta's database limit was reached. The previous saved state is intact.", "CAPACITY")
           return { name, keyPath: store.keyPath, indexes, keys, values }
         }))
         await done
@@ -203,13 +226,13 @@ async function capture(): Promise<Snapshot> {
         // copy of the records, so release the connection before that work.
         db.close()
         for (const store of collected) saved.stores.push({ name: store.name, keyPath: store.keyPath, indexes: store.indexes,
-          rows: await Promise.all(store.keys.map(async (key, index) => ({ key: await encodeNativeValue(key), value: await encodeNativeValue(store.values[index]) }))) })
+          rows: await Promise.all(store.keys.map(async (key, index) => ({ key: await encodeNativeValue(key, 0, maxSnapshotBytes), value: await encodeNativeValue(store.values[index], 0, maxSnapshotBytes) }))) })
       }
       output.push(saved)
     } finally { db.close() }
   }
   const local = localValues()
-  if (local.length > 100_000) throw fail("The installed beta's settings limit was reached. The previous saved state is intact.")
+  if (local.length > 100_000) throw fail("The installed beta's settings limit was reached. The previous saved state is intact.", "CAPACITY")
   return { format: FORMAT, version: 1, local, databases: output }
 }
 
@@ -307,7 +330,11 @@ export async function recoverNativePersistence(resetNative: () => Promise<{ rese
  * Native storage is authoritative; WebView localStorage/IndexedDB are rebuildable
  * working caches. The native layer must separately exclude them from OS backup.
  * Errors are sticky: no more network or durable writes until safe restart. */
-export async function initializeNativePersistence(bridge: NativeSnapshotStore, onFailure: (error: Error) => void = () => {}): Promise<{ flush(): Promise<void> }> {
+export async function initializeNativePersistence(bridge: NativeSnapshotStore, onFailure: (error: Error) => void = () => {},
+  // The trusted bootstrap selects Infinity only for the Windows desktop host.
+  options: { maxSnapshotBytes?: number } = {}): Promise<{ flush(): Promise<void> }> {
+  const maxSnapshotBytes = options.maxSnapshotBytes ?? NATIVE_SNAPSHOT_MAX_BYTES
+  if (maxSnapshotBytes !== Infinity && (!Number.isSafeInteger(maxSnapshotBytes) || maxSnapshotBytes <= 0)) throw fail("Invalid native storage configuration.")
   assertNoRecovery()
   if (controller) throw fail("Native storage was already initialized.")
   let fatal: Error | undefined
@@ -315,8 +342,12 @@ export async function initializeNativePersistence(bridge: NativeSnapshotStore, o
   let writing: Promise<void> | undefined
   const announce = (state: "saving" | "saved" | "error") => window.dispatchEvent(new CustomEvent("serotine:native-storage", { detail: { state } }))
   const assertReady = () => { if (fatal) throw fatal; assertNoRecovery() }
-  const report = (cause: unknown) => {
-    if (!fatal) { fatal = cause instanceof Error ? cause : fail(); announce("error"); onFailure(fatal) }
+  const report = (cause: unknown, phase: FailurePhase) => {
+    if (!fatal) {
+      fatal = cause instanceof Error ? cause : fail()
+      diagnostics.set(fatal, classifyFailure(fatal, phase))
+      announce("error"); onFailure(fatal)
+    }
     return fatal
   }
   const flush = async (): Promise<void> => {
@@ -324,15 +355,18 @@ export async function initializeNativePersistence(bridge: NativeSnapshotStore, o
     if (!writing && generation > durableGeneration) {
       writing = (async () => {
         announce("saving")
+        let phase: FailurePhase = "CAPTURE"
         try {
           while (generation > durableGeneration) {
             const current = generation
-            const snapshot = JSON.stringify(await capture())
-            if (new TextEncoder().encode(snapshot).length > NATIVE_SNAPSHOT_MAX_BYTES) throw fail("The installed beta's 64 MiB local storage limit was reached. Reopen to recover the previous saved state; do not clear app data.")
+            phase = "CAPTURE"
+            const snapshot = JSON.stringify(await capture(maxSnapshotBytes))
+            if (Number.isFinite(maxSnapshotBytes) && new TextEncoder().encode(snapshot).length > maxSnapshotBytes) throw fail("The installed beta's 64 MiB local storage limit was reached. Reopen to recover the previous saved state; do not clear app data.", "CAPACITY")
+            phase = "COMMIT"
             await bridge.writeSnapshot(snapshot)
             durableGeneration = current
           }
-        } catch (cause) { throw report(cause) }
+        } catch (cause) { throw report(cause, phase) }
         finally { writing = undefined }
       })()
     }
@@ -343,12 +377,15 @@ export async function initializeNativePersistence(bridge: NativeSnapshotStore, o
     if (generation === durableGeneration) announce("saved")
   }
   const changed = (): Promise<void> => { assertReady(); generation++; return flush() }
+  let openingPhase: FailurePhase = "READ"
   try {
     const saved = await bridge.readSnapshot()
-    if (saved !== null) await restore(parseNativeSnapshot(saved))
+    openingPhase = "RESTORE"
+    if (saved !== null) await restore(parseNativeSnapshot(saved, maxSnapshotBytes))
     else {
       if (localValues().length || (await databases()).length) throw fail("Native saved data is missing but WebView data exists. Messaging is stopped to protect your identity; do not clear app data.")
       // Establish the empty native envelope before offering Create or Restore.
+      openingPhase = "COMMIT"
       await bridge.writeSnapshot(JSON.stringify({ format: FORMAT, version: 1, local: [], databases: [] }))
     }
     const originalSet = Storage.prototype.setItem, originalRemove = Storage.prototype.removeItem, originalClear = Storage.prototype.clear
@@ -362,5 +399,5 @@ export async function initializeNativePersistence(bridge: NativeSnapshotStore, o
     }
     registerNativeStorageBarrier(flush)
     return { flush }
-  } catch (cause) { throw report(cause) }
+  } catch (cause) { throw report(cause, openingPhase) }
 }

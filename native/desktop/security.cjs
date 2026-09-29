@@ -4,6 +4,7 @@ const APP_URL = 'serotine://app/'
 const RELEASE_URL = 'https://github.com/taco-jpg/serotine/releases'
 const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 const MAX_FILE_BYTES = 100 * 1024 * 1024
+function fileByteLimit(platform = process.platform) { return platform === 'win32' ? Infinity : MAX_FILE_BYTES }
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 const ROUTES = new Map([
@@ -93,5 +94,5 @@ function bundlePath(root, value) {
   if (!resolved.startsWith(path.resolve(root) + path.sep)) return null
   return resolved
 }
-module.exports = { APP_URL, RELEASE_URL, MAX_SNAPSHOT_BYTES, MAX_FILE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+module.exports = { APP_URL, RELEASE_URL, MAX_SNAPSHOT_BYTES, MAX_FILE_BYTES, fileByteLimit, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
   trustedURL, assertSender, validateConfig, validateRequest, decodeBase64, externalURL, safeFilename, validateReset, bundlePath, object }

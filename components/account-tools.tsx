@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { IdentityConflictError, loadArchivedIdentities, shortAddress, type ArchivedIdentity, type Identity } from "@/lib/identity"
-import { exportFullBackup, MAX_BACKUP_FILE_BYTES, restoreBackup } from "@/lib/full-backup"
+import { backupFileLimit, exportFullBackup, restoreBackup } from "@/lib/full-backup"
 import { RestoreConfirmation } from "@/components/auth/restore-confirmation"
 import { IdentitySecurity } from "@/components/identity-security"
 import { saveDownload } from "@/lib/save-download"
@@ -50,7 +50,7 @@ export function AccountTools({ identity }: { identity: Identity }) {
     try {
       if (mode === "restore") {
         if (!file && !archivedIdentity) throw new Error("Choose a Serotine backup first.")
-        if (file && file.size > MAX_BACKUP_FILE_BYTES) throw new Error("Choose a backup no larger than 100 MiB.")
+        if (file && file.size > backupFileLimit()) throw new Error("Choose a backup no larger than 100 MiB.")
         const text = archivedIdentity ? JSON.stringify(archivedIdentity) : await file!.text()
         await restoreBackup(text, archivedIdentity ? "" : password, { replaceIdentity })
         window.location.assign("/chat")
@@ -88,7 +88,7 @@ export function AccountTools({ identity }: { identity: Identity }) {
       {source && mode === "backup" && <p className="text-sm text-muted-foreground">Previous address: <span className="font-mono">{shortAddress(source.publicKey)}</span>. {source.retired && "This address is retired. This backup preserves its history but cannot restore relay access."} Choose a fresh password for this file.</p>}
       {conflict && <RestoreConfirmation conflict={conflict} busy={busy} onConfirm={() => void run(conflict.existingPublicKey)} onCancel={() => { setConflict(null); setSource(null) }} />}
       <form className="space-y-4" onSubmit={event => { event.preventDefault(); if (!conflict) void run() }}>
-        {mode === "restore" && <div className="space-y-2"><Label htmlFor={`${id}-file`}>Serotine backup</Label><Input id={`${id}-file`} type="file" accept=".json,application/json" required disabled={busy} onChange={event => { setFile(event.target.files?.[0] ?? null); setSource(null); setConflict(null) }} /><p className="text-xs text-muted-foreground">Full backups and older identity backups are supported, up to 100 MiB. A backup of your current identity merges its history.</p></div>}
+        {mode === "restore" && <div className="space-y-2"><Label htmlFor={`${id}-file`}>Serotine backup</Label><Input id={`${id}-file`} type="file" accept=".json,application/json" required disabled={busy} onChange={event => { setFile(event.target.files?.[0] ?? null); setSource(null); setConflict(null) }} /><p className="text-xs text-muted-foreground">Full backups and older identity backups are supported{Number.isFinite(backupFileLimit()) ? ", up to 100 MiB" : ""}. A backup of your current identity merges its history.</p></div>}
         <div className="space-y-2"><Label htmlFor={`${id}-password`}>Backup password</Label><Input id={`${id}-password`} type={showPassword ? "text" : "password"} autoComplete={mode === "restore" ? "current-password" : "new-password"} minLength={mode === "restore" ? undefined : 12} maxLength={1024} required={mode !== "restore"} disabled={busy} value={password} onChange={event => { setPassword(event.target.value); setConflict(null) }} />
           <label className="flex items-center gap-2 text-sm text-muted-foreground"><input type="checkbox" checked={showPassword} onChange={event => setShowPassword(event.target.checked)} />Show password</label>
           <p className="text-xs text-muted-foreground">{mode === "restore" ? "Leave blank only for an older unencrypted identity export." : "At least 12 characters. You need this password to restore the file."}</p>

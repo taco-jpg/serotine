@@ -4,9 +4,11 @@ import { deleteConversationHistoryFromStorage, deleteMessageHistoryFromStorage, 
 import { exportMessagingSnapshot, getMessagingPreferences, importMessagingSnapshot, validateMessagingSnapshot } from "./messaging-store"
 import { isDeletedLegacyMessage } from "./messaging-history"
 import type { MessagingPreferences, MessagingSnapshot } from "./messaging-types"
+import { isWindowsNative } from "../native/shared/bridge"
 
 export const MAX_BACKUP_FILE_BYTES = 100 * 1024 * 1024
-const MAX_PLAINTEXT_BYTES = Math.floor((MAX_BACKUP_FILE_BYTES - 1024) * 3 / 4)
+/** Windows has no application-imposed backup byte ceiling. */
+export function backupFileLimit(): number { return isWindowsNative() ? Infinity : MAX_BACKUP_FILE_BYTES }
 const FORMAT = "serotine-full-backup"
 const AAD = new TextEncoder().encode("serotine-full-backup:v1:PBKDF2-SHA256-600000:AES-256-GCM")
 
@@ -28,10 +30,19 @@ function retainedMessages(messages: StoredMessage[], preferences: MessagingPrefe
 // one-character strings or exceed the JavaScript argument stack.
 function encodeBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer), parts: string[] = []
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    parts.push(String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)))
+  // Each full chunk is divisible by three, so concatenating its base64 does
+  // not introduce internal padding or another whole-backup binary string.
+  for (let offset = 0; offset < bytes.length; offset += 0x6000) {
+    parts.push(btoa(String.fromCharCode(...bytes.subarray(offset, offset + 0x6000))))
   }
-  return btoa(parts.join(""))
+  return parts.join("")
+}
+
+function validCiphertext(value: string): boolean {
+  if (value.length < 24 || value.length % 4 !== 0) return false
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0
+  // A negated alphabet scan avoids repeated groups or large-match backtracking.
+  return !/[^A-Za-z0-9+/]/.test(value.slice(0, value.length - padding))
 }
 
 async function deriveBackupKey(password: string, salt: ArrayBuffer) {
@@ -76,7 +87,7 @@ export async function exportFullBackup(identity: Identity, password: string): Pr
   const snapshot = await validateFullBackupSnapshot({ format: "serotine-full-snapshot", version: 1, createdAt: Date.now(),
     identity: validated, contacts: loadContacts(validated.publicKey), messages, messaging })
   const plain = new TextEncoder().encode(JSON.stringify(snapshot))
-  if (plain.byteLength > MAX_PLAINTEXT_BYTES) throw new Error("This history is too large for a 100 MiB backup. Your data has not been changed.")
+  if (plain.byteLength > Math.floor((backupFileLimit() - 1024) * 3 / 4)) throw new Error("This history is too large for a 100 MiB backup. Your data has not been changed.")
   const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12))
   const key = await deriveBackupKey(password, salt.buffer)
   const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: AAD }, key, plain)
@@ -85,7 +96,8 @@ export async function exportFullBackup(identity: Identity, password: string): Pr
 
 /** Accept full encrypted exports as well as every previously supported identity backup. */
 export async function restoreBackup(text: string, password: string, options: RestoreIdentityOptions = {}): Promise<Identity> {
-  if (text.length > MAX_BACKUP_FILE_BYTES || new TextEncoder().encode(text).byteLength > MAX_BACKUP_FILE_BYTES) {
+  const limit = backupFileLimit()
+  if (Number.isFinite(limit) && (text.length > limit || new TextEncoder().encode(text).byteLength > limit)) {
     throw new Error("Choose a Serotine backup no larger than 100 MiB.")
   }
   let envelope
@@ -93,7 +105,7 @@ export async function restoreBackup(text: string, password: string, options: Res
   if (envelope?.format !== FORMAT) return restoreIdentityBackup(text, password, options)
   if (envelope.version !== 1 || typeof envelope.salt !== "string" || envelope.salt.length !== 24
     || typeof envelope.iv !== "string" || envelope.iv.length !== 16 || typeof envelope.ciphertext !== "string"
-    || envelope.ciphertext.length < 24 || !/^[A-Za-z0-9+/]+={0,2}$/.test(envelope.ciphertext)) {
+    || !validCiphertext(envelope.ciphertext)) {
     throw new Error("The backup is damaged or uses an unsupported format.")
   }
   let decrypted: unknown
@@ -102,7 +114,7 @@ export async function restoreBackup(text: string, password: string, options: Res
     if (salt.byteLength !== 16 || iv.byteLength !== 12) throw new Error("Invalid encryption parameters")
     const key = await deriveBackupKey(password, salt)
     const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: AAD }, key, base64ToArrayBuffer(envelope.ciphertext))
-    if (plain.byteLength > MAX_PLAINTEXT_BYTES) throw new Error("Backup exceeds limit")
+    if (plain.byteLength > Math.floor((limit - 1024) * 3 / 4)) throw new Error("Backup exceeds limit")
     decrypted = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(plain))
   } catch { throw new Error("The backup password is incorrect, or the file is damaged.") }
   const snapshot = await validateFullBackupSnapshot(decrypted)

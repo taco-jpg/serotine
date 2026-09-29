@@ -34,6 +34,10 @@ class EncryptedStore {
     this.marker = path.join(directory, 'initialized.v1')
     this.safeStorage = safeStorage
     this.platform = platform
+    // Windows backups/history are limited by available memory and disk, not
+    // the mobile/macOS prototype snapshot ceiling. Keep the envelope unchanged
+    // so existing encrypted data opens in place after an update.
+    this.maxSnapshotBytes = platform === 'win32' ? Infinity : MAX_SNAPSHOT_BYTES
     this.queue = Promise.resolve()
     this.pendingWrites = 0
     this.pendingReads = 0
@@ -56,7 +60,7 @@ class EncryptedStore {
       return null
     }
     const stat = await fs.stat(this.file)
-    if (stat.size > MAX_SNAPSHOT_BYTES * 1.4 + 65536) throw new Error('The encrypted local snapshot is too large.')
+    if (stat.size > this.maxSnapshotBytes * 1.4 + 65536) throw new Error('The encrypted local snapshot is too large.')
     let key
     try {
       const data = JSON.parse(await fs.readFile(this.file, 'utf8'))
@@ -67,7 +71,7 @@ class EncryptedStore {
       if (iv.length !== 12 || tag.length !== 16) throw new Error('format')
       const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv)
       decipher.setAAD(AAD); decipher.setAuthTag(tag)
-      const value = Buffer.concat([decipher.update(decodeBase64(data.ciphertext, MAX_SNAPSHOT_BYTES)), decipher.final()]).toString('utf8')
+      const value = Buffer.concat([decipher.update(decodeBase64(data.ciphertext, this.maxSnapshotBytes)), decipher.final()]).toString('utf8')
       // A crash after the first snapshot rename is recoverable even before the sentinel is created.
       if (!marked) await atomicWrite(this.marker, Buffer.from('1\n'))
       return value
@@ -82,7 +86,8 @@ class EncryptedStore {
   }
   write(value) {
     if (this.resetting) return Promise.reject(new Error('Local data removal is in progress.'))
-    if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > MAX_SNAPSHOT_BYTES) return Promise.reject(new Error('The native snapshot exceeds the 64 MiB prototype limit. Export a backup before removing local files.'))
+    if (typeof value !== 'string') return Promise.reject(new Error('Invalid native snapshot.'))
+    if (Number.isFinite(this.maxSnapshotBytes) && Buffer.byteLength(value, 'utf8') > this.maxSnapshotBytes) return Promise.reject(new Error('The native snapshot exceeds the 64 MiB prototype limit. Export a backup before removing local files.'))
     const run = async () => {
       // Never silently overwrite data whose OS key is missing or whose authentication failed.
       await this.load()

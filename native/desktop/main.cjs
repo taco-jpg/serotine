@@ -91,8 +91,10 @@ if (config) {
     app.whenReady().then(async () => {
       await fs.mkdir(store.directory, { recursive: true, mode: 0o700 })
       if (process.platform === 'darwin') {
-        // No user-controlled executable, arguments, or paths are accepted by this operation.
-        await promisify(execFile)('/usr/bin/tmutil', ['addexclusion', '-p', dataRoot])
+        // Time Machine exclusion is best-effort: macOS may deny it without user approval.
+        // It must never prevent the app or protected local store from opening.
+        try { await promisify(execFile)('/usr/bin/tmutil', ['addexclusion', '-p', dataRoot]) }
+        catch (error) { console.warn('Could not exclude Serotine data from Time Machine; startup will continue.', error?.message ?? error) }
       }
       const browser = session.fromPartition('serotine-ephemeral')
       browser.setPermissionCheckHandler((contents, permission, origin, details) => {
@@ -245,6 +247,12 @@ if (config) {
       Menu.setApplicationMenu(Menu.buildFromTemplate(menu))
       await window.loadURL(APP_URL)
       window.show()
-    }).catch(() => { quitting = true; dialog.showErrorBox('Serotine could not start', 'The bundled app or protected local storage could not be initialized. Your saved data has not been replaced.'); app.quit() })
+    }).catch(error => {
+      quitting = true
+      console.error('Serotine startup failed:', error)
+      const detail = error instanceof Error ? error.message : String(error)
+      dialog.showErrorBox('Serotine could not start', `Serotine could not finish starting. No automatic data reset was attempted.\n\n${detail}`)
+      app.quit()
+    })
   }
 }

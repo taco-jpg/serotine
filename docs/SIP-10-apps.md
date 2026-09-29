@@ -32,11 +32,11 @@ The encrypted native snapshot is restored before the shared UI is mounted. Nativ
 | Android | AES-GCM snapshot, Android Keystore key, app-private no-backup storage | Android cloud backup and device-transfer exclusions are explicit; no automatic export of plaintext identity/history |
 | iOS | AES-GCM snapshot, device-only Keychain key, app-private persistence | Snapshot excluded from OS backup; WebView storage is ephemeral; staging data is transient |
 | Windows | AES-GCM snapshot, Electron OS-backed key protection, LocalAppData | Avoid roaming app data; custom enterprise/user backup software remains outside the app's control |
-| macOS | AES-GCM snapshot, Electron Keychain-backed key protection, Application Support | App directory marked excluded from Time Machine; user-selected/manual copies remain possible |
+| macOS | AES-GCM snapshot, Electron Keychain-backed key protection, Application Support | Best-effort Time Machine exclusion; macOS may deny it, and startup continues. User-selected/manual copies remain possible |
 
 These are implemented policies, not claims of hardware-bound identity keys or guaranteed recovery. Linked clients intentionally share an exportable identity key. A compromised endpoint can still expose it. There is no new forward-secrecy or linked-device revocation system.
 
-If startup cannot open the protected store, the recovery screen preserves it and offers retry by reopening the app. Deliberate local erasure requires typing `DELETE LOCAL DATA` and confirming a native system dialog; only then can a clean start restore an existing encrypted backup. Erasure is permanent, and backup exclusions still apply. This recovery route also addresses an orphaned iOS Keychain entry after uninstall; no missing/corrupt store is silently reset.
+If startup cannot open the protected store, the recovery screen preserves it and offers retry by reopening the app. Deliberate local erasure requires typing `DELETE LOCAL DATA` and confirming a native system dialog; only then can a clean start restore an existing encrypted backup. Erasure is permanent; keep a password-encrypted backup outside the app data folder. This recovery route also addresses an orphaned iOS Keychain entry after uninstall; no missing/corrupt store is silently reset.
 
 ## Identity transfer, updates, and background behavior
 

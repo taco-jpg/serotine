@@ -83,6 +83,9 @@ jobs:
           path: |
             native/desktop/dist/*.exe
             native/desktop/dist/*.dmg
+            native/desktop/dist/*.zip
+            native/desktop/dist/*.blockmap
+            native/desktop/dist/latest*.yml
             native/desktop/dist/ARTIFACTS.json
             native/desktop/dist/SHA256SUMS
 
@@ -161,14 +164,24 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          mapfile -t windows < <(find artifacts/windows -type f -name '*-win-x64.exe' -print)
-          mapfile -t macos < <(find artifacts/macos -type f -name '*-mac-arm64.dmg' -print)
+          mapfile -t windows < <(find artifacts/windows -type f -name 'serotine-*-preview-win-x64-unsigned.exe' -print)
+          mapfile -t macos < <(find artifacts/macos -type f -name 'serotine-*-preview-macos-arm64-unsigned.dmg' -print)
+          mapfile -t mac_zip < <(find artifacts/macos -type f -name 'serotine-*-preview-macos-arm64-unsigned.zip' -print)
+          mapfile -t win_update < <(find artifacts/windows -type f -name 'latest.yml' -print)
+          mapfile -t mac_update < <(find artifacts/macos -type f -name 'latest-mac.yml' -print)
           mapfile -t android < <(find artifacts/android -type f -name '*.apk' -print)
           test "${#windows[@]}" -eq 1
           test "${#macos[@]}" -eq 1
+          test "${#mac_zip[@]}" -eq 1
+          test "${#win_update[@]}" -eq 1
+          test "${#mac_update[@]}" -eq 1
           test "${#android[@]}" -eq 1
-          cp "${windows[0]}" "release-assets/serotine-${VERSION}-preview-windows-x64-unsigned.exe"
+          cp "${windows[0]}" release-assets/
           cp "${macos[0]}" "release-assets/serotine-${VERSION}-preview-macos-arm64-unsigned.dmg"
+          cp "${mac_zip[0]}" release-assets/
+          cp "${win_update[0]}" release-assets/
+          cp "${mac_update[0]}" release-assets/
+          find artifacts/windows artifacts/macos -type f -name '*.blockmap' -exec cp {} release-assets/ \;
           cp "${android[0]}" "release-assets/serotine-${VERSION}-preview-android-debug.apk"
           (
             cd release-assets
@@ -176,6 +189,7 @@ jobs:
               "serotine-${VERSION}-preview-windows-x64-unsigned.exe" \
               "serotine-${VERSION}-preview-macos-arm64-unsigned.dmg" \
               "serotine-${VERSION}-preview-android-debug.apk" \
+              serotine-*-preview-macos-arm64-unsigned.zip \
               > "serotine-${VERSION}-preview-SHA256SUMS.txt"
           )
       - name: Create or update GitHub prerelease
@@ -184,11 +198,22 @@ jobs:
           set -euo pipefail
           TAG="v${VERSION}-preview"
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            cat > release-notes.md <<'NOTES'
+          Unsigned development preview for testing. Windows and macOS packages are not publisher-signed; Android uses a development/debug key. These builds use a separate development identity and data store.
+
+          **macOS first open:** move Serotine Dev to Applications, then run this one command in Terminal:
+
+          ```sh
+          xattr -dr com.apple.quarantine "/Applications/Serotine Dev.app"
+          ```
+
+          Windows previews support in-app updates. Unsigned macOS previews cannot install updates in-app; download the next preview from Releases. iOS is omitted because an unsigned iOS build is not a normal installable distribution path.
+          NOTES
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "Serotine v${VERSION} Preview" \
               --prerelease \
-              --notes "Unsigned development preview. Windows and macOS packages are not publisher-signed and may trigger OS security warnings. Android uses a development/debug signing key. These packages use Serotine's development application identity and are intended for testing, not as a production update path. iOS is intentionally omitted because an unsigned iOS build is not a normal installable distribution path."
+              --notes-file release-notes.md
           fi
           gh release upload "$TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber

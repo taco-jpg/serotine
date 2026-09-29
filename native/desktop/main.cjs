@@ -7,6 +7,7 @@ const { promisify } = require('node:util')
 const { randomUUID } = require('node:crypto')
 const { EncryptedStore } = require('./encrypted-store.cjs')
 const { relayRequest } = require('./transport.cjs')
+const { autoUpdater } = require('electron-updater')
 const { APP_URL, RELEASE_URL, fileByteLimit, trustedURL, assertSender, validateConfig, decodeBase64, externalURL, safeFilename, validateReset, bundlePath, object } = require('./security.cjs')
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'serotine', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }])
@@ -26,6 +27,10 @@ if (config) {
   app.setPath('userData', dataRoot)
   const store = new EncryptedStore(path.join(dataRoot, 'native-v1'), safeStorage)
   let window, quitting = false, quitDialog = false
+  const updateSupported = app.isPackaged && process.platform === 'win32'
+  let updateState = { status: updateSupported ? 'idle' : 'unsupported', message: updateSupported ? '' : process.platform === 'darwin' && config.development
+    ? 'This unsigned macOS preview cannot apply in-app updates. Download a newer preview from Official releases.'
+    : 'Automatic updates are unavailable for this release channel.' }
   let relayStarted = false, recoveryResetPending = false
   const grants = new Set()
   let pendingQuit
@@ -47,6 +52,22 @@ if (config) {
     }
     await store.flush()
     return true
+  }
+  function setUpdateState(value) {
+    updateState = value
+    if (window && !window.isDestroyed()) window.webContents.send('serotine:update-state', updateState)
+  }
+  if (updateSupported) {
+    autoUpdater.autoDownload = false
+    autoUpdater.autoInstallOnAppQuit = false
+    autoUpdater.autoRunAppAfterInstall = true
+    autoUpdater.allowPrerelease = config.development
+    autoUpdater.on('checking-for-update', () => setUpdateState({ status: 'checking' }))
+    autoUpdater.on('update-available', info => setUpdateState({ status: 'available', version: info.version }))
+    autoUpdater.on('update-not-available', () => setUpdateState({ status: 'not-available' }))
+    autoUpdater.on('download-progress', progress => setUpdateState({ status: 'downloading', percent: Math.max(0, Math.min(100, progress.percent)) }))
+    autoUpdater.on('update-downloaded', info => setUpdateState({ status: 'downloaded', version: info.version }))
+    autoUpdater.on('error', error => setUpdateState({ status: 'error', message: error?.message || 'The update check failed.' }))
   }
 
   async function openLink(url, confirm = true) {
@@ -155,7 +176,30 @@ if (config) {
         if (recoveryResetPending) throw new Error('Local recovery is in progress.')
         return action(value)
       })
-      handle('serotine:info', () => ({ platform: process.platform, version: config.version, relayOrigin: config.relayOrigin, backgroundSync: false }))
+      handle('serotine:info', () => ({ platform: process.platform, version: config.version, relayOrigin: config.relayOrigin, backgroundSync: false, autoUpdate: updateSupported, development: config.development }))
+      handle('serotine:update:get', () => updateState)
+      ipcMain.handle('serotine:update:check', async event => {
+        assertSender(event, window)
+        if (!updateSupported) return updateState
+        try { await autoUpdater.checkForUpdates() } catch (error) { setUpdateState({ status: 'error', message: error?.message || 'The update check failed.' }) }
+        return updateState
+      })
+      ipcMain.handle('serotine:update:download', async event => {
+        assertSender(event, window)
+        if (!updateSupported || updateState.status !== 'available') return updateState
+        try { setUpdateState({ status: 'downloading', percent: 0 }); await autoUpdater.downloadUpdate() }
+        catch (error) { setUpdateState({ status: 'error', message: error?.message || 'The update download failed.' }) }
+        return updateState
+      })
+      ipcMain.handle('serotine:update:install', async (event, restart) => {
+        assertSender(event, window)
+        if (updateState.status !== 'downloaded' || typeof restart !== 'boolean') throw new Error('No downloaded update is ready to install.')
+        if (!await prepareQuit()) return { installed: false }
+        quitting = true
+        autoUpdater.autoRunAppAfterInstall = restart
+        autoUpdater.quitAndInstall(false, restart)
+        return { installed: true }
+      })
       handle('serotine:snapshot:read', () => store.read())
       handle('serotine:snapshot:write', value => { if (!object(value)) throw new Error('Invalid snapshot.'); return store.write(value.value) })
       handle('serotine:storage:reset', async value => {
@@ -220,8 +264,8 @@ if (config) {
       powerMonitor.on('resume', () => { if (!window.isDestroyed()) window.webContents.send('serotine:resume') })
       const menu = [
         { label: product, submenu: [
-          { label: `About ${product}`, click: () => dialog.showMessageBox(window, { title: product, message: `${product} ${config.version}`,
-            detail: 'Bundled desktop prototype. Close or Quit stops synchronization. No tray service or automatic updates. Export an encrypted backup before uninstalling or removing app data.' }) },
+          { label: `About ${product}`, click: () => window.webContents.send('serotine:show-about') },
+          { label: 'Check for Updates…', enabled: updateSupported, click: () => window.webContents.send('serotine:check-updates') },
           { label: 'Official downloads and updates', click: () => void openLink(RELEASE_URL, false) },
           { type: 'separator' },
           { label: 'Erase local app data…', click: async () => {
@@ -249,6 +293,7 @@ if (config) {
       Menu.setApplicationMenu(Menu.buildFromTemplate(menu))
       await window.loadURL(APP_URL)
       window.show()
+      if (updateSupported) void autoUpdater.checkForUpdates().catch(error => setUpdateState({ status: 'error', message: error?.message || 'The update check failed.' }))
     }).catch(error => {
       quitting = true
       console.error('Serotine startup failed:', error)

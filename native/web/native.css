@@ -1,15 +1,48 @@
-body { margin: 0; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
-.native-status { min-height: 2rem; display: flex; flex-wrap: wrap; justify-content: space-between; gap: .25rem 1rem; padding: .35rem .75rem; background: var(--card); border-bottom: 1px solid var(--border); font-size: .7rem; }
-.native-status button { text-decoration: underline; }
-.native-info { position: fixed; inset: 3rem 1rem auto; z-index: 100; max-width: 42rem; margin: auto; max-height: 80dvh; overflow-y: auto; background: var(--card); border: 1px solid var(--border); padding: 1.5rem; box-shadow: var(--surface-shadow); }
-.native-info p { margin: 1rem 0; line-height: 1.6; }
-.native-screen { height: calc(100dvh - 2rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
-.native-screen > .app-surface { min-height: 100%; }
-.native-screen .h-dvh { height: 100%; }
-.native-screen .chat-shell { top: calc(var(--app-top, 0px) + 2rem + env(safe-area-inset-top)); height: calc(var(--app-height, 100dvh) - 2rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
-.native-failure { margin: 3rem auto; max-width: 36rem; padding: 1.5rem; font: 1rem/1.6 system-ui; }
-.native-failure { width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
-.native-failure p { margin: 1rem 0; }
-.native-failure input { max-width: 100%; border: 1px solid currentColor; padding: .5rem; }
-.native-failure button { max-width: 100%; white-space: normal; border: 1px solid currentColor; border-radius: .25rem; padding: .5rem .75rem; }
-.native-failure button:disabled { opacity: .5; cursor: not-allowed; }
+html, body, #root { width: 100%; height: 100%; min-height: 0; margin: 0; overflow: hidden; }
+body { padding: 0; }
+.native-screen { position: fixed; inset: 0; width: 100vw; height: 100dvh; min-height: 0; overflow: hidden; }
+.native-screen > .app-surface { width: 100%; height: 100%; min-height: 0; overflow: hidden; }
+.native-screen .h-dvh { height: 100%; min-height: 0; }
+.native-screen .chat-shell { position: fixed; inset: 0; width: 100%; height: 100dvh; max-height: 100dvh; min-height: 0; padding-top: 0; }
+.native-screen .chat-composer { max-height: none; overflow: visible; }
+
+.native-storage-status { position: fixed; z-index: 80; inset: auto 1rem 1rem auto; max-width: min(28rem, calc(100vw - 2rem)); padding: .7rem 1rem; color: var(--foreground); background: var(--card); border: 1px solid var(--border); border-radius: .5rem; box-shadow: var(--surface-shadow); font-size: .8rem; }
+.native-about-backdrop { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 1.5rem; background: rgb(0 0 0 / .55); backdrop-filter: blur(8px); }
+.native-about { width: min(38rem, 100%); max-height: min(90dvh, 48rem); overflow: auto; color: var(--foreground); background: var(--background); border: 1px solid var(--border); border-radius: .75rem; box-shadow: 0 28px 90px rgb(0 0 0 / .42); }
+.native-about-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 1.5rem 1.75rem 1.2rem; border-bottom: 1px solid var(--border); }
+.native-about-kicker { margin: 0 0 .45rem; color: var(--primary); font-size: .68rem; font-weight: 700; letter-spacing: .16em; }
+.native-about-header h1 { margin: 0; font-size: 1.55rem; font-weight: 600; letter-spacing: -.035em; }
+.native-about-close { width: 2rem; height: 2rem; padding: 0; color: var(--muted-foreground); background: transparent; border: 0; border-radius: .35rem; font: 300 1.7rem/1 system-ui; cursor: pointer; }
+.native-about-close:hover { color: var(--foreground); background: var(--muted); }
+.native-about-version { display: flex; align-items: center; gap: .9rem; margin: 1.25rem 1.75rem; padding: .95rem 1rem; background: var(--card); border: 1px solid var(--border); border-radius: .55rem; }
+.native-about-mark { display: grid; width: 2.65rem; height: 2.65rem; flex: 0 0 auto; place-items: center; color: #10200b; background: #b7ed70; border-radius: .45rem; font-size: 1.15rem; font-weight: 800; letter-spacing: -.06em; }
+.native-about-version div { display: grid; gap: .18rem; min-width: 0; }
+.native-about-version strong { font-size: .94rem; font-weight: 600; }
+.native-about-version div span { color: var(--muted-foreground); font-size: .78rem; }
+.native-about-channel { margin-left: auto; padding: .28rem .45rem; color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); border-radius: 999px; font-size: .62rem; font-weight: 700; letter-spacing: .08em; }
+.native-about-section { padding: .3rem 1.75rem 1.45rem; }
+.native-about-section h2 { margin: .4rem 0 .45rem; font-size: .92rem; font-weight: 600; }
+.native-about-copy { margin: 0; color: var(--muted-foreground); font-size: .84rem; line-height: 1.55; }
+.native-about-error { margin: .7rem 0 0; color: var(--destructive); font-size: .8rem; line-height: 1.5; }
+.native-about-progress { height: .35rem; margin-top: .8rem; overflow: hidden; background: var(--muted); border-radius: 999px; }
+.native-about-progress span { display: block; height: 100%; background: var(--primary); border-radius: inherit; transition: width .2s ease; }
+.native-about-actions { display: flex; flex-wrap: wrap; gap: .55rem; margin-top: .95rem; }
+.native-about-actions button { min-height: 2.35rem; padding: .5rem .85rem; border: 1px solid var(--border); border-radius: .38rem; font: inherit; font-size: .8rem; cursor: pointer; }
+.native-about-actions button:disabled { cursor: default; opacity: .65; }
+.native-about-primary { color: var(--primary-foreground); background: var(--primary); border-color: transparent !important; font-weight: 600 !important; }
+.native-about-secondary { color: var(--foreground); background: var(--card); }
+.native-about-note { margin: 0 1.75rem 1.4rem; padding: .9rem 1rem; background: var(--card); border-left: 3px solid var(--primary); border-radius: .25rem; }
+.native-about-note strong { font-size: .78rem; font-weight: 600; }
+.native-about-note p { margin: .4rem 0; color: var(--muted-foreground); font-size: .76rem; line-height: 1.5; }
+.native-about-note code { display: block; overflow-wrap: anywhere; padding: .55rem .65rem; color: var(--foreground); background: var(--background); border: 1px solid var(--border); border-radius: .3rem; font: .7rem/1.5 ui-monospace, monospace; user-select: all; }
+.native-about-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .9rem 1.75rem 1.1rem; color: var(--muted-foreground); border-top: 1px solid var(--border); font-size: .72rem; }
+.native-about-footer button { padding: 0; color: var(--primary); background: transparent; border: 0; font: inherit; cursor: pointer; }
+@media (max-width: 520px) {
+  .native-about-backdrop { padding: .6rem; }
+  .native-about { max-height: 94dvh; }
+  .native-about-header { padding: 1.15rem 1.2rem .95rem; }
+  .native-about-version { margin: 1rem 1.2rem; }
+  .native-about-section { padding: .2rem 1.2rem 1.1rem; }
+  .native-about-note { margin: 0 1.2rem 1.1rem; }
+  .native-about-footer { padding: .8rem 1.2rem 1rem; }
+}

@@ -15,5 +15,10 @@
     "electron": "44.4.5",
     "electron-builder": "26.16.1"
   },
-  "engines": { "node": ">=22.13.0" }
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.3"
+  }
 }

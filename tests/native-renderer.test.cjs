@@ -69,7 +69,7 @@ test('native downloads preserve bytes and cancellation instead of claiming a can
   let saved = false
   new Function('require', 'module', 'exports', compile('lib/save-download.ts'))(name => {
     assert.equal(name, '@/native/shared/bridge')
-    return { getNativeBridge: () => ({ saveFile: async input => { calls.push(input); return { saved } } }) }
+    return { getNativeBridge: () => ({ saveFile: async input => { calls.push(input); return { saved } } }), isWindowsNative: () => false }
   }, module, module.exports)
   const blob = new Blob([Uint8Array.from([0, 1, 128, 255])], { type: 'application/octet-stream' })
   assert.equal(await module.exports.saveDownload(blob, 'bytes.bin'), false)

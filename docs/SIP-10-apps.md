@@ -2,14 +2,14 @@
 
 ## Status
 
-The initial implementation provides a shared bundled renderer, Electron desktop shell, Capacitor Android/iOS projects, constrained relay/file/storage bridges, and development plus manual signed-artifact workflows. **SIP-10 is not yet a shipped four-platform release.** Signing accounts, real platform builds, install/update tests, physical-device messaging and storage checks, and distribution are release prerequisites.
+The initial implementation provides a shared bundled renderer, Electron desktop shell, Capacitor Android/iOS projects, constrained relay/file/storage bridges, and development plus manual signed-artifact workflows. **SIP-10 is not yet a shipped four-platform release.** Hosted development builds and an unsigned `v1.0.2-preview` release exist; production signing, install/update tests, physical-device messaging and storage checks, and four-platform distribution remain release prerequisites.
 
 | Target | Build configuration | Qualification status |
 | --- | --- | --- |
 | Android | Capacitor 8.5.2; SDK 36; minimum API 26 with Chromium/WebView 120+; debug APK / signed release APK | Physical-device support pending; minimum API is a build setting, not a tested support claim |
-| iPhone / iPad | Capacitor 8.5.2; deployment target iOS 16.4; Xcode 26.6 CI; App Store-profile archive/export path | Simulator compile workflow provided; real-device/TestFlight validation pending |
+| iPhone / iPad | Capacitor 8.5.2; deployment target iOS 16.4; Xcode 26.6 CI; App Store-profile archive/export path | Hosted iOS Simulator compile check passed; no installable iPhone preview or real-device/TestFlight validation |
 | Windows | Electron 44.4.5; x64 NSIS EXE workflow | OS version and install/update support matrix pending physical testing |
-| macOS | Electron 44.4.5; Apple silicon DMG workflow | OS version, Keychain, signing/notarization, and install/update validation pending |
+| macOS | Electron 44.4.5; Apple silicon DMG workflow | Hosted arm64 DMG build and strict ad-hoc app signature check passed; clean Mac GUI launch, production signing/notarization, and install/update validation pending |
 
 Windows ARM64 and Intel Mac targets in the desktop builder are future qualification targets. Do not advertise them from configuration alone. No Linux package is promised.
 
@@ -17,7 +17,7 @@ Windows ARM64 and Intel Mac targets in the desktop builder are future qualificat
 
 The full unit suite passed **858 tests, with 0 failures and 1 browser-only skip**. The targeted native suites passed all 42 tests. The shared native renderer and Next.js production build completed, Capacitor platform synchronization completed, and TypeScript checking passed. Lint finished with 0 errors and 4 existing warnings. Workflow YAML parsing, helper syntax checks, release version/build guards, artifact checksum generation, and artifact allowlist/symlink checks passed.
 
-Native runtime smoke tests could not complete in this environment: Electron exited before app startup because the container blocked its OS socket operation, and the Chromium download returned a broken archive. These are validation limits, not passing runtime checks. The Linux renderer CI job installs Chromium and runs `native:smoke` to exercise the bundled renderer with synthetic native boundaries. Hosted CI has not yet run; Windows/macOS installation, Android/iOS compilation and devices, release signatures, and updates remain unverified.
+Native runtime smoke tests could not complete in this environment: Electron exited before app startup because the container blocked its OS socket operation, and the Chromium download returned a broken archive. These are validation limits, not passing runtime checks. The Linux renderer CI job installs Chromium and runs `native:smoke` to exercise the bundled renderer with synthetic native boundaries. In PR #76, hosted Verify and native development builds passed on Windows, macOS, Android, and iOS; iOS was a Simulator compile check only. The macOS arm64 DMG was generated after a strict ad-hoc app signature check passed. PR #77 published `v1.0.2-preview` from `9256541` with Windows x64, macOS arm64, Android debug, and SHA-256 checksum assets. Clean Mac GUI launch, real-device installation and updates, and production signing and qualification remain unverified.
 
 ## Architecture and security boundaries
 

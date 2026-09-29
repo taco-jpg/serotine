@@ -82,7 +82,10 @@ jobs:
       - name: Package development app without a publisher certificate
         run: npm --prefix native/desktop run package:dev -- --${{ matrix.target }} --${{ matrix.arch }}
         env:
+          # This is an ad-hoc dev signature with no signing certificate or protected secrets.
+          # Electron Builder otherwise skips signing PR builds, which makes the strict check fail.
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          CSC_FOR_PULL_REQUEST: 'true'
       - run: node native/scripts/artifact-metadata.cjs native/desktop/dist ${{ matrix.platform }} ${{ matrix.arch }} development
       - uses: actions/upload-artifact@v4
         with:

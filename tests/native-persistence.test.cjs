@@ -12,6 +12,7 @@ let bundle
 before(async () => {
   bundle = (await esbuild.build({
     stdin: { contents: `export * from './native/shared/persistence'; export * from './native/shared/persistence-idb';
+      export { setNativeInfo } from './native/shared/bridge';
       export * from './lib/native-persistence'; export * from './lib/identity'; export * from './lib/storage'; export * from './lib/full-backup';
       export { saveStoredEvent, getStoredEvents, eventStorageKey } from './lib/messaging-store';
       export * from './lib/file-bank'; export * from './lib/verified-attachment-cache'; export { attachmentFileLimit, validateAttachmentFile } from './lib/attachments';`, resolveDir: root },
@@ -23,7 +24,7 @@ before(async () => {
   })).outputFiles[0].text
 })
 
-function harness(saved = null, seed = {}) {
+function harness(saved = null, seed = {}, options = {}) {
   class LocalStorage {
     constructor() { this.values = new Map(Object.entries(seed)) }
     get length() { return this.values.size }
@@ -45,12 +46,18 @@ function harness(saved = null, seed = {}) {
     async readSnapshot() { return disk.value },
     async writeSnapshot(value) {
       if (disk.wait) await disk.wait
-      if (disk.fail) throw new Error('Native disk full')
+      if (disk.fail) throw disk.failure ?? new Error('Native disk full')
       disk.value = value; disk.writes++
     },
   }
+  if (options.maxSnapshotBytes === Infinity) {
+    const info = { platform: 'win32', version: '1.0.3', relayOrigin: 'https://serotine.example', backgroundSync: false }
+    window.serotineNative = { platform: 'desktop', getInfo: async () => info, readSnapshot: bridge.readSnapshot,
+      writeSnapshot: ({ value }) => bridge.writeSnapshot(value) }
+    api.setNativeInfo(info)
+  }
   return { ...api, localStorage, indexedDB, disk, errors, states,
-    initialize: () => api.initializeNativePersistence(bridge, error => errors.push(error)),
+    initialize: () => api.initializeNativePersistence(bridge, error => errors.push(error), options),
   }
 }
 
@@ -97,6 +104,13 @@ test('snapshot encoding preserves Blob bytes, undefined, dates and literal tag-s
   assert.ok(Object.hasOwn(decoded, '__proto__'))
   assert.equal({}.preserved, undefined)
   assert.throws(() => h.decodeNativeValue(['blob', 'text/plain', '!broken']), /damaged/)
+})
+
+test('the configured snapshot limit propagates to nested Blob encoding', async () => {
+  const h = harness(), value = { nested: [{ file: new Blob(['preserved file bytes']) }] }
+  await assert.rejects(h.encodeNativeValue(value, 0, 16), /local storage limit/)
+  const decoded = h.decodeNativeValue(await h.encodeNativeValue(value, 0, Infinity))
+  assert.equal(await decoded.nested[0].file.text(), 'preserved file bytes')
 })
 
 test('transaction.done and shorthand writes wait for the native atomic commit', async () => {
@@ -395,6 +409,44 @@ test('the total snapshot ceiling never replaces the last recoverable native enve
   await assert.rejects(h.flushNativeStorage(), /64 MiB local storage limit/)
   assert.equal(h.disk.value, previous)
   assert.equal(h.errors.length, 1)
+  assert.equal(h.nativeStorageDiagnostic(h.errors[0]), 'CAPTURE_CAPACITY')
+})
+
+test('runtime diagnostics distinguish capture from commit without exposing arbitrary exception payloads', async () => {
+  const secret = 'private-password /Users/private-owner/backup.json secret-history'
+  const committing = harness(); await committing.initialize()
+  const before = committing.disk.value
+  committing.disk.fail = true
+  committing.disk.failure = new Error(secret)
+  committing.disk.failure.name = secret
+  committing.localStorage.setItem('serotine:pending', 'not committed')
+  await assert.rejects(committing.flushNativeStorage())
+  assert.equal(committing.nativeStorageDiagnostic(committing.errors[0]), 'COMMIT_HOST_FAILURE')
+  assert.equal(committing.disk.value, before)
+  assert.equal(committing.nativeStorageDiagnostic(new Error(secret)), undefined)
+
+  const capturing = harness(); await capturing.initialize()
+  capturing.indexedDB.databases = async () => { throw new DOMException(secret, 'QuotaExceededError') }
+  capturing.localStorage.setItem('serotine:pending', 'not captured')
+  await assert.rejects(capturing.flushNativeStorage())
+  assert.equal(capturing.nativeStorageDiagnostic(capturing.errors[0]), 'CAPTURE_DB_QUOTA')
+  assert.equal(JSON.stringify([committing.nativeStorageDiagnostic(committing.errors[0]), capturing.nativeStorageDiagnostic(capturing.errors[0])]).includes(secret), false)
+})
+
+test('unsupported stored values produce a bounded capture diagnostic and preserve durable data', async () => {
+  const h = harness(); await h.initialize()
+  const db = await messagesDatabase(h), previous = h.disk.value
+  await assert.rejects(db.put('messages', { id: 'unsupported', secret: new Set(['private attachment text']) }), /cannot safely save/)
+  assert.equal(h.nativeStorageDiagnostic(h.errors[0]), 'CAPTURE_UNSUPPORTED_VALUE')
+  assert.equal(h.disk.value, previous)
+  db.close()
+})
+
+test('startup parsing retains its fail-closed behavior and exposes only a bounded diagnostic', async () => {
+  const h = harness('{private-password-and-history')
+  await assert.rejects(h.initialize(), /damaged/)
+  assert.equal(h.nativeStorageDiagnostic(h.errors[0]), 'RESTORE_DAMAGED_DATA')
+  assert.equal(h.disk.writes, 0)
 })
 
 test('an intact snapshot with an 8 MiB file reopens without exhausting the base64 validator stack', async () => {
@@ -516,4 +568,50 @@ test('existing encrypted identity and full backups retain their address through 
     assert.equal(destination.errors.length, 0)
     assert.equal(restarted.errors.length, 0)
   }
+})
+
+test('Windows imports and reopens an encrypted full backup over 100 MiB and the default 64 MiB native ceiling', async () => {
+  const incoming = harness(); await incoming.initialize()
+  const identity = await incoming.createIdentity()
+  const password = 'large-native-backup-regression-password'
+  async function encryptedBackup() {
+    const snapshot = { format: 'serotine-full-snapshot', version: 1, createdAt: Date.now(), identity,
+      contacts: [], messages: Array.from({ length: 1400 }, (_, i) => ({ id: `large-${i}`, senderPubKey: identity.publicKey,
+        peerPubKey: peer, content: 'x'.repeat(64000), timestamp: 123 + i, delivery: 'sent' })),
+      messaging: { version: 3, owner: identity.publicKey, events: [],
+        preferences: { accepted: [], blocked: [], notifications: {}, readAt: {}, readReceipts: true } } }
+    await incoming.validateFullBackupSnapshot(snapshot)
+    const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12))
+    const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey'])
+    const key = await crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', iterations: 600000, salt }, material,
+      { name: 'AES-GCM', length: 256 }, false, ['encrypt'])
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv,
+      additionalData: new TextEncoder().encode('serotine-full-backup:v1:PBKDF2-SHA256-600000:AES-256-GCM') }, key,
+      new TextEncoder().encode(JSON.stringify(snapshot)))
+    return JSON.stringify({ format: 'serotine-full-backup', version: 1, salt: Buffer.from(salt).toString('base64'),
+      iv: Buffer.from(iv).toString('base64'), ciphertext: Buffer.from(ciphertext).toString('base64') })
+  }
+  const backup = await encryptedBackup()
+  assert.ok(Buffer.byteLength(backup) > incoming.MAX_BACKUP_FILE_BYTES)
+  await assert.rejects(incoming.restoreBackup(backup, password), /no larger than 100 MiB/)
+  const windows = { maxSnapshotBytes: Infinity }
+  const destination = harness(null, {}, windows); await destination.initialize()
+  const oldIdentity = await destination.createIdentity()
+  await destination.saveMessageToStorage(oldIdentity.publicKey, { id: 'preserved', senderPubKey: oldIdentity.publicKey,
+    peerPubKey: peer, content: 'existing identity history', timestamp: 1 })
+  await destination.restoreBackup(backup, password, { replaceIdentity: oldIdentity.publicKey })
+  assert.ok(Buffer.byteLength(destination.disk.value) > destination.NATIVE_SNAPSHOT_MAX_BYTES)
+  assert.equal(destination.errors.length, 0)
+  const restarted = harness(destination.disk.value, {}, windows); await restarted.initialize()
+  assert.equal((await restarted.loadIdentity()).publicKey, identity.publicKey)
+  const rows = await restarted.getMessagesFromStorage(identity.publicKey, peer)
+  assert.equal(rows.length, 1400)
+  assert.equal(rows[1399].content.length, 64000)
+  assert.equal((await restarted.getMessagesFromStorage(oldIdentity.publicKey, peer))[0].content, 'existing identity history')
+  assert.equal((await restarted.loadArchivedIdentities())[0].publicKey, oldIdentity.publicKey)
+  assert.equal(restarted.errors.length, 0)
+  const mobile = harness(destination.disk.value)
+  await assert.rejects(mobile.initialize(), /exceeds this app version's storage limit/)
+  assert.equal(mobile.nativeStorageDiagnostic(mobile.errors[0]), 'RESTORE_CAPACITY')
+  assert.equal(mobile.disk.writes, 0)
 })

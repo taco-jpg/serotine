@@ -2,7 +2,7 @@ import { Capacitor, registerPlugin, type PluginListenerHandle } from "@capacitor
 import { createRoot, type Root } from "react-dom/client"
 import type { NativeBridge, NativeInfo, NativeRequest, NativeResponse } from "../shared/bridge"
 import { setNativeInfo } from "../shared/bridge"
-import { initializeNativePersistence, recoverNativePersistence } from "../shared/persistence"
+import { initializeNativePersistence, nativeStorageDiagnostic, recoverNativePersistence } from "../shared/persistence"
 import { saveDownload } from "@/lib/save-download"
 
 let reactRoot: Root | undefined
@@ -21,7 +21,7 @@ interface MobilePlugin {
   resetStorage(input: { confirmation: "DELETE LOCAL DATA" }): Promise<{ reset: boolean }>
   addListener(name: string, listener: (event: { active?: boolean }) => void): Promise<PluginListenerHandle>
 }
-function failure(stage: FailureStage = appStarted ? "STORAGE_RUNTIME" : startupStage) {
+function failure(stage: FailureStage = appStarted ? "STORAGE_RUNTIME" : startupStage, cause?: unknown) {
   // Never display exception payloads which may contain private state or keys.
   reactRoot?.unmount()
   reactRoot = undefined
@@ -36,7 +36,9 @@ function failure(stage: FailureStage = appStarted ? "STORAGE_RUNTIME" : startupS
   const detail = document.createElement("p")
   detail.textContent = "Your stored files have been preserved. Close and reopen the app to retry. If storage is full, free some device space first. Do not clear app data or uninstall without your encrypted backup."
   const diagnostic = document.createElement("p")
-  diagnostic.textContent = `Diagnostic code: ${stage}. Include this code when reporting the problem; you do not need to share your backup or password.`
+  const detailCode = nativeStorageDiagnostic(cause)
+  if (detailCode) main.dataset.nativeErrorDetail = detailCode
+  diagnostic.textContent = `Diagnostic code: ${stage}${detailCode ? ` / ${detailCode}` : ""}. Include this code when reporting the problem; you do not need to share your backup or password.`
   main.append(title, detail, diagnostic)
   const bridge = window.serotineNative
   if (bridge?.resetStorage && !appStarted && stage.startsWith("STORAGE_")) {
@@ -107,11 +109,11 @@ async function start() {
       try { await bridge.writeSnapshot({ value }) }
       catch (error) { if (!appStarted) startupStage = "STORAGE_WRITE"; throw error }
     },
-  }, () => failure())
+  }, error => failure(undefined, error), { maxSnapshotBytes: info.platform === "win32" ? Infinity : undefined })
   bridge.onBeforeQuit?.(async () => {
     reactRoot?.unmount(); reactRoot = undefined
     try { await persistence.flush() }
-    catch (error) { failure(); throw error }
+    catch (error) { failure(undefined, error); throw error }
   })
   startupStage = "UI_START"
   const { NativeApp } = await import("./app")
@@ -145,4 +147,4 @@ async function start() {
   reactRoot.render(<NativeApp info={info} />)
   appStarted = true
 }
-void start().catch(() => failure())
+void start().catch(error => failure(undefined, error))

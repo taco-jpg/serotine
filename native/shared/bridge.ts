@@ -31,6 +31,8 @@ export interface NativeBridge {
 }
 let installedInfo: NativeInfo | undefined
 export function setNativeInfo(info: NativeInfo) { installedInfo = info }
+/** Desktop preload uses "desktop"; the verified host info identifies Windows. */
+export function isWindowsNative(): boolean { return installedInfo?.platform === "win32" && !!getNativeBridge() }
 export function appLinkOrigin(): string {
   if (getNativeBridge() && !installedInfo) throw new Error("The native relay configuration is not ready.")
   return installedInfo?.relayOrigin ?? (typeof window !== "undefined" ? window.location.origin : "https://serotine.chat")

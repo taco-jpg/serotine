@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { createIdentity, loadIdentity, IdentityAccessError, IdentityConflictError } from "@/lib/identity"
-import { MAX_BACKUP_FILE_BYTES, restoreBackup } from "@/lib/full-backup"
+import { backupFileLimit, restoreBackup } from "@/lib/full-backup"
 import { RestoreConfirmation } from "@/components/auth/restore-confirmation"
 
 export function LoginForm() {
@@ -46,7 +46,7 @@ export function LoginForm() {
   }
   const restoreFile = (replaceIdentity?: string) => run(async () => {
     if (!file) throw new Error("Choose a Serotine backup first.")
-    if (file.size > MAX_BACKUP_FILE_BYTES) throw new Error("Choose a Serotine backup no larger than 100 MiB.")
+    if (file.size > backupFileLimit()) throw new Error("Choose a Serotine backup no larger than 100 MiB.")
     return restoreBackup(await file.text(), password, { replaceIdentity })
   })
   const toggleRestore = () => { setRestore(!restore); setError(null); setConflict(null); setPassword(""); setShowPassword(false); setFile(null) }

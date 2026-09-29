@@ -7,7 +7,7 @@ const { promisify } = require('node:util')
 const { randomUUID } = require('node:crypto')
 const { EncryptedStore } = require('./encrypted-store.cjs')
 const { relayRequest } = require('./transport.cjs')
-const { APP_URL, RELEASE_URL, MAX_FILE_BYTES, trustedURL, assertSender, validateConfig, decodeBase64, externalURL, safeFilename, validateReset, bundlePath, object } = require('./security.cjs')
+const { APP_URL, RELEASE_URL, fileByteLimit, trustedURL, assertSender, validateConfig, decodeBase64, externalURL, safeFilename, validateReset, bundlePath, object } = require('./security.cjs')
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'serotine', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }])
 app.enableSandbox()
@@ -180,7 +180,7 @@ if (config) {
       handle('serotine:external', value => { if (!object(value)) throw new Error('Invalid link.'); return openLink(value.url) })
       handle('serotine:file:save', async value => {
         if (!object(value) || typeof value.mimeType !== 'string' || value.mimeType.length > 150) throw new Error('Invalid file.')
-        const name = safeFilename(value.name), bytes = decodeBase64(value.dataBase64, MAX_FILE_BYTES)
+        const name = safeFilename(value.name), bytes = decodeBase64(value.dataBase64, fileByteLimit())
         const target = await dialog.showSaveDialog(window, { title: 'Save from Serotine', defaultPath: name,
           properties: ['showOverwriteConfirmation', 'createDirectory'] })
         if (target.canceled || !target.filePath) return { saved: false }
@@ -195,8 +195,10 @@ if (config) {
         const file = result.filePaths[0], handle = await fs.open(file, 'r')
         try {
           const info = await handle.stat()
-          if (!info.isFile() || info.size > MAX_FILE_BYTES) throw new Error('Choose a backup no larger than 100 MiB.')
-          // Pin the selected descriptor and bound allocation even if another process grows the file.
+          if (!info.isFile()) throw new Error('Choose a Serotine backup file.')
+          if (info.size > fileByteLimit()) throw new Error('Choose a backup no larger than 100 MiB.')
+          // Pin the selected descriptor and its initial size even if another
+          // process grows the file. Windows has no fixed backup-size ceiling.
           const bytes = Buffer.alloc(info.size)
           let offset = 0
           while (offset < bytes.length) {

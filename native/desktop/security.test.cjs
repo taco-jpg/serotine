@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const path = require('node:path')
-const { trustedURL, assertSender, validateConfig, validateRequest, decodeBase64, bundlePath, safeFilename, externalURL, validateReset } = require('./security.cjs')
+const { trustedURL, assertSender, validateConfig, validateRequest, decodeBase64, fileByteLimit, bundlePath, safeFilename, externalURL, validateReset } = require('./security.cjs')
 const relay = 'https://relay.example.com'
 
 test('only the exact bundled main frame owns privileged IPC', () => {
@@ -41,6 +41,12 @@ test('binary payloads are canonical and bounded', () => {
   for (const value of ['YQ=', 'Y Q==', 'YQ==\n', 'YR==', 'YWFh']) assert.throws(() => decodeBase64(value, 1))
   const chunk = Buffer.alloc(4 * 1024 * 1024 + 16, 0xab)
   assert.deepEqual(decodeBase64(chunk.toString('base64'), chunk.length), chunk)
+})
+test('Windows backup transfers have no fixed byte ceiling and still require canonical binary data', () => {
+  assert.equal(fileByteLimit('win32'), Infinity)
+  assert.equal(fileByteLimit('darwin'), 100 * 1024 * 1024)
+  assert.equal(decodeBase64('YQ==', fileByteLimit('win32')).toString(), 'a')
+  for (const value of ['YR==', 'YQ=!', 'YQ==\n']) assert.throws(() => decodeBase64(value, fileByteLimit('win32')))
 })
 test('bundle path and filename validation prevent filesystem traversal', () => {
   const root = path.resolve('test-bundle')

@@ -164,7 +164,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          mapfile -t windows < <(find artifacts/windows -type f -name 'serotine-*-preview-win-x64-unsigned.exe' -print)
+          mapfile -t windows < <(find artifacts/windows -type f -name 'serotine-*-preview-windows-x64-unsigned.exe' -print)
           mapfile -t macos < <(find artifacts/macos -type f -name 'serotine-*-preview-macos-arm64-unsigned.dmg' -print)
           mapfile -t mac_zip < <(find artifacts/macos -type f -name 'serotine-*-preview-macos-arm64-unsigned.zip' -print)
           mapfile -t win_update < <(find artifacts/windows -type f -name 'latest.yml' -print)

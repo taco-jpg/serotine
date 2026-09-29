@@ -44,6 +44,7 @@ import { AI_SUMMARY_PLUGIN_ID, PRIVATE_CHAT_PLUGIN_ID, resolvePluginCommand } fr
 import { CallActions } from "@/components/calling/call-actions"
 import { RoomCallActions } from "@/components/calling/room-call-actions"
 import { CallHistory } from "@/components/calling/call-history"
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso"
 
 const messageSummary = (message: MessageRecord) => message.private ? message.secret ? "Private access key" : "Private message" : message.content || message.poll?.question || message.attachment?.name || "Message"
 const searchableText = (message: MessageRecord) => message.private ? "" : [message.content, message.attachment?.name, message.poll?.question, ...(message.poll?.options || [])].filter(Boolean).join(" ")
@@ -142,6 +143,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const seenIds = useRef<Set<string> | null>(null)
   const messageNodes = useRef(new Map<string, HTMLDivElement>())
+  const messagesList = useRef<VirtuosoHandle>(null)
   const searchInput = useRef<HTMLInputElement>(null)
   const messagesViewport = useRef<HTMLDivElement>(null)
   const nearBottom = useRef(true)
@@ -289,18 +291,16 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
       }
     }
     seenIds.current = ids
-    if (nearBottom.current && !searchTerm && !window.location.hash && messagesViewport.current) messagesViewport.current.scrollTop = messagesViewport.current.scrollHeight
+    if (nearBottom.current && !searchTerm && !window.location.hash && messages.length) messagesList.current?.scrollToIndex({ index: messages.length - 1, align: "end", behavior: "auto" })
   }, [messages, ready, myPub, searchTerm])
   const jumpToMessage = useCallback((id: string) => {
-    const viewport = messagesViewport.current
-    const message = messageNodes.current.get(id)
-    if (!viewport || !message) return
+    const index = messages.findIndex(item => item.id === id)
+    if (index < 0) return
     nearBottom.current = false; setAwayFromBottom(true)
-    const viewportRect = viewport.getBoundingClientRect(), messageRect = message.getBoundingClientRect()
-    viewport.scrollTop += messageRect.top - viewportRect.top - (viewport.clientHeight - messageRect.height) / 2
+    messagesList.current?.scrollToIndex({ index, align: "center", behavior: "smooth" })
     clearTimeout(highlightTimer.current); setHighlightedId(id)
     highlightTimer.current = setTimeout(() => setHighlightedId(""), 4000)
-  }, [])
+  }, [messages])
   useEffect(() => { if (activeMatch) jumpToMessage(activeMatch) }, [activeMatch, searchTerm, jumpToMessage])
   useEffect(() => {
     const visitHash = () => {
@@ -314,7 +314,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
   const jumpToLatest = () => {
     setQuery(""); nearBottom.current = true; setAwayFromBottom(false); setUnseen(0)
     if (window.location.hash) window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search)
-    if (messagesViewport.current) messagesViewport.current.scrollTop = messagesViewport.current.scrollHeight
+    if (messages.length) messagesList.current?.scrollToIndex({ index: messages.length - 1, align: "end", behavior: "smooth" })
     acknowledgeVisible()
   }
   const moveMatch = (direction: number) => { if (matches.length) setMatchIndex((selectedIndex + direction + matches.length) % matches.length) }
@@ -420,12 +420,11 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
     {blocked && <div className="flex items-center justify-between gap-3 border-b border-border p-4 text-sm text-muted-foreground"><span>{isGroup ? "This group’s administrator is blocked." : "This person is blocked."}</span><Button size="sm" variant="outline" disabled={actionBusy || (isGroup && !group)} onClick={() => void act(() => messaging.blockContact(isGroup ? group!.admin : conversationId, false))}>Unblock</Button></div>}
     {pinned.length > 0 && <button type="button" className="flex items-center gap-2 border-b border-border shrink-0 bg-card/40 px-5 py-1.5 text-left text-xs text-primary hover:bg-card" onClick={() => { setInfoTab("pins"); setInfoOpen(true) }}><Pin className="size-3.5 shrink-0" /><span className="shrink-0">{pinned.length} pinned</span><span className="truncate text-muted-foreground">{displaySummary(pinned.at(-1)!)}</span></button>}
     <span className="sr-only" role="status" aria-live="polite">{announcement}</span>
-    <div ref={messagesViewport} role="region" aria-label="Conversation messages" tabIndex={0} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-2 py-3 sm:px-5" onScroll={event => { const node = event.currentTarget; const wasNearBottom = nearBottom.current; nearBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120; setAwayFromBottom(!nearBottom.current); if (nearBottom.current) { setUnseen(0); if (!wasNearBottom) acknowledgeVisible() } }}>
-      <div className="mx-auto max-w-7xl">{messages.length > 0 ? null : <div className="max-w-lg py-8 text-left sm:py-10">{isSelf ? <MessageSquare className="mb-5 size-7 text-primary" /> : <Shield className="mb-5 size-7 text-primary" />}<p className="app-eyebrow mb-3">Your conversation</p><h2 className="mb-3 text-3xl font-medium tracking-[-0.045em] text-foreground">{isSelf ? "Send things to yourself." : isGroup ? title : "Start with a hello."}</h2><p className="max-w-sm text-sm leading-7 text-muted-foreground">{isSelf ? "Send yourself messages, files, voice notes and links, just like any other conversation." : isGroup ? "A shared conversation with your group. Messages are encrypted before leaving your device." : "Verify this contact’s address through another trusted channel. Messages are encrypted before leaving your device."}</p>{!isGroup && <details className="mt-3 text-xs text-muted-foreground"><summary className="cursor-pointer">{isSelf ? "Your address" : "Contact address"}</summary><p className="mt-2 select-all break-all font-mono leading-relaxed">{conversationId}</p></details>}</div>}
+    <Virtuoso ref={messagesList} data={messages} computeItemKey={(_, message) => message.id} role="region" aria-label="Conversation messages" tabIndex={0} className="min-h-0 min-w-0 flex-1" style={{ minHeight: 0 }} atBottomThreshold={120} atBottomStateChange={atBottom => { const wasNearBottom = nearBottom.current; nearBottom.current = atBottom; setAwayFromBottom(!atBottom); if (atBottom) { setUnseen(0); if (!wasNearBottom) acknowledgeVisible() } }} scrollerRef={node => { messagesViewport.current = node instanceof HTMLElement ? node as HTMLDivElement : null; if (node instanceof HTMLElement) node.style.overflowX = "hidden" }} components={{ Header: () => <div className="mx-auto w-full max-w-7xl px-2 py-3 sm:px-5">{messages.length > 0 ? null : <div className="max-w-lg py-8 text-left sm:py-10">{isSelf ? <MessageSquare className="mb-5 size-7 text-primary" /> : <Shield className="mb-5 size-7 text-primary" />}<p className="app-eyebrow mb-3">Your conversation</p><h2 className="mb-3 text-3xl font-medium tracking-[-0.045em] text-foreground">{isSelf ? "Send things to yourself." : isGroup ? title : "Start with a hello."}</h2><p className="max-w-sm text-sm leading-7 text-muted-foreground">{isSelf ? "Send yourself messages, files, voice notes and links, just like any other conversation." : isGroup ? "A shared conversation with your group. Messages are encrypted before leaving your device." : "Verify this contact’s address through another trusted channel. Messages are encrypted before leaving your device."}</p>{!isGroup && <details className="mt-3 text-xs text-muted-foreground"><summary className="cursor-pointer">{isSelf ? "Your address" : "Contact address"}</summary><p className="mt-2 select-all break-all font-mono leading-relaxed">{conversationId}</p></details>}</div>}
         {!ready && <p role="status" className="flex justify-center gap-2 py-5 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Opening conversation…</p>}
         {ready && isGroup && !group && !conversation?.invitation && <p role="status" className="rounded-[4px] border border-border p-5 text-center text-sm text-muted-foreground">This group is not saved on this device. Ask a group member for an invitation, or restore your chat backup.</p>}
         {!isSelf && !isGroup && <CallHistory conversationId={conversationId} />}
-        {messages.map((message, index) => {
+      </div> }} itemContent={(index, message) => {
           const mine = message.senderPubKey === myPub
           const time = messageTimes.get(message.id)!
           const previousDay = index ? messageTimes.get(messages[index - 1].id)!.dayKey : ""
@@ -439,7 +438,7 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
           const next = messages[index + 1]
           const showMetadata = !inRun(message, next) || message.editedAt || message.pinned
             || message.delivery === "pending" || message.delivery !== next?.delivery
-          return <div key={message.id} id={`message-${message.id}`} ref={node => { if (node) messageNodes.current.set(message.id, node); else messageNodes.current.delete(message.id) }} data-message-run={continuesRun ? "continuation" : "start"} className={`${continuesRun ? "mt-0.5" : "mt-2"} ${activeMatch === message.id || highlightedId === message.id ? "rounded-[4px] ring-2 ring-primary/60 ring-offset-4 ring-offset-background" : ""}`}>{selectedMessages !== null && canShareMessage(message) && <label className="mb-1 flex min-h-10 cursor-pointer items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" className="size-4 accent-primary" aria-label={`Select message ${message.id}`} checked={selectedMessages.includes(message.id)} disabled={!selectedMessages.includes(message.id) && selectedMessages.length >= MAX_SHARED_MESSAGES} onChange={() => setSelectedMessages(current => toggleSharedSelection(current || [], message.id))} />Select message</label>}{previousDay !== time.dayKey && <p className="mb-3 flex items-center gap-4 pt-2 text-[11px] font-medium text-muted-foreground before:h-px before:flex-1 before:bg-border after:h-px after:flex-1 after:bg-border">{time.day}</p>}<div className={`flex flex-col ${mine ? "items-end" : "items-start"}`}>
+          return <div id={`message-${message.id}`} ref={node => { if (node) messageNodes.current.set(message.id, node); else messageNodes.current.delete(message.id) }} data-message-run={continuesRun ? "continuation" : "start"} className={`mx-auto w-full max-w-7xl px-2 sm:px-5 ${continuesRun ? "mt-0.5" : "mt-2"} ${activeMatch === message.id || highlightedId === message.id ? "rounded-[4px] ring-2 ring-primary/60 ring-offset-4 ring-offset-background" : ""}`}>{selectedMessages !== null && canShareMessage(message) && <label className="mb-1 flex min-h-10 cursor-pointer items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" className="size-4 accent-primary" aria-label={`Select message ${message.id}`} checked={selectedMessages.includes(message.id)} disabled={!selectedMessages.includes(message.id) && selectedMessages.length >= MAX_SHARED_MESSAGES} onChange={() => setSelectedMessages(current => toggleSharedSelection(current || [], message.id))} />Select message</label>}{previousDay !== time.dayKey && <p className="mb-3 flex items-center gap-4 pt-2 text-[11px] font-medium text-muted-foreground before:h-px before:flex-1 before:bg-border after:h-px after:flex-1 after:bg-border">{time.day}</p>}<div className={`flex flex-col ${mine ? "items-end" : "items-start"}`}>
             {isGroup && !mine && !continuesRun && <p className="mb-1 ml-1 text-xs font-medium text-primary">{displayName(message.senderPubKey)}</p>}<span className="sr-only">{displayName(message.senderPubKey)}:</span>
             <div className={`flex w-full min-w-0 items-start gap-1 ${mine ? "flex-row-reverse" : ""}`}>
               <div className={`min-w-0 max-w-[calc(100%-3rem)] break-words rounded-[4px] px-2.5 py-1 text-[15px] leading-[1.4] [overflow-wrap:anywhere] sm:max-w-[min(85%,75ch)] ${mine ? "border border-primary/15 bg-message-outgoing text-message-outgoing-foreground" : "border border-border bg-message-incoming text-message-incoming-foreground"}`}>
@@ -470,11 +469,10 @@ export default function ChatWindow({ params }: { params: { pubkey: string } }) {
             </div>
             {mine && message.delivery === "failed" && message.error && message.error !== deliveryError && message.error !== sendError && <p className="mt-1 max-w-[94%] text-xs text-destructive [overflow-wrap:anywhere] sm:max-w-[min(85%,75ch)]">{message.error}</p>}
           </div></div>
-        })}
-      </div>
-    </div>
+        }
+    } />
     {(awayFromBottom || unseen > 0) && <div className="flex justify-center border-t border-border/60 py-2"><Button variant="secondary" size="sm" className="rounded-[4px]" onClick={jumpToLatest}><ArrowDown className="size-4" /><span aria-live="polite">{unseen ? `${unseen} new message${unseen === 1 ? "" : "s"}` : "Jump to latest"}</span></Button></div>}
-    <footer className="chat-composer chat-bottom min-w-0 shrink-0 overflow-y-auto border-t border-border bg-background px-2 pt-2 sm:px-5">
+    <footer className="chat-composer chat-bottom min-w-0 shrink-0 border-t border-border bg-background px-2 pt-2 sm:px-5">
       {ready && unavailableGroup && <p className="mx-auto mb-3 max-w-7xl text-sm text-muted-foreground">This group has no saved conversation on this device. A new group message may make it available again.</p>}
       {leftGroup && <p className="mx-auto mb-3 max-w-7xl text-sm text-muted-foreground">{closedGroup ? "This group is closed. Saved messages are still available." : "You are no longer a member of this group. Your saved conversation is still available."}</p>}
       {membershipUpdating && <p className="mx-auto mb-3 max-w-7xl text-sm text-muted-foreground">Updating group membership before sending more messages…</p>}

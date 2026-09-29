@@ -3,7 +3,10 @@ export interface NativeInfo {
   version: string
   relayOrigin: string
   backgroundSync: boolean
+  autoUpdate?: boolean
+  development?: boolean
 }
+export type NativeUpdateState = { status: "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error" | "unsupported"; version?: string; percent?: number; message?: string }
 export interface NativeRequest {
   path: string
   method: string
@@ -25,6 +28,13 @@ export interface NativeBridge {
   saveFile(input: { name: string; mimeType: string; dataBase64: string }): Promise<{ saved: boolean }>
   openBackup(): Promise<{ name: string; dataBase64: string } | null>
   openExternal(input: { url: string }): Promise<void>
+  checkForUpdates?(): Promise<void>
+  downloadUpdate?(): Promise<void>
+  installUpdate?(restart: boolean): Promise<void>
+  getUpdateState?(): Promise<NativeUpdateState>
+  onUpdateState?(callback: (state: NativeUpdateState) => void): () => void
+  onShowAbout?(callback: () => void): () => void
+  onCheckUpdates?(callback: () => void): () => void
   onResume(callback: () => void): () => void
   onBeforeQuit?(callback: () => Promise<void>): () => void
   resetStorage?(input: { confirmation: "DELETE LOCAL DATA" }): Promise<{ reset: boolean }>

@@ -12,6 +12,28 @@ if (process.isMainFrame && window.location.protocol === 'serotine:' && window.lo
     saveFile: value => ipcRenderer.invoke('serotine:file:save', value),
     openBackup: () => ipcRenderer.invoke('serotine:backup:open'),
     openExternal: value => ipcRenderer.invoke('serotine:external', value),
+    getUpdateState: () => ipcRenderer.invoke('serotine:update:get'),
+    checkForUpdates: () => ipcRenderer.invoke('serotine:update:check'),
+    downloadUpdate: () => ipcRenderer.invoke('serotine:update:download'),
+    installUpdate: restart => ipcRenderer.invoke('serotine:update:install', restart),
+    onUpdateState: callback => {
+      if (typeof callback !== 'function') throw new TypeError('Expected an update listener.')
+      const listener = (_event, state) => callback(state)
+      ipcRenderer.on('serotine:update-state', listener)
+      return () => ipcRenderer.removeListener('serotine:update-state', listener)
+    },
+    onShowAbout: callback => {
+      if (typeof callback !== 'function') throw new TypeError('Expected an About listener.')
+      const listener = () => callback()
+      ipcRenderer.on('serotine:show-about', listener)
+      return () => ipcRenderer.removeListener('serotine:show-about', listener)
+    },
+    onCheckUpdates: callback => {
+      if (typeof callback !== 'function') throw new TypeError('Expected an update check listener.')
+      const listener = () => callback()
+      ipcRenderer.on('serotine:check-updates', listener)
+      return () => ipcRenderer.removeListener('serotine:check-updates', listener)
+    },
     onBeforeQuit: callback => {
       if (typeof callback !== 'function') throw new TypeError('Expected a shutdown listener.')
       const listener = (_event, id) => {

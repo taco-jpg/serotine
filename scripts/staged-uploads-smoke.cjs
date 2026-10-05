@@ -43,7 +43,7 @@ async function main() {
     const errors = []
     async function fixture(owner, peer) {
       const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, serviceWorkers: 'block', acceptDownloads: true })
-      await context.addInitScript(() => { Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true }) })
+      await context.addInitScript(() => { Object.defineProperty(window, 'showSaveFilePicker', { value: () => { throw new Error('Downloads must not open a save-file picker') }, configurable: true }) })
       const page = await context.newPage()
       page.setDefaultTimeout(30000)
       page.on('pageerror', error => errors.push(error.message))

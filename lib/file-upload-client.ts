@@ -1,5 +1,4 @@
 import { apiFetch } from "../native/shared/transport"
-import { getNativeBridge } from "../native/shared/bridge"
 import { nativeStorageLimits } from "./native-persistence"
 import type { Identity } from "./identity"
 import type { AttachmentMeta } from "./messaging-types"
@@ -226,9 +225,8 @@ async function assertRemoteAvailable(metadata: AttachmentMeta, identity: Identit
 }
 
 export type AttachmentDownload = { blob?: Blob; dispose(): Promise<void> }
-type SaveWindow = Window & { showSaveFilePicker?: (options: { suggestedName: string }) => Promise<{ createWritable(): Promise<FileSystemWritableFileStream> }> }
 
-/** Call directly from a click to retain the browser's user gesture for its save picker. */
+/** Return verified bytes for previews or the browser download manager. Large files stay disk-backed in OPFS. */
 export async function downloadRemoteAttachment(metadata: AttachmentMeta, identity: Identity, options: {
   preview?: boolean; onProgress?: AttachmentProgress; signal?: AbortSignal
 } = {}): Promise<AttachmentDownload> {
@@ -236,24 +234,7 @@ export async function downloadRemoteAttachment(metadata: AttachmentMeta, identit
   const nativeLimit = nativeStorageLimits()?.fileBytes
   if (nativeLimit && metadata.size > nativeLimit) throw new Error("This file exceeds the installed beta's 16 MiB limit. Open it in the browser client instead.")
   const mime = attachmentPreviewKind(metadata.mime) ? metadata.mime : "application/octet-stream"
-  const saveWindow = typeof window !== "undefined" ? window as SaveWindow : undefined
-  if (!options.preview && !getNativeBridge() && saveWindow?.showSaveFilePicker) {
-    const handle = await saveWindow.showSaveFilePicker({ suggestedName: safeFilename(metadata.name) })
-    options.signal?.throwIfAborted()
-    const writer = await handle.createWritable()
-    const saved = await getVerifiedAttachment(identity.publicKey, metadata).catch(() => undefined)
-    if (saved) {
-      const reader = saved.stream().getReader()
-      try { while (true) { options.signal?.throwIfAborted(); const piece = await reader.read(); if (piece.done) break; await writer.write(piece.value) }; await writer.close() }
-      catch (error) { await writer.abort(error).catch(() => undefined); throw error }
-      finally { reader.releaseLock() }
-    } else {
-      try { await assertRemoteAvailable(metadata, identity) } catch (error) { await writer.abort(error).catch(() => undefined); throw error }
-      await streamAttachmentDownload(metadata, identity, writer, options.onProgress, options.signal)
-    }
-    await acknowledgeVerifiedAttachment(metadata, identity).catch(() => undefined)
-    return { dispose: async () => undefined }
-  }
+  options.signal?.throwIfAborted()
   const cached = await getVerifiedAttachment(identity.publicKey, metadata).catch(() => undefined)
   if (cached) {
     // Retry a lost acknowledgement only on the next explicit/open-preview use,
@@ -276,9 +257,9 @@ export async function downloadRemoteAttachment(metadata: AttachmentMeta, identit
     return { blob, dispose: async () => undefined }
   }
   // OPFS File objects remain disk-backed. Never concatenate a 1 GiB download in RAM.
-  if (typeof navigator === "undefined" || !navigator.storage?.getDirectory) throw new Error("This browser cannot save large files safely. Use a browser with file saving support, such as Chrome or Edge.")
+  if (typeof navigator === "undefined" || !navigator.storage?.getDirectory) throw new Error("This browser cannot prepare large downloads safely. Use a browser with local storage support, such as Chrome or Edge.")
   const estimate = await navigator.storage.estimate()
-  if (estimate.quota !== undefined && estimate.usage !== undefined && estimate.quota - estimate.usage < metadata.size + REMOTE_ATTACHMENT_CHUNK_BYTES) throw new Error("Your browser needs more free storage to download this file. Free some space or use a browser with a save-file picker.")
+  if (estimate.quota !== undefined && estimate.usage !== undefined && estimate.quota - estimate.usage < metadata.size + REMOTE_ATTACHMENT_CHUNK_BYTES) throw new Error("Your browser needs more free storage to download this file. Free some space and retry the download.")
   const directory = await navigator.storage.getDirectory(), tempName = `serotine-download-${crypto.randomUUID()}`
   const file = await directory.getFileHandle(tempName, { create: true })
   const dispose = async () => { await directory.removeEntry(tempName).catch(() => undefined) }

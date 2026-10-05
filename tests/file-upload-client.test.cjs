@@ -133,22 +133,59 @@ test('safe memory download is verified before becoming a Blob', async () => with
   await resource.dispose()
 }))
 
-test('native save picker streams verified pieces and cancellation never constructs a download Blob', async () => withRelay(async () => {
-  const owner = await identity(), prepared = await client.stageUpload(new File(['disk-backed download'], 'notes.txt'), owner)
+test('explicit download returns verified bytes even when a browser save picker is available', async () => withRelay(async server => {
+  const owner = await identity(), prepared = await client.stageUpload(new File(['browser download'], 'notes.txt'), owner)
   await prepared.publish()
-  const previousWindow = globalThis.window, sink = collector()
-  let pickerCalled = false
-  globalThis.window = { async showSaveFilePicker(options) { pickerCalled = true; assert.equal(options.suggestedName, 'notes.txt'); return { async createWritable() { return sink } } } }
+  const previousWindow = globalThis.window
+  globalThis.window = { showSaveFilePicker() { assert.fail('downloads must use browser download history, never the save picker') } }
   try {
-    const pending = client.downloadRemoteAttachment(prepared.metadata, owner)
-    assert.equal(pickerCalled, true, 'picker opens synchronously within the click gesture')
-    const saved = await pending
-    assert.equal(saved.blob, undefined); assert.equal(sink.closed, true)
-    assert.equal(Buffer.concat(sink.chunks).toString(), 'disk-backed download')
-    const controller = new AbortController()
-    globalThis.window.showSaveFilePicker = async () => { controller.abort(); return { createWritable() { assert.fail('cancelled selection must not open a writer') } } }
+    const resource = await client.downloadRemoteAttachment(prepared.metadata, owner)
+    assert.equal(await resource.blob.text(), 'browser download')
+    assert.equal(server.requests.some(request => request.action === 'file:read'), true)
+    await resource.dispose()
+    const controller = new AbortController(); controller.abort()
     await assert.rejects(client.downloadRemoteAttachment(prepared.metadata, owner, { signal: controller.signal }), error => error.name === 'AbortError')
   } finally { if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow }
+}))
+
+test('downloads above the memory limit use disk-backed storage and clean up corrupt output', async () => withRelay(async server => {
+  const owner = await identity(), size = client.MAX_MEMORY_DOWNLOAD_BYTES + 1
+  const prepared = await client.stageUpload(new File([new Uint8Array(size)], 'large.bin'), owner)
+  await prepared.publish()
+  const previousStorage = Object.getOwnPropertyDescriptor(navigator, 'storage')
+  const previousWindow = globalThis.window
+  const diskBlob = new Blob(['disk-backed file']), removed = []
+  let written = 0, closed = false, aborted = false, tempName
+  const directory = {
+    async getFileHandle(name, options) {
+      tempName = name; assert.equal(options.create, true)
+      return {
+        async createWritable() { return {
+          async write(bytes) { assert.ok(bytes.length <= files.REMOTE_ATTACHMENT_CHUNK_BYTES); written += bytes.length },
+          async close() { closed = true }, async abort() { aborted = true },
+        } },
+        async getFile() { assert.equal(closed, true); return { slice(start, end, mime) {
+          assert.equal(start, 0); assert.equal(end, size); assert.equal(mime, 'application/octet-stream'); return diskBlob
+        } } },
+      }
+    },
+    async removeEntry(name) { removed.push(name) },
+  }
+  Object.defineProperty(navigator, 'storage', { configurable: true, value: {
+    async estimate() { return { quota: 2 * size, usage: 0 } }, async getDirectory() { return directory },
+  } })
+  globalThis.window = { showSaveFilePicker() { assert.fail('large downloads must also bypass the save picker') } }
+  try {
+    const resource = await client.downloadRemoteAttachment(prepared.metadata, owner)
+    assert.equal(written, size); assert.equal(resource.blob, diskBlob); assert.deepEqual(removed, [])
+    await resource.dispose(); assert.deepEqual(removed, [tempName])
+    server.corrupt = true; closed = false
+    await assert.rejects(client.downloadRemoteAttachment(prepared.metadata, owner), /integrity/)
+    assert.equal(aborted, true); assert.equal(closed, false); assert.equal(removed.length, 2)
+  } finally {
+    if (previousStorage) Object.defineProperty(navigator, 'storage', previousStorage); else delete navigator.storage
+    if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow
+  }
 }))
 
 test('discard during a legacy Send cannot truncate the published attachment', async () => withRelay(async server => {

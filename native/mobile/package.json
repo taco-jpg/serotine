@@ -1,6 +1,6 @@
 {
   "name": "serotine-mobile",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "scripts": {
     "sync": "node scripts/prepare.cjs && cap sync && node scripts/pin-ios.cjs",

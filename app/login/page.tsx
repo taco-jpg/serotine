@@ -1,37 +1,54 @@
 import Link from "next/link"
-import { ArrowLeft, ArrowUpRight } from "lucide-react"
+import { ArrowLeft, ArrowUpRight, LockKeyhole, MessageCircle, ShieldCheck, Sparkles } from "lucide-react"
 import { LoginForm } from "@/components/auth/login-form"
 import { AppLogo } from "@/components/ui/app-logo"
 import { ModeToggle } from "@/components/mode-toggle"
 
+const principles = [
+  { icon: LockKeyhole, number: "01", title: "An identity on this device", detail: "No email address or phone number." },
+  { icon: ShieldCheck, number: "02", title: "Keys stay with you", detail: "Make a backup before you switch devices." },
+  { icon: MessageCircle, number: "03", title: "Your conversations, ready", detail: "Direct messages, groups, and shared files." },
+]
+
 export default function LoginPage() {
-  return <div className="app-surface min-h-dvh bg-background px-6 text-foreground sm:px-10 lg:px-14">
-    <header className="mx-auto flex min-h-20 max-w-6xl items-center justify-between gap-4 border-b border-border sm:min-h-24">
-      <Link href="/" aria-label="Serotine home" className="inline-flex min-h-11 items-center"><AppLogo /></Link>
-      <nav aria-label="Login navigation" className="flex items-center gap-3 sm:gap-6">
+  return <div className="app-surface login-page min-h-dvh bg-background px-5 text-foreground sm:px-8 lg:px-12">
+    <header className="login-header mx-auto flex max-w-[1320px] items-center justify-between gap-4">
+      <Link href="/" aria-label="Serotine home" className="login-brand"><AppLogo /></Link>
+      <nav aria-label="Login navigation" className="flex items-center gap-3 sm:gap-5">
         <ModeToggle />
-        <Link href="/" className="inline-flex min-h-11 items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-primary"><ArrowLeft className="size-3.5" /><span className="hidden sm:inline">Back to Serotine</span><span className="sm:hidden">Home</span></Link>
+        <Link href="/" className="login-home-link"><ArrowLeft className="size-3.5" /><span className="hidden sm:inline">Back to Serotine</span><span className="sm:hidden">Home</span></Link>
       </nav>
     </header>
-    <main className="mx-auto grid max-w-6xl gap-10 py-12 sm:py-16 lg:min-h-[calc(100dvh-12rem)] lg:grid-cols-[1.1fr_1fr] lg:items-center lg:gap-16 lg:py-20">
-      <section className="min-w-0">
-        <p className="app-eyebrow flex items-center gap-2"><span className="mr-2 inline-block size-1.5 bg-primary" aria-hidden="true" /> YOUR DEVICE. YOUR IDENTITY.</p>
-        <h1 className="mt-6 text-[clamp(3.1rem,6vw,5.5rem)] font-normal leading-[1.02] tracking-[-0.065em]">A private<br /><span className="text-primary">place to talk.</span></h1>
-        <p className="mt-6 max-w-sm text-sm leading-7 text-muted-foreground">A conversation starts with you. Create an identity here, or bring yours from another device.</p>
-        <div className="mt-8 grid grid-cols-2 border-y border-border sm:mt-10">
-          <div className="py-4 pr-4"><p className="app-eyebrow mb-2">01 / YOUR ADDRESS</p><p className="text-xs text-muted-foreground">No email or phone number.</p></div>
-          <div className="border-l border-border py-4 pl-4"><p className="app-eyebrow mb-2">02 / YOUR KEY</p><p className="text-xs text-muted-foreground">Stored on this device.</p></div>
+
+    <main className="login-layout mx-auto grid max-w-[1320px] gap-10 py-9 sm:py-12 lg:min-h-[calc(100dvh-154px)] lg:grid-cols-[minmax(0,1.1fr)_minmax(420px,.9fr)] lg:items-center lg:gap-20 lg:py-14">
+      <section className="login-story min-w-0">
+        <p className="login-kicker"><span aria-hidden="true" /> YOUR DEVICE / YOUR IDENTITY</p>
+        <h1>Come as<br /><em>you are.</em></h1>
+        <p className="login-lede">A private place to talk, made for the people you choose. Create a fresh identity here or bring yours with a backup.</p>
+        <div className="login-principles" aria-label="How Serotine works">
+          {principles.map(({ icon: Icon, number, title, detail }) => <div key={number}>
+            <span className="login-principle-number">{number}</span><span className="login-principle-icon"><Icon className="size-4" aria-hidden="true" /></span>
+            <span className="login-principle-copy"><strong>{title}</strong><small>{detail}</small></span>
+            <ArrowUpRight className="login-principle-arrow size-3.5" aria-hidden="true" />
+          </div>)}
         </div>
+        <p className="login-aside-note"><Sparkles className="size-4" aria-hidden="true" /> A conversation starts with you.</p>
       </section>
-      <section aria-label="Open your identity" className="min-w-0 border-t border-border pt-7 lg:border-t-0 lg:border-l lg:py-6 lg:pl-12">
-        <div className="mb-7 flex items-center justify-between gap-4"><p className="app-eyebrow">ENTER SEROTINE</p><ArrowUpRight className="size-5 text-primary" aria-hidden="true" /></div>
-        <div className="max-w-md"><LoginForm /></div>
-        <p className="mt-7 max-w-md border-t border-border pt-4 text-xs leading-6 text-muted-foreground">Your private key stays in this browser. Only share your public contact address.</p>
+
+      <section aria-label="Open your identity" className="login-card">
+        <div className="login-card-heading">
+          <span className="login-card-icon"><LockKeyhole className="size-4" aria-hidden="true" /></span>
+          <span><span className="login-kicker">YOUR SEROTINE SPACE</span><span className="login-card-caption">Private messaging, on your terms.</span></span>
+          <ArrowUpRight className="login-card-arrow size-4" aria-hidden="true" />
+        </div>
+        <div className="login-form-wrap"><LoginForm /></div>
+        <div className="login-card-foot"><span className="login-foot-dot" /> Your private key stays in this browser.</div>
       </section>
     </main>
-    <footer className="mx-auto flex max-w-6xl items-center justify-between gap-4 border-t border-border py-6">
-      <p className="app-eyebrow">A LITTLE LESS NOISE. A LITTLE MORE YOU.</p>
-      <span className="text-xl leading-none text-primary" aria-hidden="true">✳</span>
+
+    <footer className="login-footer mx-auto flex max-w-[1320px] items-center justify-between gap-4">
+      <span>serotine<span className="text-primary">.</span> <span className="login-footer-caption">A little closer, at your own pace.</span></span>
+      <span className="login-footer-signoff">PRIVATE BY DESIGN <span>·</span> OPEN ABOUT HOW</span>
     </footer>
   </div>
 }

@@ -20,6 +20,10 @@ import {
   type ThemePreferences,
 } from '@/lib/themes'
 
+// Keep the document's saved palette in place before a hydrated page can paint.
+// The server still uses a passive effect, where layout effects do not apply.
+const usePaletteLayoutEffect = typeof window === 'undefined' ? React.useEffect : React.useLayoutEffect
+
 type PaletteContextValue = {
   preferences: ThemePreferences
   palette: ColorTheme
@@ -44,7 +48,7 @@ function PaletteProvider({ children }: { children: React.ReactNode }) {
   const current = React.useRef(preferences)
   const { resolvedTheme } = useTheme()
 
-  React.useEffect(() => {
+  usePaletteLayoutEffect(() => {
     const refresh = () => {
       let next = defaultThemePreferences()
       try { next = parseThemePreferences(window.localStorage.getItem(THEME_STORAGE_KEY)) } catch { /* Use the readable built-in theme when storage is unavailable. */ }
@@ -61,7 +65,7 @@ function PaletteProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const palette = getColorTheme(preferences)
-  React.useEffect(() => {
+  usePaletteLayoutEffect(() => {
     if (!ready) return
     const root = document.documentElement
     // Read the actual class as next-themes changes it, including system and

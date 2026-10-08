@@ -30,7 +30,7 @@ export function SecretMessage({ content, expiresAt, secret = false }: { content:
   }, [expiresAt])
   if (expired) return <p className="text-sm opacity-70">{secret ? "Access key expired" : "Private message expired"}</p>
   return <div className={secret ? "min-w-44 space-y-2 py-1" : "space-y-1"} data-private-message={secret ? "secret" : "text"}>
-    {secret ? <><p className="flex items-center gap-2 text-sm font-medium"><KeyRound className="size-4" />Access key</p>{revealed ? <p className="max-h-52 overflow-y-auto whitespace-pre-wrap break-all rounded-md bg-background/15 p-2 font-mono text-sm" data-secret-value>{content}</p> : <p className="font-mono tracking-widest opacity-60" aria-label="Access key hidden">••••••••••••</p>}<div className="flex flex-wrap items-center gap-1"><Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-inherit hover:bg-current/10 hover:text-inherit" onClick={() => {
+    {secret ? <><p className="flex items-center gap-2 text-sm font-medium"><KeyRound className="size-4" />Access key</p>{revealed ? <p className="max-h-52 overflow-y-auto whitespace-pre-wrap break-all rounded-[2px] bg-background/15 p-2 font-mono text-sm" data-secret-value>{content}</p> : <p className="font-mono tracking-widest opacity-60" aria-label="Access key hidden">••••••••••••</p>}<div className="flex flex-wrap items-center gap-1"><Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-inherit hover:bg-current/10 hover:text-inherit" onClick={() => {
       if (Date.now() >= expiresAt) { setNow(Date.now()); return }
       clearTimeout(revealTimer.current); setRevealed(value => !value)
       revealTimer.current = setTimeout(() => setRevealed(false), 30000)

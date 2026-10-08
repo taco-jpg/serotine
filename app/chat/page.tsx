@@ -12,14 +12,14 @@ export default function ChatIndexPage() {
     + model.communities.filter(community => community.joined && !community.deleted && !preferences.archived.includes(community.id)).reduce((sum, community) => sum + community.unreadCount, 0)
 
   return <div className="flex h-full min-h-0 flex-col overflow-y-auto">
-    <header className="flex min-h-15 shrink-0 items-center justify-between gap-4 border-b border-border px-6">
+    <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-border px-6">
       <p className="app-eyebrow">Your inbox</p>
-      <span className="text-xs text-muted-foreground">{unread ? `${unread} unread` : "All caught up"}</span>
+      <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">{unread ? `${unread} unread` : "All caught up"}</span>
     </header>
     <div className="flex flex-1 flex-col justify-center px-8 py-10 lg:px-14">
       <div className="mx-auto w-full max-w-3xl">
         <div className="mb-7 flex items-center gap-3"><span aria-hidden="true" className="size-1.5 bg-primary" /><p className="app-eyebrow">A little less noise.</p></div>
-        <h1 className="max-w-2xl text-5xl leading-[1.02] font-medium tracking-[-0.065em] text-foreground lg:text-7xl">Good conversations.<br /><span className="text-primary">Your space.</span></h1>
+        <h1 className="max-w-2xl text-[clamp(2.5rem,5vw,4.5rem)] leading-[1.02] font-medium tracking-[-0.05em] text-foreground">Good conversations.<br /><span className="text-primary">Your space.</span></h1>
         <p className="mt-6 max-w-md text-sm leading-7 text-muted-foreground">{unread ? `You have ${unread} unread message${unread === 1 ? "" : "s"}. Open a conversation to pick up where you left off.` : "A thought, a plan, a conversation worth having. Choose a chat or invite someone in."}</p>
         {identity && <Button asChild className="mt-7 h-11 gap-7 px-4"><Link href={`/chat/${identity.publicKey}`}><UserRound className="size-4" />Message yourself<ArrowUpRight className="size-4" /></Link></Button>}
         <div className="mt-12 grid grid-cols-2 border-y border-border text-left lg:mt-16">

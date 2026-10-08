@@ -52,19 +52,19 @@ export function ModeToggle() {
             <Icon className="size-4" aria-hidden="true" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" style={recoveryStyle} className="w-60 rounded-lg p-1.5">
+        <DropdownMenuContent align="end" style={recoveryStyle} className="w-56 rounded-[3px] p-1">
           <DropdownMenuLabel className="app-eyebrow">Appearance</DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuRadioGroup value={mounted ? theme : undefined} onValueChange={setTheme} aria-label="Theme">
             {themeOptions.map(({ value, label: optionLabel, icon: OptionIcon }) => (
-              <DropdownMenuRadioItem key={value} value={value} className="rounded-md">
+              <DropdownMenuRadioItem key={value} value={value} className="rounded-[2px]">
                 <OptionIcon className="size-4 text-muted-foreground" aria-hidden="true" />
                 {optionLabel}
               </DropdownMenuRadioItem>
             ))}
           </DropdownMenuRadioGroup>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => { setSettingsError(""); setSettingsOpen(true) }} className="rounded-md">
+          <DropdownMenuItem onSelect={() => { setSettingsError(""); setSettingsOpen(true) }} className="rounded-[2px]">
             <Palette aria-hidden="true" />Palettes & custom themes
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => {
@@ -74,7 +74,7 @@ export function ModeToggle() {
               setSettingsError(error instanceof Error ? error.message : "Default palette restored, but could not be saved.")
               setSettingsOpen(true)
             }
-          }} className="rounded-md">
+          }} className="rounded-[2px]">
             <RotateCcw aria-hidden="true" />Restore default palette
           </DropdownMenuItem>
         </DropdownMenuContent>

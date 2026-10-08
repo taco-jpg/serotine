@@ -44,7 +44,7 @@ function BankThumbnail({ owner, entry }: { owner: string; entry: BankFile }) {
     return () => { stopped = true; request++; observer?.disconnect(); release() }
   }, [owner, entry.id, entry.size, kind])
   const url = preview?.id === entry.id ? preview.url : ""
-  return <div ref={container} className="flex h-28 w-full items-center justify-center overflow-hidden rounded-md bg-muted/50">
+  return <div ref={container} className="flex h-28 w-full items-center justify-center overflow-hidden rounded-[2px] bg-muted/50">
     {url && !failed && kind === "image" ? <img src={url} alt="" loading="lazy" className="h-full w-full object-contain" onError={() => setFailed(true)} />
       : url && !failed && kind === "video" ? <video src={url} muted playsInline preload="metadata" aria-label={`Video preview: ${entry.name}`} className="h-full w-full object-contain" onError={() => setFailed(true)} />
         : <FileIcon aria-hidden="true" className="size-9 text-muted-foreground" />}
@@ -162,7 +162,7 @@ function ScopedFileBankPicker({ owner, disabled = false, onSelectFile }: FileBan
       <p className="text-xs text-muted-foreground">Available space depends on your browser.{availableBytes !== undefined ? ` About ${formatFileSize(availableBytes)} is currently available to this site.` : ""}</p>
       {error && <div role="alert" className="space-y-2 text-sm text-destructive"><p>{error}</p><Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void refresh()}>Reload files</Button></div>}
       {notice && <p role="status" className="text-sm text-muted-foreground">{notice}</p>}
-      {editing && <form className="flex flex-wrap gap-2 rounded-lg border p-3" onSubmit={event => {
+      {editing && <form className="flex flex-wrap gap-2 rounded-[3px] border p-3" onSubmit={event => {
         event.preventDefault()
         void run(async current => { await renameBankFile(owner, editing.id, name); if (current()) { setEditing(null); await refresh() } })
       }}>
@@ -174,8 +174,8 @@ function ScopedFileBankPicker({ owner, disabled = false, onSelectFile }: FileBan
       <div className="max-h-[45dvh] min-h-28 overflow-y-auto overscroll-contain">
         {loading && !entries.length ? <p role="status" className="py-8 text-center text-sm text-muted-foreground">Loading saved files…</p>
           : !filtered.length ? <p className="py-8 text-center text-sm text-muted-foreground">{query.trim() ? "No saved files match your search." : "Your Backpack is empty. Add a GIF, image, video, or file to get started."}</p>
-            : <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3">{filtered.map(entry => <li key={entry.id} className="min-w-0 rounded-lg border p-2">
-              <button type="button" className="w-full rounded-md text-left focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50" disabled={unavailable} aria-label={`Choose ${entry.name}`} onClick={() => choose(entry)}>
+            : <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3">{filtered.map(entry => <li key={entry.id} className="min-w-0 rounded-[3px] border p-2">
+              <button type="button" className="w-full rounded-[2px] text-left focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50" disabled={unavailable} aria-label={`Choose ${entry.name}`} onClick={() => choose(entry)}>
                 <BankThumbnail owner={owner} entry={entry} />
                 <span className="mt-2 block truncate text-sm font-medium" title={entry.name}>{entry.name}</span>
                 <span className="block text-xs text-muted-foreground">{formatFileSize(entry.size)}{entry.mime === "image/gif" ? " · GIF" : entry.mime.startsWith("video/") ? " · Video" : ""}</span>

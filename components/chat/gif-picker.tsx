@@ -70,12 +70,12 @@ function GifSearch({ disabled, onSelect }: { disabled: boolean; onSelect: (url: 
         <Input value={query} onChange={event => setQuery(event.target.value)} maxLength={50} placeholder="Search GIPHY" aria-label="Search GIPHY" disabled={disabled} className="min-w-0" />
         <Button type="submit" disabled={disabled} aria-label="Search"><Search aria-hidden="true" /></Button>
       </form>
-      {!search && <div className="rounded-lg border border-dashed p-5 text-center">
+      {!search && <div className="rounded-[3px] border border-dashed p-5 text-center">
         <p className="mb-3 text-sm text-muted-foreground">Search for a reaction, or browse trending GIFs.</p>
         <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={() => { setQuery(""); startSearch("") }}>Browse trending</Button>
       </div>}
       <div aria-busy={busy} className="max-h-[min(45dvh,24rem)] min-w-0 overflow-y-auto overscroll-contain">
-        {gifs.length > 0 && <div className="grid grid-cols-2 items-start gap-2 sm:grid-cols-3">{gifs.map((gif, index) => <button key={`${gif.id}-${index}`} type="button" disabled={disabled || busy} className="group overflow-hidden rounded-lg border bg-muted/30 text-left focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50" aria-label={`Choose ${gif.title}`} onClick={() => onSelect(giphyPageUrl(gif.id))}>
+        {gifs.length > 0 && <div className="grid grid-cols-2 items-start gap-2 sm:grid-cols-3">{gifs.map((gif, index) => <button key={`${gif.id}-${index}`} type="button" disabled={disabled || busy} className="group overflow-hidden rounded-[3px] border bg-muted/30 text-left focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50" aria-label={`Choose ${gif.title}`} onClick={() => onSelect(giphyPageUrl(gif.id))}>
           <img src={gif.previewUrl} alt={gif.alt} referrerPolicy="no-referrer" loading="lazy" decoding="async" className="h-32 w-full object-contain transition-opacity group-hover:opacity-80" />
           {gif.creator && <span className="block truncate px-2 py-1 text-xs text-muted-foreground">@{gif.creator}</span>}
         </button>)}</div>}

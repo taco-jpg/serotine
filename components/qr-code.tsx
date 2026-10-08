@@ -19,7 +19,7 @@ export function QrCodeCard({ value, title = "Contact QR code", caption = "This Q
   }, [value])
   const url = result?.value === value ? result.url : null
   return <div className="flex min-w-0 flex-col items-center gap-2">
-    {url ? <img src={url} alt={title} width={240} height={240} className="aspect-square w-full max-w-60 rounded-lg border border-border bg-white" />
+    {url ? <img src={url} alt={title} width={240} height={240} className="aspect-square w-full max-w-60 rounded-[3px] border border-border bg-white" />
       : failure === value ? <p role="alert" className="text-sm text-destructive">The QR code could not be created. You can still copy the address.</p>
         : <div role="status" className="flex h-40 items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Creating QR code…</div>}
     <p className="text-center text-xs text-muted-foreground">{caption}</p>

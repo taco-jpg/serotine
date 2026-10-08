@@ -53,7 +53,7 @@ export function LoginForm() {
   if (checking) return <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Checking this browser…</p>
   return <div className="space-y-5">
     <h2 className="text-2xl font-normal tracking-[-0.04em]">{blocked ? "Check this browser." : restore ? "Bring your identity." : hasIdentity ? "Welcome back." : "Make yourself at home."}</h2>
-    {error && <p role="alert" className="rounded-sm border border-destructive/30 bg-destructive/5 p-3 text-sm leading-relaxed text-destructive">{error}</p>}
+    {error && <p role="alert" className="rounded-[2px] border border-destructive/30 bg-destructive/5 p-3 text-sm leading-relaxed text-destructive">{error}</p>}
     {blocked ? <Button className="h-12 w-full" onClick={() => setAttempt(value => value + 1)}>Check again</Button> : hasIdentity && !restore ? <>
       <p className="text-sm leading-relaxed text-muted-foreground">Your identity is ready on this browser. Pick up where you left off.</p>
       <Button className="w-full h-12" onClick={() => router.replace("/chat")}>Open messages</Button>

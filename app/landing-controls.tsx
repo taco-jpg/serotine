@@ -20,7 +20,7 @@ export function ThemeControl() {
   const { resolvedTheme, setTheme } = useTheme()
   const [ready, setReady] = useState(false)
   useEffect(() => setReady(true), [])
-  return <Button type="button" size="icon-lg" variant="ghost" className={styles.themeControl} disabled={!ready}
+  return <Button type="button" variant="ghost" className={styles.themeControl} disabled={!ready}
     aria-label={ready ? `Switch to ${resolvedTheme === "dark" ? "light" : "dark"} theme` : "Change color theme"}
     onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}>
     <svg className={styles.themeGlyph} viewBox="0 0 20 20" fill="none" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="6" stroke="currentColor" strokeWidth="1.2" /><path d="M10 4a6 6 0 0 1 0 12Z" fill="currentColor" /></svg>

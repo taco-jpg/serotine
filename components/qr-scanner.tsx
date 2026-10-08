@@ -135,9 +135,9 @@ export function QrScanner({ onScan, disabled = false, parseValue = parseContactC
   const cancel = () => { stop(); setCamera("idle"); setReading(false); setExpanded(false); setError(null); setStatus(null) }
   return <div className="min-w-0 space-y-2">
     {!expanded ? <Button type="button" size="sm" variant="outline" disabled={disabled} aria-expanded={false} aria-controls={`${id}-scanner`} onClick={() => { setExpanded(true); setError(null); setStatus(null) }}><QrCode className="size-4" />Scan QR code</Button>
-      : <div id={`${id}-scanner`} className="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
+      : <div id={`${id}-scanner`} className="space-y-3 rounded-[3px] border border-border bg-muted/30 p-3">
         <p className="text-xs text-muted-foreground">{description}</p>
-        <video ref={video} playsInline muted aria-label="QR camera preview" className={camera === "idle" ? "hidden" : "aspect-video w-full rounded-md bg-black object-cover"} />
+        <video ref={video} playsInline muted aria-label="QR camera preview" className={camera === "idle" ? "hidden" : "aspect-video w-full rounded-[2px] bg-black object-cover"} />
         <div className="flex flex-wrap gap-2">
           {camera === "idle" ? <Button type="button" size="sm" variant="outline" disabled={disabled || reading} onClick={() => void startCamera()}><Camera className="size-4" />Use camera</Button>
             : <Button type="button" size="sm" variant="outline" onClick={() => { stop(); setCamera("idle") }}>Stop camera</Button>}

@@ -17,11 +17,11 @@ async function main() {
   for (const entry of await fs.readdir(res)) {
     if (entry.startsWith('drawable')) await fs.rm(path.join(res, entry, 'splash.png'), {force:true})
   }
-  await fs.writeFile(path.join(res, 'drawable/splash.xml'), '<shape xmlns:android="http://schemas.android.com/apk/res/android"><solid android:color="#0b0e0b"/></shape>\n')
-  await fs.writeFile(path.join(res,'drawable/ic_launcher_background.xml'),'<shape xmlns:android="http://schemas.android.com/apk/res/android"><solid android:color="#0b0e0b"/></shape>\n')
+  await fs.writeFile(path.join(res, 'drawable/splash.xml'), '<shape xmlns:android="http://schemas.android.com/apk/res/android"><solid android:color="#04060c"/></shape>\n')
+  await fs.writeFile(path.join(res,'drawable/ic_launcher_background.xml'),'<shape xmlns:android="http://schemas.android.com/apk/res/android"><solid android:color="#04060c"/></shape>\n')
   await fs.rm(path.join(res,'drawable-v24/ic_launcher_foreground.xml'),{force:true})
   // A neutral launch image avoids displaying a different framework logo during startup.
   const splash = path.join(root,'ios/App/App/Assets.xcassets/Splash.imageset')
-  for(const name of await fs.readdir(splash)) if(name.endsWith('.png')) await sharp({create:{width:2732,height:2732,channels:3,background:'#0b0e0b'}}).png().toFile(path.join(splash,name))
+  for(const name of await fs.readdir(splash)) if(name.endsWith('.png')) await sharp({create:{width:2732,height:2732,channels:3,background:'#04060c'}}).png().toFile(path.join(splash,name))
 }
 main().catch(error=>{ process.stderr.write(error.message+'\n');process.exitCode=1 })

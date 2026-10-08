@@ -35,11 +35,11 @@ export function IdentitySecurity({ identity, onBusyChange }: { identity: Identit
       <p>You will get a new address. Your contacts will be copied, and your old identity and chats will stay saved separately on this browser. Share your new address with your contacts and ask group administrators to add it.</p>
       <p>Afterward, make a fresh backup with a new password and use it to link your phone. Replacing a backup file alone does not retire an identity.</p>
     </div>
-    <div className="rounded-md border p-3 text-xs">
+    <div className="rounded-[2px] border p-3 text-xs">
       <p className="mb-1 font-medium">Address being retired</p>
       <p className="break-all font-mono select-all">{identity.publicKey}</p>
     </div>
-    {error && <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
+    {error && <p role="alert" className="rounded-[2px] border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
     <label htmlFor={`${id}-confirm`} className="flex items-start gap-3 text-sm">
       <input id={`${id}-confirm`} type="checkbox" className="mt-1 size-4 shrink-0" checked={confirmed} disabled={busy} onChange={event => setConfirmed(event.target.checked)} />
       <span>I understand this permanently disables my old address on this server and my linked devices must use a new backup.</span>

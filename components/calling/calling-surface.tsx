@@ -31,7 +31,7 @@ function StreamVideo({ stream, label, mirror = false }: { stream: MediaStream | 
     if (stream) void node.play().catch(() => undefined)
     return () => { node.srcObject = null }
   }, [stream])
-  return <figure className="relative min-w-0 overflow-hidden rounded-md border border-border bg-muted">
+  return <figure className="relative min-w-0 overflow-hidden rounded-[2px] border border-border bg-muted">
     <video ref={ref} autoPlay muted playsInline aria-label={label} className={`aspect-video w-full object-contain ${mirror ? "-scale-x-100" : ""}`} />
     <figcaption className="border-t border-border bg-card px-3 py-2 text-xs text-muted-foreground">{label}</figcaption>
   </figure>
@@ -49,8 +49,8 @@ function DeviceControls() {
       <Button type="button" variant="outline" className="min-h-11" disabled={!editable} aria-label={snapshot.cameraEnabled ? "Turn camera off" : "Turn camera on"} aria-pressed={snapshot.cameraEnabled} onClick={() => void run(() => engine.toggleCamera())}>{snapshot.cameraEnabled ? <Video /> : <VideoOff />}{snapshot.cameraEnabled ? "Camera on" : "Camera off"}</Button>
       {snapshot.cameraEnabled && <Button type="button" variant="outline" className="min-h-11" disabled={!editable} onClick={() => void run(() => engine.switchCamera())}><Camera />Switch camera</Button>}
     </div>
-    {microphones.length > 0 && <div className="space-y-1"><Label htmlFor="call-microphone">Microphone</Label><select id="call-microphone" value={snapshot.microphoneId} disabled={!editable} onChange={event => void run(() => engine.selectMicrophone(event.target.value))} className="min-h-11 w-full min-w-0 rounded-md border border-input bg-card px-3 text-sm"><option value="">System default</option>{microphones.map((device, index) => <option key={device.deviceId || index} value={device.deviceId}>{device.label || `Microphone ${index + 1}`}</option>)}</select></div>}
-    {cameras.length > 0 && snapshot.cameraEnabled && <div className="space-y-1"><Label htmlFor="call-camera">Camera</Label><select id="call-camera" value={snapshot.cameraId} disabled={!editable} onChange={event => void run(() => engine.selectCamera(event.target.value))} className="min-h-11 w-full min-w-0 rounded-md border border-input bg-card px-3 text-sm"><option value="">System default</option>{cameras.map((device, index) => <option key={device.deviceId || index} value={device.deviceId}>{device.label || `Camera ${index + 1}`}</option>)}</select></div>}
+    {microphones.length > 0 && <div className="space-y-1"><Label htmlFor="call-microphone">Microphone</Label><select id="call-microphone" value={snapshot.microphoneId} disabled={!editable} onChange={event => void run(() => engine.selectMicrophone(event.target.value))} className="min-h-11 w-full min-w-0 rounded-[2px] border border-input bg-card px-3 text-sm"><option value="">System default</option>{microphones.map((device, index) => <option key={device.deviceId || index} value={device.deviceId}>{device.label || `Microphone ${index + 1}`}</option>)}</select></div>}
+    {cameras.length > 0 && snapshot.cameraEnabled && <div className="space-y-1"><Label htmlFor="call-camera">Camera</Label><select id="call-camera" value={snapshot.cameraId} disabled={!editable} onChange={event => void run(() => engine.selectCamera(event.target.value))} className="min-h-11 w-full min-w-0 rounded-[2px] border border-input bg-card px-3 text-sm"><option value="">System default</option>{cameras.map((device, index) => <option key={device.deviceId || index} value={device.deviceId}>{device.label || `Camera ${index + 1}`}</option>)}</select></div>}
   </div>
 }
 
@@ -167,7 +167,7 @@ export function CallingSurface() {
       <DialogContent className="max-h-[90dvh] overflow-y-auto">
         <DialogHeader><DialogTitle>{snapshot.direction === "incoming" ? "Answer" : "Call"} {peerLabel}</DialogTitle><DialogDescription>Review your devices before connecting. No media is sent until the call is accepted.</DialogDescription></DialogHeader>
         {busy ? <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Checking the calling connection and preparing your {snapshot.mode === "video" ? "microphone and camera" : "microphone"}. Allow device access if your browser asks.</p> : <>
-          {snapshot.cameraEnabled ? <StreamVideo stream={snapshot.localStream} label="Your camera preview · Only you can see this" mirror /> : <p className="flex min-h-24 items-center justify-center gap-2 rounded-md border border-border bg-muted text-sm text-muted-foreground"><VideoOff className="size-5" />Camera off</p>}
+          {snapshot.cameraEnabled ? <StreamVideo stream={snapshot.localStream} label="Your camera preview · Only you can see this" mirror /> : <p className="flex min-h-24 items-center justify-center gap-2 rounded-[2px] border border-border bg-muted text-sm text-muted-foreground"><VideoOff className="size-5" />Camera off</p>}
           <DeviceControls />
         </>}
         <p className="flex items-center gap-2 text-xs text-muted-foreground"><Shield className="size-4 shrink-0" />Direct encrypted call · Your network address may be visible to the other participant.</p>
@@ -182,8 +182,8 @@ export function CallingSurface() {
       <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader><DialogTitle>Call with {peerLabel}</DialogTitle><DialogDescription>{labels[snapshot.phase]} · {duration}. Collapse this view to keep chatting.</DialogDescription></DialogHeader>
         <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-          {snapshot.remoteCameraEnabled ? <StreamVideo stream={snapshot.remoteStream} label={peerLabel} /> : <div className="flex min-h-28 items-center justify-center gap-2 rounded-md border border-border bg-muted p-4 text-sm text-muted-foreground"><VideoOff className="size-5 shrink-0" /><span>{peerLabel} · Camera off</span></div>}
-          {snapshot.cameraEnabled ? <StreamVideo stream={snapshot.localStream} label="You" mirror /> : <div className="flex min-h-28 items-center justify-center gap-2 rounded-md border border-border bg-muted p-4 text-sm text-muted-foreground"><VideoOff className="size-5" />Your camera is off</div>}
+          {snapshot.remoteCameraEnabled ? <StreamVideo stream={snapshot.remoteStream} label={peerLabel} /> : <div className="flex min-h-28 items-center justify-center gap-2 rounded-[2px] border border-border bg-muted p-4 text-sm text-muted-foreground"><VideoOff className="size-5 shrink-0" /><span>{peerLabel} · Camera off</span></div>}
+          {snapshot.cameraEnabled ? <StreamVideo stream={snapshot.localStream} label="You" mirror /> : <div className="flex min-h-28 items-center justify-center gap-2 rounded-[2px] border border-border bg-muted p-4 text-sm text-muted-foreground"><VideoOff className="size-5" />Your camera is off</div>}
         </div>
         <p className="text-xs text-muted-foreground">{peerLabel}: {snapshot.remoteMicrophoneMuted ? "Microphone muted" : "Microphone on"}</p>
         <DeviceControls />

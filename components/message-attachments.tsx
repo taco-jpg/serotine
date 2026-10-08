@@ -35,8 +35,8 @@ function AttachmentCard({ attachment, query, mine, onRemove, disabled }: {
       <File aria-hidden="true" className="size-5 shrink-0 opacity-60" />
       <div className="min-w-0 flex-1"><p className="break-all text-sm font-medium"><MessageText content={attachment.name} query={query} /></p><p className="text-xs opacity-70">{formatFileSize(attachment.size)}{!url && " · Preview unavailable"}</p></div>
       {onRemove
-        ? <button type="button" aria-label={`Remove ${label}`} disabled={disabled} className="flex size-9 shrink-0 items-center justify-center rounded-lg hover:bg-current/10 disabled:opacity-40" onClick={onRemove}><X aria-hidden="true" className="size-4" /></button>
-        : url && <a href={url} download={attachment.name} aria-label={`Download ${label}`} className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${mine ? "hover:bg-current/10" : "hover:bg-accent"}`}><Download aria-hidden="true" className="size-4" /></a>}
+        ? <button type="button" aria-label={`Remove ${label}`} disabled={disabled} className="flex size-9 shrink-0 items-center justify-center rounded-[3px] hover:bg-current/10 disabled:opacity-40" onClick={onRemove}><X aria-hidden="true" className="size-4" /></button>
+        : url && <a href={url} download={attachment.name} aria-label={`Download ${label}`} className={`flex size-9 shrink-0 items-center justify-center rounded-[3px] ${mine ? "hover:bg-current/10" : "hover:bg-accent"}`}><Download aria-hidden="true" className="size-4" /></a>}
     </div>
   </li>
 }

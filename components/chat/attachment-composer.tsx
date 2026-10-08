@@ -425,18 +425,18 @@ export function AttachmentComposer({ owner = "", scopeKey = "", disabled = false
   }
 
   const unavailable = disabled || busy || preparing || recording || requesting
-  return <div ref={localTarget} className={`flex min-w-0 flex-col gap-2 rounded-lg ${dragging ? "bg-accent ring-2 ring-primary" : ""}`}>
+  return <div ref={localTarget} className={`flex min-w-0 flex-col gap-2 rounded-[3px] ${dragging ? "bg-accent ring-2 ring-primary" : ""}`}>
     <input ref={input} type="file" multiple className="hidden" aria-label="Choose attachments" disabled={unavailable} onChange={event => { void chooseFiles(Array.from(event.target.files || [])); event.target.value = "" }} />
     {preparing && <p role="status" className="text-xs text-muted-foreground">Preparing attachments…</p>}
     {dragging && <p role="status" className="text-sm font-medium">Drop files to preview before sending</p>}
-    {(requesting || recording) && <div className="flex flex-wrap items-center gap-2 rounded-lg border p-2">
+    {(requesting || recording) && <div className="flex flex-wrap items-center gap-2 rounded-[3px] border p-2">
       <p role="status" className="mr-auto text-sm">{requesting ? "Waiting for microphone permission…" : `Recording ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`}</p>
       {recording && <Button type="button" size="sm" variant="outline" onClick={() => { if (recorder.current?.state === "recording") recorder.current.stop() }}><Square aria-hidden="true" />Stop & preview</Button>}
       <Button type="button" size="sm" variant="ghost" onClick={cancelRecording}><X aria-hidden="true" />Cancel</Button>
     </div>}
     {!!queue.length && <div className="space-y-2">
       <ul aria-label="Pending attachments" className="flex max-h-64 gap-2 overflow-auto pb-1">
-        {queue.map(item => <li key={item.id} className="relative w-40 shrink-0 space-y-1 rounded-lg border border-border bg-muted/40 p-2">
+        {queue.map(item => <li key={item.id} className="relative w-40 shrink-0 space-y-1 rounded-[3px] border border-border bg-muted/40 p-2">
           <Button type="button" variant="secondary" size="icon" className="absolute right-1 top-1 z-10 size-6 rounded-full" disabled={item.publishing || preparing || recording || requesting || (busy && !item.stage)} aria-label={`Remove ${safeFilename(item.file.name)}`} onClick={() => {
             if (item.publishing) return
             if (item.stage) discardStage(item.stage)
@@ -471,7 +471,7 @@ export function AttachmentComposer({ owner = "", scopeKey = "", disabled = false
       {!!queue.length && <span className="ml-1 text-xs text-muted-foreground">{queue.length} queued</span>}
       {toolbarHint && <div className="ml-auto text-xs text-muted-foreground">{toolbarHint}</div>}
     </div>
-    <div className={settingsOpen && toolbarVisible ? "space-y-2 rounded-lg border border-border bg-card p-3" : "hidden"}>
+    <div className={settingsOpen && toolbarVisible ? "space-y-2 rounded-[3px] border border-border bg-card p-3" : "hidden"}>
       <p className="text-xs text-muted-foreground">Files up to {formatFileSize(maxFileBytes)} each{maxFileBytes < attachmentFileLimit() ? " in this group" : ""}. You can also drop files into the chat or paste them into the message box.</p>
       {maxFileBytes < attachmentFileLimit() && <p className="text-xs text-muted-foreground">Larger groups have a smaller limit because files are sent separately to each member. Direct chats support {formatFileSize(attachmentFileLimit())}.</p>}
       <AutoCompactFilesSetting enabled={autoCompact} onChange={setAutoCompact} disabled={unavailable} />

@@ -11,7 +11,7 @@ import { MAX_DISPLAY_MATH_LENGTH, MAX_INLINE_MATH_LENGTH, messageFormattingIssue
 
 function mentionedText(text: string, highlight: string, mentions: string[], displayName?: MentionDisplayName): ReactNode[] {
   return partitionMentionText(text, mentions, displayName).map((part, index) => part.publicKey
-    ? <span key={index} className="rounded bg-primary/10 px-0.5 font-medium text-primary"><MessageText content={part.text} query={highlight} /></span>
+    ? <span key={index} className="rounded-[2px] bg-primary/10 px-1 py-px font-medium text-primary"><MessageText content={part.text} query={highlight} /></span>
     : <MessageText key={index} content={part.text} query={highlight} />)
 }
 
@@ -33,7 +33,7 @@ function linkedText(text: string, highlight: string, mentions: string[], display
     result.push(gifId
       ? <GifMessage key={`gif-${index}-${gifId}`} id={gifId} />
       : safe
-      ? <a key={`link-${index}`} href={href} target="_blank" rel="noopener noreferrer" className="break-all underline underline-offset-4"><MessageText content={href} query={highlight} /></a>
+      ? <a key={`link-${index}`} href={href} target="_blank" rel="noopener noreferrer" className="break-all text-primary underline decoration-primary/35 underline-offset-[3px] hover:decoration-primary"><MessageText content={href} query={highlight} /></a>
       : <MessageText key={`text-${index}`} content={href} query={highlight} />)
     result.push(<Fragment key={`tail-${index}`}>{match[0].slice(href.length)}</Fragment>)
     start = index + match[0].length
@@ -55,7 +55,7 @@ export const MathPreview = memo(function MathPreview({ expression, displayMode =
       return { error: error instanceof Error ? error.message.replace(/^KaTeX parse error:\s*/, "") : "Check your formula syntax." }
     }
   }, [expression, displayMode])
-  if (result.error !== undefined) return <span className={showErrors ? "block rounded-md border border-destructive/30 bg-destructive/5 p-2" : undefined}>
+  if (result.error !== undefined) return <span className={showErrors ? "block rounded-[2px] border border-destructive/30 bg-destructive/5 p-2" : undefined}>
     <MessageText content={source} query={highlight} />
     {showErrors && <span className="mt-1 block font-sans text-xs text-destructive" role="status">LaTeX error: {result.error}</span>}
   </span>
@@ -63,9 +63,9 @@ export const MathPreview = memo(function MathPreview({ expression, displayMode =
 })
 
 export const CodePreview = memo(function CodePreview({ code, language = "code", highlight = "" }: { code: string; language?: string; highlight?: string }) {
-  return <div className="my-2 min-w-0 overflow-hidden rounded-lg border border-current/15 bg-current/5">
-    <div className="border-b border-current/10 px-3 py-1 font-sans text-xs opacity-70">{language || "code"}</div>
-    <pre className="max-w-full overflow-x-auto p-3 text-xs leading-relaxed" tabIndex={0} aria-label={`${language || "code"} code`}><code><MessageText content={code} query={highlight} /></code></pre>
+  return <div className="my-2 min-w-0 overflow-hidden rounded-[2px] border border-current/15 bg-current/5">
+    <div className="border-b border-current/10 px-3 py-1 font-mono text-[9.5px] uppercase tracking-[0.14em] opacity-60">{language || "code"}</div>
+    <pre className="max-w-full overflow-x-auto p-3 font-mono text-[12px] leading-relaxed" tabIndex={0} aria-label={`${language || "code"} code`}><code><MessageText content={code} query={highlight} /></code></pre>
   </div>
 })
 
@@ -77,7 +77,7 @@ export const RichMessage = memo(function RichMessage({ text, highlight = "", cla
     if (part.kind === "text") return <Fragment key={index}>{linkedText(part.text, highlight, mentions, displayName, preview)}</Fragment>
     if (part.kind === "code") return part.block
       ? <CodePreview key={index} code={part.text} language={part.language} highlight={highlight} />
-      : <code key={index} className="rounded bg-current/10 px-1 py-0.5 font-mono text-[0.9em]"><MessageText content={part.text} query={highlight} /></code>
+      : <code key={index} className="rounded-[2px] bg-current/10 px-1 py-0.5 font-mono text-[0.88em] tracking-normal"><MessageText content={part.text} query={highlight} /></code>
     if (renderedMath++ >= 64) return <MessageText key={index} content={part.source} query={highlight} />
     return <MathPreview key={index} expression={part.text} displayMode={part.display} source={part.source} highlight={highlight} showErrors={preview} />
   })}{issue && <span className="mt-1 block font-sans text-xs text-destructive" role="status">{issue}</span>}</div>

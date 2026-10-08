@@ -57,7 +57,7 @@ export function AttachmentView({ metadata, chunks, identity }: { metadata: Attac
   const url = activeResult?.url
   const visual = preview === "image" || preview === "video"
   const previewFailed = !!url && failedPreviewUrl === url
-  return <div className={`min-w-0 max-w-full ${visual ? "w-[28rem]" : "w-80 rounded-lg border border-current/15 bg-background/20 px-2"}`}>
+  return <div className={`min-w-0 max-w-full ${visual ? "w-[28rem]" : "w-80 rounded-[3px] border border-current/15 bg-background/20 px-2"}`}>
     {!complete && <div role="status" className="space-y-1 text-xs">
       <span>Receiving file · {progress}%</span>
       <progress aria-label="File received" max={100} value={progress} className="h-1 w-full" />
@@ -66,17 +66,17 @@ export function AttachmentView({ metadata, chunks, identity }: { metadata: Attac
     {activeResult?.error && <p role="alert" className="text-sm text-destructive">{activeResult.error}</p>}
     {url && !previewFailed && <>
       {preview === "image" && <Dialog key={url}>
-        <DialogTrigger asChild><button type="button" aria-label={`Enlarge ${name}`} className="group relative block min-h-11 min-w-11 w-full cursor-zoom-in overflow-hidden rounded-lg bg-black/10 focus-visible:outline-2 focus-visible:outline-offset-2">
+        <DialogTrigger asChild><button type="button" aria-label={`Enlarge ${name}`} className="group relative block min-h-11 min-w-11 w-full cursor-zoom-in overflow-hidden rounded-[3px] bg-black/10 focus-visible:outline-2 focus-visible:outline-offset-2">
           <img src={url} alt={name} loading="lazy" decoding="async" className="block max-h-[min(16rem,35dvh)] w-full object-contain" onError={() => setFailedPreviewUrl(url)} />
-          <span aria-hidden="true" className="absolute bottom-2 right-2 flex items-center gap-1 rounded-md bg-black/65 px-2 py-1 text-xs text-white"><Maximize2 className="size-3" />Enlarge</span>
+          <span aria-hidden="true" className="absolute bottom-2 right-2 flex items-center gap-1 rounded-[2px] bg-black/65 px-2 py-1 text-xs text-white"><Maximize2 className="size-3" />Enlarge</span>
         </button></DialogTrigger>
         <DialogContent className="max-w-6xl gap-3 p-3 sm:p-4">
           <DialogHeader><DialogTitle className="text-base leading-snug [overflow-wrap:anywhere]">{name}</DialogTitle><DialogDescription>{formatFileSize(metadata.size)} · Full image</DialogDescription></DialogHeader>
-          <img src={url} alt={name} decoding="async" className="mx-auto block max-h-[calc(var(--app-height,100dvh)-12rem)] max-w-full rounded-lg object-contain" onError={() => setFailedPreviewUrl(url)} />
-          <a href={url} download={name} className="inline-flex min-h-11 w-fit items-center gap-2 rounded-md px-2 text-sm underline underline-offset-4 focus-visible:outline-2"><Download className="size-4" aria-hidden="true" />Download original</a>
+          <img src={url} alt={name} decoding="async" className="mx-auto block max-h-[calc(var(--app-height,100dvh)-12rem)] max-w-full rounded-[3px] object-contain" onError={() => setFailedPreviewUrl(url)} />
+          <a href={url} download={name} className="inline-flex min-h-11 w-fit items-center gap-2 rounded-[2px] px-2 text-sm underline underline-offset-4 focus-visible:outline-2"><Download className="size-4" aria-hidden="true" />Download original</a>
         </DialogContent>
       </Dialog>}
-      {preview === "video" && <video controls playsInline preload="metadata" src={url} aria-label={`Play ${name}`} className="block max-h-[min(16rem,35dvh)] w-full rounded-lg bg-black object-contain" onError={() => setFailedPreviewUrl(url)}>Your browser cannot play this video. Download it below.</video>}
+      {preview === "video" && <video controls playsInline preload="metadata" src={url} aria-label={`Play ${name}`} className="block max-h-[min(16rem,35dvh)] w-full rounded-[3px] bg-black object-contain" onError={() => setFailedPreviewUrl(url)}>Your browser cannot play this video. Download it below.</video>}
       {preview === "audio" && <audio controls preload="metadata" src={url} aria-label={metadata.kind === "voice" ? "Play voice message" : `Play ${name}`} className="mt-2 w-full max-w-full" onError={() => setFailedPreviewUrl(url)}>Your browser cannot play this audio. Download it below.</audio>}
     </>}
     {previewFailed && <p role="status" className="px-1 text-xs">This {preview} cannot be previewed in your browser. You can still download the original below.</p>}
@@ -86,7 +86,7 @@ export function AttachmentView({ metadata, chunks, identity }: { metadata: Attac
         <p title={name} className="min-w-0 truncate text-xs font-medium">{metadata.kind === "voice" ? "Voice message · " : ""}{name}</p>
         <p className="shrink-0 text-xs opacity-70">{formatFileSize(metadata.size)}{metadata.mime === "image/gif" ? " · GIF" : ""}</p>
       </div>
-      {url && <a href={url} download={name} aria-label={`Download ${name}`} title="Download original" className="inline-flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-current/10 focus-visible:outline-2"><Download className="size-4" aria-hidden="true" /></a>}
+      {url && <a href={url} download={name} aria-label={`Download ${name}`} title="Download original" className="inline-flex size-11 shrink-0 items-center justify-center rounded-[2px] hover:bg-current/10 focus-visible:outline-2"><Download className="size-4" aria-hidden="true" /></a>}
     </div>
   </div>
 }
@@ -144,20 +144,20 @@ function RemoteAttachmentView({ metadata, identity }: { metadata: AttachmentMeta
 
   const currentDescriptor = sessionRef.current?.descriptor === descriptor
   const url = currentDescriptor ? state.url : undefined
-  return <div className={`min-w-0 max-w-full ${visual && url ? "w-[28rem]" : "w-80 rounded-lg border border-current/15 bg-background/20 px-2"}`}>
+  return <div className={`min-w-0 max-w-full ${visual && url ? "w-[28rem]" : "w-80 rounded-[3px] border border-current/15 bg-background/20 px-2"}`}>
     {state.loading && <div role="status" className="space-y-1 text-xs"><span>Downloading · {state.progress}%</span><progress aria-label="File downloaded" max={100} value={state.progress} className="h-1 w-full" /></div>}
     {state.error && <p role="alert" className="text-sm text-destructive">{state.error}</p>}
     {state.saved && <p role="status" className="text-xs">File saved.</p>}
     {url && !previewFailed && <>
-      {preview === "image" && <Dialog key={url}><DialogTrigger asChild><button type="button" aria-label={`Enlarge ${name}`} className="block min-h-11 min-w-11 w-full cursor-zoom-in overflow-hidden rounded-lg focus-visible:outline-2"><img src={url} alt={name} loading="lazy" decoding="async" className="block max-h-[min(16rem,35dvh)] w-full object-contain" onError={() => setPreviewFailed(true)} /></button></DialogTrigger><DialogContent className="max-w-6xl gap-3 p-3 sm:p-4"><DialogHeader><DialogTitle className="text-base [overflow-wrap:anywhere]">{name}</DialogTitle><DialogDescription>{formatFileSize(metadata.size)} · Full image</DialogDescription></DialogHeader><img src={url} alt={name} className="mx-auto block max-h-[calc(var(--app-height,100dvh)-12rem)] max-w-full object-contain" onError={() => setPreviewFailed(true)} /></DialogContent></Dialog>}
-      {preview === "video" && <video controls playsInline preload="metadata" src={url} aria-label={`Play ${name}`} className="block max-h-[min(16rem,35dvh)] w-full rounded-lg object-contain" onError={() => setPreviewFailed(true)} />}
+      {preview === "image" && <Dialog key={url}><DialogTrigger asChild><button type="button" aria-label={`Enlarge ${name}`} className="block min-h-11 min-w-11 w-full cursor-zoom-in overflow-hidden rounded-[3px] focus-visible:outline-2"><img src={url} alt={name} loading="lazy" decoding="async" className="block max-h-[min(16rem,35dvh)] w-full object-contain" onError={() => setPreviewFailed(true)} /></button></DialogTrigger><DialogContent className="max-w-6xl gap-3 p-3 sm:p-4"><DialogHeader><DialogTitle className="text-base [overflow-wrap:anywhere]">{name}</DialogTitle><DialogDescription>{formatFileSize(metadata.size)} · Full image</DialogDescription></DialogHeader><img src={url} alt={name} className="mx-auto block max-h-[calc(var(--app-height,100dvh)-12rem)] max-w-full object-contain" onError={() => setPreviewFailed(true)} /></DialogContent></Dialog>}
+      {preview === "video" && <video controls playsInline preload="metadata" src={url} aria-label={`Play ${name}`} className="block max-h-[min(16rem,35dvh)] w-full rounded-[3px] object-contain" onError={() => setPreviewFailed(true)} />}
       {preview === "audio" && <audio controls preload="metadata" src={url} aria-label={metadata.kind === "voice" ? "Play voice message" : `Play ${name}`} className="mt-2 w-full max-w-full" onError={() => setPreviewFailed(true)} />}
     </>}
     {previewFailed && <p className="text-xs">This file cannot be previewed. Download the original below.</p>}
     <div className="flex min-h-11 min-w-0 items-center gap-2"><FileText className="size-4 shrink-0" aria-hidden="true" /><div className="min-w-0 flex-1"><p title={name} className="truncate text-xs font-medium">{metadata.kind === "voice" ? "Voice message · " : ""}{name}</p><p className="text-xs opacity-70">{formatFileSize(metadata.size)}</p></div>
-      {state.loading ? <button type="button" aria-label={`Cancel downloading ${name}`} className="inline-flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-current/10" onClick={() => sessionRef.current?.controller?.abort()}><X className="size-4" /></button>
-        : url ? <a href={url} download={name} aria-label={`Download ${name}`} className="inline-flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-current/10"><Download className="size-4" /></a>
-          : <button type="button" disabled={!identity} aria-label={`Download ${name}`} className="inline-flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-current/10 disabled:opacity-50" onClick={() => { if (sessionRef.current) void download(sessionRef.current, false) }}><Download className="size-4" /></button>}
+      {state.loading ? <button type="button" aria-label={`Cancel downloading ${name}`} className="inline-flex size-11 shrink-0 items-center justify-center rounded-[2px] hover:bg-current/10" onClick={() => sessionRef.current?.controller?.abort()}><X className="size-4" /></button>
+        : url ? <a href={url} download={name} aria-label={`Download ${name}`} className="inline-flex size-11 shrink-0 items-center justify-center rounded-[2px] hover:bg-current/10"><Download className="size-4" /></a>
+          : <button type="button" disabled={!identity} aria-label={`Download ${name}`} className="inline-flex size-11 shrink-0 items-center justify-center rounded-[2px] hover:bg-current/10 disabled:opacity-50" onClick={() => { if (sessionRef.current) void download(sessionRef.current, false) }}><Download className="size-4" /></button>}
     </div>
     {!url && !state.loading && !state.saved && <p className="pb-2 text-xs opacity-70">Verified downloads are kept locally. Server copies are temporary and may disappear after everyone receives the file. {metadata.remote?.expiresAt ? `Expires by ${new Date(metadata.remote.expiresAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}.` : "Uncollected files expire within 30 days."}</p>}
   </div>

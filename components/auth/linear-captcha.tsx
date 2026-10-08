@@ -156,7 +156,7 @@ export function LinearCaptcha({ onVerify, className }: LinearCaptchaProps) {
         </Button>
       </div>
 
-      <div className="relative flex w-full justify-center rounded-sm border border-border bg-background p-3 select-none">
+      <div className="relative flex w-full justify-center rounded-[2px] border border-border bg-background p-3 select-none">
         <svg width={WIDTH} height={HEIGHT} viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="h-auto max-w-full">
           <defs>
             <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">

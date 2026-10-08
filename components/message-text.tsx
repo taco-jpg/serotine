@@ -9,6 +9,6 @@ export function MessageText({ content, query }: { content: string; query: string
   const pattern = literalSearch(query)
   if (!pattern) return <>{content}</>
   return <>{content.split(pattern).map((part, index) => index % 2
-    ? <mark key={index} className="rounded-sm bg-amber-200 text-zinc-950">{part}</mark>
+    ? <mark key={index} className="rounded-[2px] bg-primary/25 text-foreground ring-1 ring-primary/40">{part}</mark>
     : <Fragment key={index}>{part}</Fragment>)}</>
 }

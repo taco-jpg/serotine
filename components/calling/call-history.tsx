@@ -53,7 +53,7 @@ function ConversationCallHistory({ owner, conversationId }: { owner: string; con
   }, [owner, conversationId])
   const error = actionError || loadError
   if (!rows.length && !error) return null
-  return <details className="mb-3 rounded-md border border-border px-3 py-2 text-xs text-muted-foreground" data-call-history>
+  return <details className="mb-3 rounded-[2px] border border-border px-3 py-2 text-xs text-muted-foreground" data-call-history>
     <summary className="cursor-pointer py-1 font-medium">Call history{rows.length ? ` (${rows.length})` : ""}</summary>
     {error && <p role="alert" className="py-2">{error}</p>}
     <ul className="mt-1 divide-y divide-border">

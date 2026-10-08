@@ -47,23 +47,23 @@ export const PRESET_THEMES: ColorTheme[] = [
   // Each palette carries its hue through the canvas, sidebar, and conversation.
   // Keep the default colors and derived tokens in sync with globals.css.
   preset('default', 'Default',
-    ['#eeefe7', '#171b14', '#f6f7ef', '#dfe7d2', '#3c5f22', '#5d6655', '#f3f4ec', '#171b14', '#d5ebba', '#233019'],
-    ['#0b0e0b', '#eeefe7', '#131812', '#17200e', '#ccff89', '#a1aa99', '#171d14', '#eeefe7', '#30411d', '#eff5e7']),
+    ['#f5fefd', '#04060c', '#ffffff', '#e9f3f2', '#0f3933', '#4f6169', '#ffffff', '#04060c', '#d7efe9', '#04231e'],
+    ['#04060c', '#f5fefd', '#080b13', '#06080e', '#97fce4', '#7e8c99', '#0e131c', '#f5fefd', '#0f3933', '#e4fff7']),
   preset('forest', 'Forest',
-    ['#e4f5eb', '#102d21', '#f4fcf7', '#c7ead5', '#075b38', '#3e6351', '#effbf3', '#102d21', '#ace1c2', '#103b26'],
-    ['#061a13', '#e3fff0', '#0c2b20', '#073424', '#64f5ae', '#9accb1', '#103d2b', '#e3fff0', '#155738', '#e7fff0']),
+    ['#f2fbf5', '#04160f', '#ffffff', '#e2f1e9', '#0b5138', '#4c6157', '#ffffff', '#04160f', '#d3ede0', '#06301f'],
+    ['#040d09', '#effcf5', '#07130e', '#050f0b', '#6ff0b2', '#7f9689', '#0c1c15', '#effcf5', '#0e3d2a', '#dffff0']),
   preset('ocean', 'Ocean',
-    ['#e5efff', '#132849', '#f4f8ff', '#c9ddff', '#164aa6', '#435c82', '#edf4ff', '#132849', '#b3d1ff', '#12376b'],
-    ['#071630', '#e9f2ff', '#10264a', '#0c2145', '#86c3ff', '#a2b9dc', '#15325a', '#e9f2ff', '#1d467c', '#f0f7ff']),
+    ['#f2f7ff', '#061431', '#ffffff', '#e0ecfa', '#123c86', '#4c5c72', '#ffffff', '#061431', '#d3e5fb', '#08204b'],
+    ['#040912', '#eef6ff', '#070e1c', '#050b16', '#7cc4ff', '#7f8fa3', '#0d1726', '#eef6ff', '#12375f', '#dceeff']),
   preset('lavender', 'Lavender',
-    ['#f1eaff', '#2e1746', '#fbf6ff', '#e2d1fa', '#643198', '#6a507f', '#f6edff', '#2e1746', '#d4b8f0', '#3c1e55'],
-    ['#1c0c30', '#f5eaff', '#2c1446', '#321850', '#d5adff', '#bca3d8', '#392057', '#f5eaff', '#532d7b', '#fbf2ff']),
+    ['#f8f5ff', '#180a34', '#ffffff', '#ebe2fa', '#4c2280', '#5d516f', '#ffffff', '#180a34', '#e1d2f8', '#25114a'],
+    ['#080418', '#f5eeff', '#0c0819', '#0a0616', '#c9a6ff', '#8d829f', '#16102a', '#f5eeff', '#2e1b4d', '#efe3ff']),
   preset('rose', 'Rose',
-    ['#fff0f5', '#4b1730', '#fff8fb', '#f8d2e2', '#94234e', '#80516b', '#fff1f7', '#4b1730', '#f5b9d0', '#5e1936'],
-    ['#2a0c1b', '#ffedf4', '#40142a', '#49132e', '#ff9bc6', '#d4a2b9', '#511c36', '#ffedf4', '#702446', '#fff0f6']),
+    ['#fff5f9', '#2e0a1b', '#ffffff', '#fbe0ec', '#8c1f49', '#6b525d', '#ffffff', '#2e0a1b', '#f8cfe0', '#420f26'],
+    ['#100409', '#ffeff5', '#150810', '#130610', '#ff9ac3', '#a08794', '#22101a', '#ffeff5', '#4a1730', '#ffe0ed']),
   preset('monochrome', 'Monochrome',
-    ['#ededed', '#171717', '#fafafa', '#dadada', '#242424', '#575757', '#ffffff', '#171717', '#bfbfbf', '#151515'],
-    ['#101010', '#f7f7f7', '#1c1c1c', '#242424', '#f5f5f5', '#b7b7b7', '#292929', '#f7f7f7', '#454545', '#ffffff']),
+    ['#f7f7f7', '#0a0a0a', '#ffffff', '#e9e9e9', '#1c1c1c', '#5a5a5a', '#ffffff', '#0a0a0a', '#e2e2e2', '#101010'],
+    ['#060606', '#f7f7f7', '#101010', '#0a0a0a', '#ededed', '#919191', '#191919', '#f7f7f7', '#2b2b2b', '#ffffff']),
 ]
 
 const hexColor = /^#[\da-f]{6}$/i
@@ -106,7 +106,7 @@ function readColors(value: unknown, fallback: ThemeColors, label: string): Theme
     if (!own(input, key)) continue
     const color = input[key]
     if (typeof color !== 'string' || !hexColor.test(color)) {
-      throw new Error(`${label}.${key} must be a six-digit hex color, such as #ccff89.`)
+      throw new Error(`${label}.${key} must be a six-digit hex color, such as #97fce4.`)
     }
     colors[key] = color.toLowerCase()
   }
@@ -224,11 +224,15 @@ function readable(background: string, preferred?: string): string {
 
 export function themeVariables(colors: ThemeColors): Record<string, string> {
   const c = readColors(colors, PRESET_THEMES[0].light, 'Colors')
+  const dark = luminance(c.background) < 0.3
+  // Dark canvases need the accent pulled down before it becomes a surface:
+  // mixing a light mint straight into a near-black row reads as grey.
+  const deep = dark ? mix(c.accent, c.background, 0.62) : c.accent
   const muted = mix(c.surface, c.foreground, 0.07)
-  const accent = mix(c.surface, c.accent, 0.2)
-  const sidebarAccent = mix(c.sidebar, c.accent, 0.24)
-  const border = mix(c.background, c.foreground, 0.14)
-  const destructive = luminance(c.background) < 0.3 ? '#fb7185' : '#b91c1c'
+  const accent = dark ? mix(c.surface, deep, 0.32) : mix(c.surface, c.accent, 0.1)
+  const sidebarAccent = dark ? mix(c.sidebar, deep, 0.55) : mix(c.sidebar, c.accent, 0.14)
+  const border = mix(c.background, c.foreground, 0.11)
+  const destructive = dark ? '#ff6b81' : '#a4231b'
   return {
     '--background': c.background,
     '--foreground': c.foreground,
@@ -247,7 +251,7 @@ export function themeVariables(colors: ThemeColors): Record<string, string> {
     '--destructive': destructive,
     '--destructive-foreground': readable(destructive),
     '--border': border,
-    '--input': mix(c.background, c.foreground, 0.2),
+    '--input': mix(c.background, c.foreground, 0.18),
     '--ring': c.accent,
     '--chart-1': c.accent,
     '--chart-2': mix(c.accent, c.foreground, 0.25),

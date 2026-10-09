@@ -47,8 +47,8 @@ export const PRESET_THEMES: ColorTheme[] = [
   // Each palette carries its hue through the canvas, sidebar, and conversation.
   // Keep the default colors and derived tokens in sync with globals.css.
   preset('default', 'Default',
-    ['#eeefe7', '#171b14', '#f6f7ef', '#dfe7d2', '#3c5f22', '#5d6655', '#f3f4ec', '#171b14', '#d5ebba', '#233019'],
-    ['#0b0e0b', '#eeefe7', '#131812', '#17200e', '#ccff89', '#a1aa99', '#171d14', '#eeefe7', '#30411d', '#eff5e7']),
+    ['#eef9f6', '#03211c', '#f8fffd', '#e0f3ee', '#03211c', '#46665f', '#fbfffe', '#03211c', '#b9f5e6', '#03211c'],
+    ['#060b10', '#eaf4f2', '#0c161c', '#091218', '#97fce4', '#8a9ca0', '#0e1a21', '#eaf4f2', '#0f3733', '#effffb']),
   preset('forest', 'Forest',
     ['#e4f5eb', '#102d21', '#f4fcf7', '#c7ead5', '#075b38', '#3e6351', '#effbf3', '#102d21', '#ace1c2', '#103b26'],
     ['#061a13', '#e3fff0', '#0c2b20', '#073424', '#64f5ae', '#9accb1', '#103d2b', '#e3fff0', '#155738', '#e7fff0']),
@@ -106,7 +106,7 @@ function readColors(value: unknown, fallback: ThemeColors, label: string): Theme
     if (!own(input, key)) continue
     const color = input[key]
     if (typeof color !== 'string' || !hexColor.test(color)) {
-      throw new Error(`${label}.${key} must be a six-digit hex color, such as #ccff89.`)
+      throw new Error(`${label}.${key} must be a six-digit hex color, such as #97fce4.`)
     }
     colors[key] = color.toLowerCase()
   }
@@ -238,6 +238,7 @@ export function themeVariables(colors: ThemeColors): Record<string, string> {
     '--popover-foreground': c.foreground,
     '--primary': c.accent,
     '--primary-foreground': readable(c.accent),
+    '--primary-hover': mix(c.accent, c.background, 0.2),
     '--secondary': muted,
     '--secondary-foreground': readable(muted, c.foreground),
     '--muted': muted,

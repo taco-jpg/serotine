@@ -71,6 +71,7 @@ async function main() {
     const owner = await identity()
     const messageId = await page.evaluate(async ({ owner, compactKey }) => {
       localStorage.setItem('serotine_identity_v2', JSON.stringify(owner))
+      localStorage.setItem('theme', 'light')
       localStorage.setItem(compactKey, 'true')
       const event = await SerotinePalette.signMessagingEvent({ version: 3, id: crypto.randomUUID(), author: owner.publicKey, conversationId: owner.publicKey, recipients: [], kind: 'message', payload: { content: 'Palette changes keep this message compact.' }, timestamp: Date.now() }, owner)
       await SerotinePalette.saveStoredEvent(owner.publicKey, { key: SerotinePalette.eventStorageKey(event), event, local: true, delivered: [], receivedAt: event.timestamp })

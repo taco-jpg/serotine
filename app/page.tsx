@@ -25,13 +25,14 @@ export default function LandingPage() {
       <a href="#main" className={styles.skipLink}>Skip to content</a>
       <header className={styles.header}>
         <Link href="/" className={styles.brand} aria-label="Serotine home"><AppLogo /></Link>
-        <div className={styles.headerActions}><ThemeControl /><Button asChild variant="outline"><Link prefetch={false} href="/login">Open app <Arrow diagonal /></Link></Button></div>
+        <nav className={styles.nav} aria-label="Primary"><a href="#at-a-glance">At a glance</a><a href={repository} target="_blank" rel="noopener noreferrer">Source</a></nav>
+        <div className={styles.headerActions}><ThemeControl /><Button asChild className={styles.headerCta}><Link prefetch={false} href="/login">Open app <Arrow diagonal /></Link></Button></div>
       </header>
       <main id="main" tabIndex={-1}>
         <section className={styles.story} data-story aria-labelledby="hero-title">
           <div className={styles.camera}>
             <div className={styles.intro}>
-              <p className={styles.kicker}>A place for conversation</p>
+              <p className={`${styles.kicker} ${styles.pill}`}><span className="live-dot" aria-hidden="true" />A place for conversation</p>
               <h1 id="hero-title">A little <em>closer.</em></h1>
               <p className={styles.productContext}>Private messaging for the people you choose.</p>
             </div>
@@ -89,6 +90,16 @@ export default function LandingPage() {
           </div>
         </section>
 
+        <div className={styles.ticker} aria-hidden="true">
+          <div className={styles.tickerTrack}>
+            {[0, 1].map(copy => (
+              <ul key={copy}>
+                {["End-to-end encrypted", "Direct peer-to-peer when available", "Groups", "Files", "Voice calls", "Communities", "No phone number"].map(item => <li key={item}>{item}</li>)}
+              </ul>
+            ))}
+          </div>
+        </div>
+
         <section id="your-conversation" className={styles.continuation} data-continuation aria-labelledby="continuation-title">
           <div className={styles.continuationCopy}><p className={styles.kicker}>From an ordinary moment</p><h2 id="continuation-title">To a conversation<br /><em>only you could have.</em></h2></div>
           <div className={styles.echo}>
@@ -96,6 +107,15 @@ export default function LandingPage() {
             <div className={styles.echoNote}><span className={styles.sender}>You</span><p data-echo>“I thought you’d like this.”</p><span className={styles.echoCaption} data-echo-caption>It can start with something small.</span></div>
           </div>
           <div className={styles.invitation}><Button asChild size="lg" className={styles.primaryEntry}><Link prefetch={false} href="/login">Start your conversation <Arrow /></Link></Button><p className={styles.entryNote}>An identity on your device.<br />No email address or phone number.</p></div>
+        </section>
+        <section id="at-a-glance" className={styles.glance} aria-labelledby="glance-title">
+          <h2 id="glance-title" className={styles.glanceTitle}>Serotine at a glance</h2>
+          <ul className={styles.glanceGrid}>
+            <li className={styles.glanceItem}><span className={styles.glanceEyebrow}>Sign-up</span><strong className={styles.glanceValue}>0</strong><span className={styles.glanceLabel}>email addresses or phone numbers needed to begin.</span></li>
+            <li className={styles.glanceItem}><span className={styles.glanceEyebrow}>Identity</span><strong className={styles.glanceValue}>On <span>device</span></strong><span className={styles.glanceLabel}>An identity you create on your own device.</span></li>
+            <li className={styles.glanceItem}><span className={styles.glanceEyebrow}>Relay</span><strong className={styles.glanceValue}>7 <span>days</span></strong><span className={styles.glanceLabel}>at most, that the relay keeps an encrypted payload.</span></li>
+            <li className={styles.glanceItem}><span className={styles.glanceEyebrow}>Source</span><strong className={styles.glanceValue}>Open</strong><span className={styles.glanceLabel}>Read the implementation and its limits.</span></li>
+          </ul>
         </section>
       </main>
       <footer className={styles.footer}>
